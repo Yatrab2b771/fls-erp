@@ -1,0 +1,41 @@
+# Render Blueprint — deploys the API only (apps/api). The web app deploys
+# separately to Vercel (see DEPLOY.md); Postgres is expected to be an
+# external free instance (e.g. Neon), referenced via DATABASE_URL below,
+# not a Render-managed database (Render's free Postgres expires after a
+# fixed window — Neon's free tier doesn't).
+#
+# In the Render dashboard: New + Blueprint, point it at this repo, and
+# fill in the marked env vars (sync: false) when prompted.
+services:
+  - type: web
+    name: fls-erp-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: .
+    buildCommand: npm install && npm run build:api && npm run db:migrate:deploy
+    startCommand: npm run start:api
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 8h
+      - key: LOG_LEVEL
+        value: info
+      - key: UPLOADS_DIR
+        value: uploads
+      - key: FRONTEND_URL
+        sync: false
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: SEED_DEMO_PASSWORD
+        sync: false

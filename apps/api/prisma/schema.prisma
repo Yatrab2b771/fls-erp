@@ -1,0 +1,618 @@
+// FLS ERP v2 — rebuilt from scratch. Phase 1-2 schema: auth/RBAC + the
+// Order Tracking core (Customer / PurchaseOrder / PurchaseOrderItem /
+// Batch). Packaging BOM, RM Costing, and the MPS GMP pipeline land in
+// their own phases (see the plan report), each as its own migration —
+// same incremental-schema approach the pre-rebuild version used
+// successfully.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Departments named directly in the source documents (Store, Purchase,
+// Accounts, Production, QC/QA, Dispatch, PPIC), plus two explicit
+// additions from the requirements conversation: ADMIN (platform) and BD
+// (Business Development — who receives a PO from a company/brand and
+// enters it into the system). Nothing here is inherited from the old
+// build's role enum without being re-justified.
+enum RoleName {
+  ADMIN
+  BD
+  PPIC
+  STORE
+  PURCHASE
+  ACCOUNTS
+  PRODUCTION
+  QA_QC
+  DISPATCH
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  isActive     Boolean  @default(true)
+  // Bumped on password change/reset/deactivation — included in every JWT,
+  // so a token minted before the bump stops verifying immediately instead
+  // of staying valid until its natural expiry.
+  tokenVersion Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  roles                  UserRole[]
+  auditLogs              AuditLog[]
+  customersCreated       Customer[]
+  purchaseOrders         PurchaseOrder[]         @relation("PurchaseOrderCreatedBy")
+  purchaseOrdersReviewed PurchaseOrder[]         @relation("PurchaseOrderReviewedBy")
+  uploadedDocuments      PurchaseOrderDocument[]
+  bomPlans               BomPlan[]
+  rmPlans                RmPlan[]
+  batchStageEvents       BatchStageEvent[]
+  inventoryTxns          InventoryTransaction[]
+
+  @@map("users")
+}
+
+model Role {
+  id   String   @id @default(uuid())
+  name RoleName @unique
+
+  users UserRole[]
+
+  @@map("roles")
+}
+
+// Explicit join table (not implicit m2m) so a grant carries an actor +
+// timestamp — "who gave this user this role, and when" is itself an audit
+// fact worth keeping.
+model UserRole {
+  userId    String
+  roleId    String
+  grantedAt DateTime @default(now())
+  grantedBy String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// Append-only. Nothing in the app updates or deletes a row here.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  action     String // e.g. "user.login", "purchase_order.created"
+  entityType String // e.g. "User", "PurchaseOrder"
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — Order Tracking core: Customer onboarding, the PO header +
+// repeatable product line items (per the corrected real-world shape: one
+// PO from a company can list several distinct products), and the
+// per-product-line Batch execution tracker.
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id              String   @id @default(uuid())
+  companyName     String
+  contactPerson   String?
+  contactNo       String?
+  gstNo           String?
+  email           String?
+  deliveryAddress String?
+  createdById     String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  createdBy      User            @relation(fields: [createdById], references: [id])
+  purchaseOrders PurchaseOrder[]
+
+  @@map("customers")
+}
+
+// Draft → BD Approve/Reject → (approved) forwarded to PPIC/RM to release
+// and plan against. A PO starts as DRAFT the moment BD enters it from the
+// customer's order; PPIC can't create a Batch off any of its line items
+// until it's APPROVED (see POST /api/batches).
+enum PurchaseOrderStatus {
+  DRAFT
+  APPROVED
+  REJECTED
+}
+
+// The PO *header* — BD receives this from a company/brand. Product-level
+// detail lives on PurchaseOrderItem, not here, because one PO can list
+// several distinct products (e.g. Medicine A, B, C) each needing its own
+// quantity/unit/volume and its own production tracking downstream.
+model PurchaseOrder {
+  id               String              @id @default(uuid())
+  customerId       String
+  poNumber         String?
+  brandName        String?
+  orderDate        DateTime?
+  regulatoryBody   String? // FSSAI | AYUSH
+  regulatoryStatus String? // Applied | Not Applied | Issued
+  status           PurchaseOrderStatus @default(DRAFT)
+  reviewedById     String?
+  reviewedAt       DateTime?
+  rejectionReason  String? // required by the API when rejecting
+  createdById      String
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  customer   Customer                @relation(fields: [customerId], references: [id])
+  createdBy  User                    @relation("PurchaseOrderCreatedBy", fields: [createdById], references: [id])
+  reviewedBy User?                   @relation("PurchaseOrderReviewedBy", fields: [reviewedById], references: [id])
+  items      PurchaseOrderItem[]
+  documents  PurchaseOrderDocument[]
+
+  @@map("purchase_orders")
+}
+
+// The uploaded PO as actually received — a photo or a PDF — kept
+// separately from the header so a PO can carry more than one attachment
+// (e.g. a scan plus a follow-up clarification email as PDF).
+model PurchaseOrderDocument {
+  id              String   @id @default(uuid())
+  purchaseOrderId String
+  filename        String
+  mimeType        String
+  storagePath     String
+  uploadedById    String
+  uploadedAt      DateTime @default(now())
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  uploadedBy    User          @relation(fields: [uploadedById], references: [id])
+
+  @@map("purchase_order_documents")
+}
+
+// One row per product on the PO — the "Add More" repeating line item the
+// intake form needs. Each line item can require more than one production
+// batch to fulfill its quantity, so Batch hangs off this, not off the PO.
+model PurchaseOrderItem {
+  id              String   @id @default(uuid())
+  purchaseOrderId String
+  productName     String
+  dosageForm      String?
+  quantity        Float
+  unit            String // KG | SKU | other free-text
+  volume          Float?
+  packSize        String?
+  packType        String?
+  bomRef          String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  batches       Batch[]
+  // Optional read-only cross-links into the planning modules — see
+  // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
+  bomPlans      BomPlan[]
+  rmPlans       RmPlan[]
+
+  @@map("purchase_order_items")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (rebuilt) — Order Tracking's Batch is now ONE real pipeline, not
+// a loose set of independently-fillable sections plus a separate,
+// disconnected "MPS Pipeline" module. The previous split ("link, don't
+// merge") turned out to be a mistake: the MPS module's 13 steps (Market
+// Requirement Init, CapEx/OpEx Approval, Cold Chain & Transit...) were
+// ported from an unrelated old prototype and had no basis in FLS's actual
+// documents. Re-reading the source documents directly —
+// `ERP Diagram_08.05.2026.docx` (the real department sequence + the one
+// documented reject branch: QC → Debit Note Issue) and `Date.docx` /
+// `FLS -MPS.xlsx` (literally titled "Master Production Scheduling (MPS)"
+// — the exact field groups below) — confirms this Batch model *is* what
+// the company means by "MPS". So it's now gated and gets a real audit
+// trail (BatchStageEvent), replacing the fictional MpsCycle entirely.
+// ---------------------------------------------------------------------------
+
+// Phase 8 — simplified to the flow given directly by the business
+// (Customer Order → Draft PO → BD Approve/Reject → PO Release → per-line
+// Batch Creation → one 9-step pipeline per batch). This deliberately
+// removes Bill Updates, Incoming QC (and its Debit Note Issue reject
+// branch), and Production Plan from the earlier ERP-diagram
+// reconstruction above — a known, accepted tradeoff: no incoming-material
+// QC checkpoint and no billing checkpoint before Indent Issue anymore.
+// Production Plan's two fields (unit, dispatchPlanDate) move onto Indent
+// Issue below, since PPIC already owned both stages.
+enum BatchStageId {
+  PO_RELEASE // Purchase
+  MATERIAL_RECEIVED // Store — covers both material receipt and GRN, same department back-to-back
+  INDENT_ISSUE // PPIC — also carries former Production Plan fields (unit, dispatch plan date)
+  DISPENSING // Store — RM/PM dispensing & issue to Production
+  PRODUCTION_EXECUTION // Production
+  QA_GATE_MFG // QA_QC — post-manufacturing gate ("after approval of Quality, bulk is transferred to packing area")
+  PACKAGING // Production
+  QA_GATE_PACKAGING // QA_QC — post-packaging gate
+  BILLING_EWAY_BILL // Accounts
+  DISPATCH_PLAN // Dispatch — terminal
+}
+
+// One production batch against one PO line item, walking through the
+// stages above in order. Every section below is nullable and owned by the
+// department whose stage it belongs to — enforced by the single
+// PATCH /:id/stage endpoint, not one editable form.
+model Batch {
+  id                  String       @id @default(uuid())
+  purchaseOrderItemId String
+  batchNo             String?
+  currentStageId      BatchStageId @default(PO_RELEASE)
+
+  // PPIC — Indent Issue + Production Plan stages
+  prodIndentSlipSign String?
+  productionPlanDate DateTime?
+  unit               String? // manufacturing unit code, e.g. 22/41/48/59
+  dispatchPlanDate   DateTime?
+
+  // PO Release — Purchase
+  rmPoDate       DateTime?
+  rmExpectedDate DateTime?
+  rmStatus       String? // Available | Partial Available
+  rmRemarks      String?
+  pmPoDate       DateTime?
+  pmExpectedDate DateTime?
+  pmStatus       String?
+  pmRemarks      String?
+
+  // Dispensing — Store
+  rmDispensingDate    DateTime?
+  rmDispensingRemarks String?
+  pmIssuedDate        DateTime?
+  pmDispensingRemarks String?
+
+  // Production Execution
+  manufacturingStartDate DateTime?
+  manufacturingStatus    String?
+  manufacturingEndDate   DateTime?
+  manufacturingRemarks   String?
+
+  // QA Gate — Manufacturing (includes "Hold")
+  mfgQaStatus String? // Approved | Not Approved | Hold
+  mfgQcStatus String?
+  mfgRemarks  String?
+
+  // Packaging
+  packagingStartDate DateTime?
+  packagingStatus    String?
+  packagingEndDate   DateTime?
+  packagingRemarks   String?
+
+  // QA Gate — Packaging (narrower option list, no "Hold")
+  packQaStatus String? // Approved | Not approved
+  packQcStatus String?
+  packRemarks  String?
+
+  // Dispatch Plan
+  dispatchDate         DateTime?
+  dispatchedQty        Float?
+  shipperQty           Float?
+  totalShipperWeight   Float?
+  transportType        String? // By Land | By Courier | By Air
+  remainingQty         Float?
+  customerConfirmation String? // Received | Not Received
+  anyRemarks           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+  stageEvents       BatchStageEvent[]
+
+  @@map("batches")
+}
+
+enum BatchStageAction {
+  FORWARD
+  REJECT
+  JUMP // Admin-only override — moves a batch straight to any stage, bypassing the normal forward/reject sequence
+}
+
+// The persistent, append-only audit trail for every stage transition —
+// who moved it, from where to where, forward or sent back, and why (a
+// note is required on reject, matching the real "if not correct, send it
+// back" business rule). Replaces MpsStepEvent.
+model BatchStageEvent {
+  id          String           @id @default(uuid())
+  batchId     String
+  fromStageId BatchStageId
+  toStageId   BatchStageId
+  action      BatchStageAction
+  note        String?
+  actorId     String
+  createdAt   DateTime         @default(now())
+
+  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  actor User  @relation(fields: [actorId], references: [id])
+
+  @@index([batchId])
+  @@map("batch_stage_events")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — Packaging BOM module, ported from the pre-rebuild version's
+// packaging-bom module (same engine, same schema shape) — this piece
+// wasn't part of what needed re-deriving from the FLS documents; it's an
+// existing, working calculator being carried into the new stack.
+// ---------------------------------------------------------------------------
+
+// One brand = one "sheet" in the old uploaded workbook this replaces.
+model Brand {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  skus Sku[]
+
+  @@map("brands")
+}
+
+// One packaging-spec row per SKU. Field names mirror the source
+// spreadsheet columns 1:1 so the BOM engine logic ports unchanged.
+model Sku {
+  id          String @id @default(uuid())
+  brandId     String
+  productName String
+
+  jar                   String?
+  wadMm                 String?
+  scoopMl               String?
+  silicaGelGms          String?
+  silicaGelQtyNos       String?
+  authenticationSticker String?
+  capSticker            String?
+  capLockSticker        String?
+  neckSleeve            String?
+  shrink                String?
+  innerPackaging        String?
+  leaflet               String?
+  corrugatedBoxMm       String?
+  packagingSizeNos      String?
+
+  // Any imported spreadsheet columns not modeled above — kept so an
+  // import never silently drops data even before the schema has a column
+  // for it.
+  extra Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand     Brand         @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  planItems BomPlanItem[]
+
+  @@unique([brandId, productName])
+  @@map("skus")
+}
+
+enum BomPlanStatus {
+  DRAFT
+  CALCULATED
+}
+
+// The persistent, shared "Plan Queue" — a batch of SKUs with target
+// yields, calculated together into one aggregated procurement BOM.
+model BomPlan {
+  id          String        @id @default(uuid())
+  name        String
+  dateFrom    DateTime?
+  dateTo      DateTime?
+  status      BomPlanStatus @default(DRAFT)
+  createdById String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Snapshot of the last calculateMasterBOM() run — kept so a previously
+  // generated procurement plan stays reproducible even if the catalog
+  // changes afterwards.
+  resultSnapshot Json?
+  calculatedAt   DateTime?
+
+  // Optional link to the specific PO product this plan's packaging is
+  // for — same "link, don't merge" shape as Batch.mpsCycleId: a plan can
+  // exist unattached (ad-hoc catalog planning), and one product could in
+  // principle get more than one plan revision, so this isn't unique/
+  // required either direction.
+  purchaseOrderItemId String?
+
+  createdBy         User               @relation(fields: [createdById], references: [id])
+  purchaseOrderItem PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+  items             BomPlanItem[]
+
+  @@map("bom_plans")
+}
+
+model BomPlanItem {
+  id          String   @id @default(uuid())
+  planId      String
+  skuId       String
+  targetYield Int
+  addedById   String
+  addedAt     DateTime @default(now())
+
+  plan BomPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  sku  Sku     @relation(fields: [skuId], references: [id])
+
+  @@map("bom_plan_items")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 — RM formulation & commercial costing module, ported from the
+// pre-rebuild version's rm-costing module (same engine, same schema
+// shape) — like Packaging BOM, this is an existing working calculator
+// being carried into the new stack, not something re-derived from the
+// FLS documents.
+// ---------------------------------------------------------------------------
+
+// One recipe = one "sheet" in the old uploaded formulation workbook.
+// `totalServing` is the sum of every ingredient's g/serving at import
+// time — kept denormalized because the costing engine reads it on every
+// calculation and it never changes without the ingredient list changing too.
+model Recipe {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  totalServing Float
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ingredients RecipeIngredient[]
+  planItems   RmPlanItem[]
+
+  @@map("recipes")
+}
+
+// One row per formulation ingredient. Field names mirror the source
+// spreadsheet columns 1:1, same porting rule as Sku.
+model RecipeIngredient {
+  id          String @id @default(uuid())
+  recipeId    String
+  name        String
+  brand       String
+  costPerKg   Float
+  gPerServing Float
+  proteinPct  Float  @default(0)
+  sortOrder   Int    @default(0)
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@map("recipe_ingredients")
+}
+
+enum RmPlanStatus {
+  DRAFT
+  CALCULATED
+}
+
+// The persistent, shared "Batch Queue" + cost simulator — a batch of
+// recipes with per-batch KG sizes and one shared costing profile,
+// calculated together into per-batch waterfalls and one aggregated RM
+// procurement rollup.
+model RmPlan {
+  id          String       @id @default(uuid())
+  name        String
+  dateFrom    DateTime?
+  dateTo      DateTime?
+  status      RmPlanStatus @default(DRAFT)
+  createdById String
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  // Mfg loss %, pack size (g), testing/jar/scoop/label/conversion/CCB
+  // costs, profit % and GST % — shared across every batch in the plan.
+  costingParams Json
+
+  // Snapshot of the last calculateMasterRMBOM() run — kept so a
+  // previously generated costing/procurement result stays reproducible
+  // even if the recipe catalog changes afterwards.
+  resultSnapshot Json?
+  calculatedAt   DateTime?
+
+  // Optional link to the specific PO product this plan's formulation
+  // costing is for — same shape as BomPlan.purchaseOrderItemId above.
+  purchaseOrderItemId String?
+
+  createdBy         User               @relation(fields: [createdById], references: [id])
+  purchaseOrderItem PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
+  items             RmPlanItem[]
+
+  @@map("rm_plans")
+}
+
+model RmPlanItem {
+  id          String   @id @default(uuid())
+  planId      String
+  recipeId    String
+  batchSizeKg Float
+  addedById   String
+  addedAt     DateTime @default(now())
+
+  plan   RmPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  recipe Recipe @relation(fields: [recipeId], references: [id])
+
+  @@map("rm_plan_items")
+}
+
+// Phase 6's separate MPS GMP pipeline module (MpsCycle/MpsStepEvent/
+// InventoryItem, a fixed 13-step checklist workflow ported from an
+// unrelated old prototype) has been retired — see the Batch model comment
+// above. It had no basis in FLS's actual documents; "MPS" turned out to
+// already be the Batch pipeline itself.
+
+// ---------------------------------------------------------------------------
+// Phase 7 — Warehouse-level Inventory, reconstructed from "Inventory
+// tool.xlsx": two log sections, MATERIAL RECEIVED and MATERIAL Issued to
+// day store, sharing the same field set (Date, Category RM/PM, Item, Unit,
+// Count, Size, Vendor Name) and distinguished only by direction. The item
+// field is described there as "List from Sanjay & naveen. Option to add
+// item" — a maintained master list, not free text — so it's its own
+// catalog (InventoryItem) that transactions reference, which also lets
+// stock-on-hand be computed per item (sum RECEIVED − sum ISSUED). This is
+// unrelated to the retired InventoryItem above (different shape, different
+// module) — the name is reused because it's the same real-world noun.
+// ---------------------------------------------------------------------------
+
+enum InventoryCategory {
+  RM
+  PM
+}
+
+enum InventoryTxnType {
+  RECEIVED
+  ISSUED
+}
+
+model InventoryItem {
+  id        String            @id @default(uuid())
+  category  InventoryCategory
+  name      String
+  unit      String? // typical unit of measure, e.g. Kg / Ltr / Count
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  transactions InventoryTransaction[]
+
+  @@unique([category, name])
+  @@map("inventory_items")
+}
+
+// One row per Material Received / Material Issued entry off the Warehouse
+// tool. `unit`/`size` are recorded per-entry (not just read off the item)
+// because the sheet's examples show them varying per delivery.
+model InventoryTransaction {
+  id          String           @id @default(uuid())
+  itemId      String
+  type        InventoryTxnType
+  date        DateTime
+  unit        String // Ltr / Kg / Count, as recorded on this entry
+  quantity    Float // the sheet's "Count" field
+  size        String? // Optional — e.g. Inch / ft / Kg / Ltr sizing note
+  vendorName  String? // mainly for RECEIVED; optional either direction
+  createdById String
+  createdAt   DateTime         @default(now())
+
+  item      InventoryItem @relation(fields: [itemId], references: [id])
+  createdBy User          @relation(fields: [createdById], references: [id])
+
+  @@index([itemId])
+  @@index([type, date])
+  @@map("inventory_transactions")
+}

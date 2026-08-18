@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    @apply bg-slate-50 text-slate-800;
+  }
+  ::-webkit-scrollbar {
+    @apply h-2 w-2;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-300;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400;
+  }
+}
+
+@layer components {
+  /* --- Buttons --- */
+  .btn {
+    @apply relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-2.5 text-[13px] font-bold tracking-tight transition-all duration-150 ease-out disabled:pointer-events-none disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn bg-gradient-to-b from-brand-600 to-brand-700 text-white shadow-[0_1px_0_rgba(255,255,255,.15)_inset,0_4px_12px_-2px_rgba(79,70,229,.5)] hover:shadow-[0_1px_0_rgba(255,255,255,.15)_inset,0_6px_18px_-2px_rgba(79,70,229,.6)] hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_0_rgba(255,255,255,.1)_inset,0_2px_6px_-2px_rgba(79,70,229,.5)];
+  }
+  .btn-ghost {
+    @apply btn border border-slate-200 bg-white text-slate-600 shadow-soft hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900;
+  }
+  .btn-danger {
+    @apply btn border border-rose-200 bg-rose-50 text-rose-600 hover:border-rose-300 hover:bg-rose-100;
+  }
+  .btn-sm {
+    @apply px-3 py-1.5 text-[11px];
+  }
+  .btn-icon {
+    @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700;
+  }
+
+  /* --- Form fields --- */
+  .field {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-[13px] font-medium text-slate-800 shadow-soft outline-none transition-all duration-150 placeholder:text-slate-400 focus:border-brand-400 focus:shadow-[0_0_0_4px_rgba(99,102,241,.12)];
+  }
+  .field:disabled {
+    @apply cursor-not-allowed border-slate-100 bg-slate-50 text-slate-400 shadow-none;
+  }
+  .label {
+    @apply mb-1.5 block text-[10.5px] font-bold uppercase tracking-wider text-slate-400;
+  }
+
+  /* --- Surfaces --- */
+  .card {
+    @apply rounded-2xl border border-slate-200/80 bg-white shadow-card;
+  }
+  .card-hover {
+    @apply transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lift;
+  }
+  .glass {
+    @apply border border-white/60 bg-white/80 backdrop-blur-xl;
+  }
+
+  /* --- Stat tiles --- */
+  .stat-tile {
+    @apply card-hover card flex items-center gap-3.5 p-4;
+  }
+  .stat-icon {
+    @apply flex h-11 w-11 shrink-0 items-center justify-center rounded-xl;
+  }
+
+  /* --- Badges / pills --- */
+  .pill {
+    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide;
+  }
+
+  /* --- Tables --- */
+  .table-modern thead {
+    @apply bg-slate-50/80 text-[10px] font-bold uppercase tracking-wider text-slate-400;
+  }
+  .table-modern th {
+    @apply px-4 py-3 text-left;
+  }
+  .table-modern td {
+    @apply px-4 py-3 text-[13px];
+  }
+  .table-modern tbody tr {
+    @apply border-t border-slate-100 transition-colors hover:bg-slate-50/60;
+  }
+
+  /* --- Loading skeleton --- */
+  .skeleton {
+    @apply animate-shimmer rounded-lg bg-gradient-to-r from-slate-100 via-slate-200 to-slate-100 bg-[length:200%_100%];
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .hero-grid {
+    background-image: linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+build/
+.env
+.env.test
+apps/api/uploads/
+apps/api/uploads-test/
+*.log
+
+# Internal business documents and pre-rebuild snapshots — not app source,
+# not meant to leave this machine (e.g. onto a hosted GitHub repo).
+/New folder/
+/_archive/
