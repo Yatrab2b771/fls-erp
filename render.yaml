@@ -13,7 +13,11 @@ services:
     plan: free
     region: singapore
     rootDir: .
-    buildCommand: npm install && npm run build:api && npm run db:migrate:deploy
+    # `npm ci` (not `npm install`) — installs the exact versions pinned in
+    # package-lock.json instead of letting npm re-resolve to whatever's
+    # newest-matching on the registry right now (that drift is what broke
+    # the very first deploy: a newer TypeScript than what's tested locally).
+    buildCommand: npm ci && npm run build:api && npm run db:migrate:deploy
     startCommand: npm run start:api
     healthCheckPath: /health
     envVars:
