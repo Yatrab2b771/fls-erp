@@ -17,7 +17,11 @@ services:
     # package-lock.json instead of letting npm re-resolve to whatever's
     # newest-matching on the registry right now (that drift is what broke
     # the very first deploy: a newer TypeScript than what's tested locally).
-    buildCommand: npm ci && npm run build:api && npm run db:migrate:deploy
+    # `prisma generate` also runs via apps/api's own postinstall hook, but
+    # it's repeated here explicitly so this build doesn't silently depend
+    # on npm's workspace-postinstall behavior to produce real Prisma types
+    # before tsc type-checks against them (that gap broke the second deploy).
+    buildCommand: npm ci && npx prisma generate --schema apps/api/prisma/schema.prisma && npm run build:api && npm run db:migrate:deploy
     startCommand: npm run start:api
     healthCheckPath: /health
     envVars:
