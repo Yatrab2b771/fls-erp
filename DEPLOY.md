@@ -4,7 +4,7 @@ Three free services, wired together:
 
 1. **[Neon](https://neon.tech)** — the Postgres database
 2. **[Render](https://render.com)** — the API (`apps/api`, Express)
-3. **[Vercel](https://vercel.com)** — the web app (`apps/web`, React/Vite)
+3. **[Netlify](https://netlify.com)** (or [Vercel](https://vercel.com)) — the web app (`apps/web`, React/Vite). Either works the same way; this guide uses Netlify.
 
 All three have a free tier that doesn't ask for a card. Total time: ~15 minutes.
 
@@ -60,22 +60,24 @@ git push -u origin main
 
 ---
 
-## 3. Web — Vercel
+## 3. Web — Netlify
 
-1. Sign up at [vercel.com](https://vercel.com) (GitHub login works).
-2. **Add New → Project**, import this repo.
-3. Set **Root Directory** to `apps/web` (Vercel picks up `vercel.json` inside it automatically for the build command/output).
-4. Add one environment variable:
+1. Sign up at [netlify.com](https://netlify.com) (GitHub login works) and authorize it to access your GitHub repos.
+2. **Add new site → Import an existing project → Deploy with GitHub**, pick this repo.
+3. Netlify reads [`netlify.toml`](netlify.toml) at the repo root and pre-fills the build command/publish directory — leave those as detected, don't type your own.
+4. Before deploying, add one environment variable (there's a "New environment variable" option on this same screen, or add it after under **Site configuration → Environment variables**):
    - `VITE_API_URL` = your Render API URL from step 2 (e.g. `https://fls-erp-api.onrender.com`, **no trailing slash**)
-5. Deploy. You'll get a URL like `https://fls-erp.vercel.app` — that's the link for your boss.
+5. Deploy. You'll get a URL like `https://fls-erp.netlify.app` — that's the link for your boss. (You can rename the site — **Site configuration → Change site name** — for a nicer URL.)
+
+If you'd rather use Vercel instead: **Add New → Project**, import this repo, set **Root Directory** to `apps/web` (it reads `apps/web/vercel.json` automatically), same `VITE_API_URL` env var, deploy.
 
 ---
 
 ## 4. Lock CORS to the real frontend URL
 
-Now that you have the Vercel URL, go back to the Render service → **Environment**, set:
+Now that you have the Netlify URL, go back to the Render service → **Environment**, set:
 
-- `FRONTEND_URL` = your Vercel URL (e.g. `https://fls-erp.vercel.app`)
+- `FRONTEND_URL` = your Netlify URL (e.g. `https://fls-erp.netlify.app`)
 
 Save — Render redeploys automatically. Without this, the API accepts requests from any origin (not a real risk since auth is a bearer token, not a cookie, but worth tightening once you know the real URL).
 
@@ -83,7 +85,7 @@ Save — Render redeploys automatically. Without this, the API accepts requests 
 
 ## Log in
 
-Open the Vercel URL and log in with the admin credentials you set in step 2
+Open the Netlify URL and log in with the admin credentials you set in step 2
 (`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`), or one of the seeded demo
 department accounts (`bd@fls.local`, `ppic@fls.local`, `store@fls.local`,
 etc. — password is whatever you set as `SEED_DEMO_PASSWORD`).
