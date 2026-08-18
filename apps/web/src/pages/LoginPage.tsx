@@ -10,11 +10,6 @@ const PIPELINE = [
   { icon: Truck, label: "Dispatch Plan", hint: "One flow, every department sees its status" },
 ];
 
-const DEMO_CREDS = [
-  { role: "Admin", email: "admin@fls.local", password: "ChangeMe123!" },
-  { role: "Any dept.", email: "bd@fls.local … dispatch@fls.local", password: "Demo1234!" },
-];
-
 export function LoginPage() {
   const { login } = useAuth();
   const [email, setEmail] = useState("");
@@ -171,20 +166,6 @@ export function LoginPage() {
                 {!submitting && <ArrowRight className="h-4 w-4" strokeWidth={2.5} />}
               </button>
             </form>
-
-            <div className="mt-7 space-y-2 border-t border-slate-100 pt-5">
-              <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">Demo credentials</p>
-              {DEMO_CREDS.map((c) => (
-                <div key={c.role} className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-[11px]">
-                  <span className="font-bold text-slate-600">{c.role}</span>
-                  <span className="text-right font-mono text-slate-500">
-                    {c.email}
-                    <span className="text-slate-300"> / </span>
-                    {c.password}
-                  </span>
-                </div>
-              ))}
-            </div>
           </div>
 
           <p className="mt-6 text-center text-[11px] text-slate-400">© 2026 FLS ERP — Order Tracking, Packaging BOM &amp; RM Costing</p>
