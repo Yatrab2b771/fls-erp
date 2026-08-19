@@ -289,6 +289,60 @@ async function seedRmCosting(ppicUserId: string | undefined) {
   console.log(`Created demo recipe "${recipe.name}" and RM costing plan "${plan.name}" (${plan.id}).`);
 }
 
+// Warehouse-level Inventory — item catalog, a handful of Received/Issued
+// log entries (day store and production both), plus a couple of Dispatch
+// transfers against the same demo customers seedCustomersAndOrders creates.
+// See the Prisma schema comment above InventoryItem for the "Inventory
+// tool.xlsx" this reconstructs.
+async function seedInventory(storeUserId: string | undefined) {
+  if (!storeUserId) {
+    console.log("No Store demo user available — skipping demo inventory data.");
+    return;
+  }
+  if ((await prisma.inventoryItem.count()) > 0) {
+    console.log("Inventory items already exist — skipping demo inventory data.");
+    return;
+  }
+
+  const items = await Promise.all([
+    prisma.inventoryItem.create({ data: { category: "RM", name: "Whey Protein Isolate", unit: "Kg" } }),
+    prisma.inventoryItem.create({ data: { category: "RM", name: "Creatine Monohydrate", unit: "Kg" } }),
+    prisma.inventoryItem.create({ data: { category: "PM", name: "1kg HDPE Jar", unit: "Count" } }),
+    prisma.inventoryItem.create({ data: { category: "PM", name: "Aluminium Foil Liner", unit: "Count" } }),
+  ]);
+  const [wheyIsolate, creatine, jar, foilLiner] = items;
+
+  await prisma.inventoryTransaction.createMany({
+    data: [
+      { itemId: wheyIsolate!.id, type: "RECEIVED", date: new Date("2026-08-05"), unit: "Kg", quantity: 500, vendorName: "Sunrise Ingredients Pvt. Ltd.", createdById: storeUserId },
+      { itemId: creatine!.id, type: "RECEIVED", date: new Date("2026-08-06"), unit: "Kg", quantity: 200, vendorName: "PureCreatine Traders", createdById: storeUserId },
+      { itemId: jar!.id, type: "RECEIVED", date: new Date("2026-08-07"), unit: "Count", quantity: 2000, size: "1kg HDPE", vendorName: "PolyPack Industries", createdById: storeUserId },
+      { itemId: foilLiner!.id, type: "RECEIVED", date: new Date("2026-08-07"), unit: "Count", quantity: 3000, vendorName: "PolyPack Industries", createdById: storeUserId },
+      { itemId: wheyIsolate!.id, type: "ISSUED_DAY_STORE", date: new Date("2026-08-10"), unit: "Kg", quantity: 120, createdById: storeUserId },
+      { itemId: jar!.id, type: "ISSUED_DAY_STORE", date: new Date("2026-08-11"), unit: "Count", quantity: 500, createdById: storeUserId },
+      { itemId: wheyIsolate!.id, type: "ISSUED_PRODUCTION", date: new Date("2026-08-12"), unit: "Kg", quantity: 80, createdById: storeUserId },
+      { itemId: creatine!.id, type: "ISSUED_PRODUCTION", date: new Date("2026-08-13"), unit: "Kg", quantity: 40, createdById: storeUserId },
+    ],
+  });
+  console.log(`Created ${items.length} demo inventory items with 8 Received/Issued log entries.`);
+
+  const acme = await prisma.customer.findFirst({ where: { companyName: "Acme Wellness Retail Pvt. Ltd." } });
+  const nova = await prisma.customer.findFirst({ where: { companyName: "Nova Nutraceuticals LLP" } });
+  if (!acme || !nova) {
+    console.log("Demo customers not found — skipping demo dispatch transfers.");
+    return;
+  }
+
+  await prisma.dispatchTransfer.createMany({
+    data: [
+      { type: "FG", date: new Date("2026-08-15"), customerId: acme.id, productName: "Whey Gold 1kg", quantity: 400, createdById: storeUserId },
+      { type: "BILL", date: new Date("2026-08-16"), customerId: acme.id, productName: "Whey Gold 1kg", quantity: 400, createdById: storeUserId },
+      { type: "FG", date: new Date("2026-08-17"), customerId: nova.id, productName: "BCAA 2:1:1 300g", quantity: 300, createdById: storeUserId },
+    ],
+  });
+  console.log("Created 3 demo dispatch transfers (2 FG, 1 Bill) against Acme/Nova.");
+}
+
 async function main() {
   await seedRoles();
   await seedAdmin();
@@ -296,6 +350,7 @@ async function main() {
   await seedCustomersAndOrders(userIds.BD ?? null, userIds.PPIC);
   await seedPackagingBom(userIds.PPIC);
   await seedRmCosting(userIds.PPIC);
+  await seedInventory(userIds.STORE);
 }
 
 main()
