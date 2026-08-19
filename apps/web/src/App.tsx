@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./lib/auth";
 import { AppLayout } from "./layout/AppLayout";
+import { LoadingScreen } from "./components/LoadingScreen";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
@@ -15,11 +16,7 @@ export default function App() {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-slate-400 text-sm font-semibold">
-        Loading…
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
   if (!user) {
