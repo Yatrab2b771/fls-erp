@@ -13,22 +13,17 @@ export function LoadingScreen() {
       </div>
 
       <div className="relative flex flex-col items-center gap-4">
-        <div className="relative flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-600 via-brand-700 to-brand-900 shadow-[0_4px_18px_-3px_rgba(79,70,229,.55),inset_0_1px_0_rgba(255,255,255,.2)]">
-          <div className="absolute inset-0 -z-10 animate-pulse rounded-2xl bg-brand-500 opacity-40 blur-xl motion-reduce:animate-none" />
-          <Microscope className="h-7 w-7 text-white" strokeWidth={2} />
+        {/* Logo badge with a ring that orbits around it — a spinner framing
+            the mark itself rather than a separate loading indicator. */}
+        <div className="relative flex h-16 w-16 items-center justify-center">
+          <div className="absolute inset-0 animate-spin rounded-full border-[3px] border-brand-100 border-t-brand-600 motion-reduce:animate-none" style={{ animationDuration: "1.1s" }} />
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-600 via-brand-700 to-brand-900 shadow-[0_4px_18px_-3px_rgba(79,70,229,.55),inset_0_1px_0_rgba(255,255,255,.2)]">
+            <Microscope className="h-5.5 w-5.5 text-white" strokeWidth={2} />
+          </div>
         </div>
         <div className="text-center">
           <p className="text-sm font-black tracking-tight text-slate-900">FLS ERP</p>
           <p className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {[0, 1, 2].map((i) => (
-            <span
-              key={i}
-              className="h-1.5 w-1.5 animate-bounce rounded-full bg-brand-400 motion-reduce:animate-none"
-              style={{ animationDelay: `${i * 0.15}s`, animationDuration: "0.9s" }}
-            />
-          ))}
         </div>
       </div>
     </div>
