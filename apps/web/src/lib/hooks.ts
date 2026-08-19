@@ -1,6 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Batch, BomPlan, CatalogBrand, CatalogSku, Customer, InventoryCategory, InventoryItem, InventoryStockLine, InventoryTransaction, InventoryTxnType, ManagedUser, PurchaseOrder, RecipeSummary, RmPlan, RoleName } from "./types";
+import type {
+  Batch,
+  BomPlan,
+  CatalogBrand,
+  CatalogSku,
+  Customer,
+  DispatchTransfer,
+  DispatchTransferType,
+  InventoryCategory,
+  InventoryItem,
+  InventoryStockLine,
+  InventoryTransaction,
+  InventoryTxnType,
+  ManagedUser,
+  PurchaseOrder,
+  RecipeSummary,
+  RmPlan,
+  RoleName,
+} from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
 
 // --- Customers ---
@@ -336,6 +354,44 @@ export function useDeleteInventoryTransaction() {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
       qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
     },
+  });
+}
+
+// --- Dispatch transfer log — "FG transfer to Dispatch" / "Bill transfer
+// to Dispatch from Accounts" ---
+
+export function useDispatchTransfers(filters?: { type?: DispatchTransferType; customerId?: string }) {
+  const params = new URLSearchParams();
+  if (filters?.type) params.set("type", filters.type);
+  if (filters?.customerId) params.set("customerId", filters.customerId);
+  const qs = params.toString();
+  return useQuery({
+    queryKey: ["inventory", "dispatch-transfers", filters],
+    queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers${qs ? `?${qs}` : ""}`),
+  });
+}
+
+export interface CreateDispatchTransferPayload {
+  type: DispatchTransferType;
+  date: string;
+  customerId: string;
+  productName: string;
+  quantity: number;
+}
+
+export function useCreateDispatchTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateDispatchTransferPayload) => api<DispatchTransfer>("/api/inventory/dispatch-transfers", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
+  });
+}
+
+export function useDeleteDispatchTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/inventory/dispatch-transfers/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
   });
 }
 

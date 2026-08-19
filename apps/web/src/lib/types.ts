@@ -315,11 +315,13 @@ export interface RmPlan {
 // pipeline itself (see BatchStageId above and lib/batchStage.ts).
 
 // --- Inventory module ---
-// Warehouse-level Material Received / Material Issued log, reconstructed
-// from "Inventory tool.xlsx" — see the Prisma schema comment.
+// Warehouse-level Material Received / Material Issued (day store &
+// production) log, plus the Dispatch-side FG/Bill transfer log,
+// reconstructed from "Inventory tool.xlsx" — see the Prisma schema comment.
 
 export type InventoryCategory = "RM" | "PM";
-export type InventoryTxnType = "RECEIVED" | "ISSUED";
+export type InventoryTxnType = "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
+export type DispatchTransferType = "FG" | "BILL";
 
 export interface InventoryItem {
   id: string;
@@ -346,8 +348,22 @@ export interface InventoryTransaction {
 export interface InventoryStockLine {
   item: InventoryItem;
   receivedQty: number;
+  issuedDayStoreQty: number;
+  issuedProductionQty: number;
   issuedQty: number;
   onHand: number;
+}
+
+export interface DispatchTransfer {
+  id: string;
+  type: DispatchTransferType;
+  date: string;
+  customerId: string;
+  productName: string;
+  quantity: number;
+  createdAt: string;
+  customer: { id: string; companyName: string };
+  createdBy: { id: string; fullName: string };
 }
 
 // --- User management (admin only) ---

@@ -47,6 +47,7 @@ beforeEach(async () => {
   await init();
   await assertConnectedToTestDatabase();
   await prisma.$transaction([
+    prisma.dispatchTransfer.deleteMany(),
     prisma.inventoryTransaction.deleteMany(),
     prisma.inventoryItem.deleteMany(),
     prisma.batchStageEvent.deleteMany(),

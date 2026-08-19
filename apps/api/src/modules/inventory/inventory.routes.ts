@@ -4,8 +4,17 @@ import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
-import { createInventoryItemSchema, createInventoryTransactionSchema, updateInventoryItemSchema, type CreateInventoryItemInput, type CreateInventoryTransactionInput, type UpdateInventoryItemInput } from "./inventory.schemas";
-import type { InventoryCategory, Prisma } from "@prisma/client";
+import {
+  createDispatchTransferSchema,
+  createInventoryItemSchema,
+  createInventoryTransactionSchema,
+  updateInventoryItemSchema,
+  type CreateDispatchTransferInput,
+  type CreateInventoryItemInput,
+  type CreateInventoryTransactionInput,
+  type UpdateInventoryItemInput,
+} from "./inventory.schemas";
+import type { DispatchTransferType, InventoryCategory, Prisma } from "@prisma/client";
 
 export const inventoryRouter = Router();
 
@@ -66,25 +75,29 @@ inventoryRouter.patch("/items/:id", validateBody(updateInventoryItemSchema), asy
   }
 });
 
-// --- Stock on hand — sum(RECEIVED) − sum(ISSUED) per item ---
+// --- Stock on hand — sum(RECEIVED) − sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) per item ---
 
 inventoryRouter.get("/stock", async (req, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
 
-    const [items, receivedTotals, issuedTotals] = await Promise.all([
+    const [items, receivedTotals, issuedDayStoreTotals, issuedProductionTotals] = await Promise.all([
       prisma.inventoryItem.findMany({ where: category ? { category } : undefined, orderBy: [{ category: "asc" }, { name: "asc" }] }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED" }, _sum: { quantity: true } }),
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED" }, _sum: { quantity: true } }),
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
     ]);
 
     const received = new Map(receivedTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
-    const issued = new Map(issuedTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+    const issuedDayStore = new Map(issuedDayStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+    const issuedProduction = new Map(issuedProductionTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
     const stock = items.map((item) => {
       const receivedQty = received.get(item.id) ?? 0;
-      const issuedQty = issued.get(item.id) ?? 0;
-      return { item, receivedQty, issuedQty, onHand: receivedQty - issuedQty };
+      const issuedDayStoreQty = issuedDayStore.get(item.id) ?? 0;
+      const issuedProductionQty = issuedProduction.get(item.id) ?? 0;
+      const issuedQty = issuedDayStoreQty + issuedProductionQty;
+      return { item, receivedQty, issuedDayStoreQty, issuedProductionQty, issuedQty, onHand: receivedQty - issuedQty };
     });
 
     res.json(stock);
@@ -93,14 +106,19 @@ inventoryRouter.get("/stock", async (req, res, next) => {
   }
 });
 
-// --- Transaction log — the two sheets ("MATERIAL RECEIVED" / "MATERIAL
-// Issued to day store"), told apart by `type`, on one endpoint ---
+// --- Transaction log — the three sheets ("MATERIAL RECEIVED" / "MATERIAL
+// Issued to day store" / "MATERIAL Issued to Production"), told apart by
+// `type`, on one endpoint ---
 
 const txnInclude = { item: true, createdBy: { select: { id: true, fullName: true } } } satisfies Prisma.InventoryTransactionInclude;
 
 inventoryRouter.get("/transactions", async (req, res, next) => {
   try {
-    const { type, category, itemId } = req.query as { type?: "RECEIVED" | "ISSUED"; category?: InventoryCategory; itemId?: string };
+    const { type, category, itemId } = req.query as {
+      type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
+      category?: InventoryCategory;
+      itemId?: string;
+    };
     const pagination = parsePagination(req);
 
     const where: Prisma.InventoryTransactionWhereInput = {
@@ -132,9 +150,12 @@ inventoryRouter.post("/transactions", validateBody(createInventoryTransactionSch
       include: txnInclude,
     });
 
+    const auditAction =
+      rest.type === "RECEIVED" ? "inventory.material_received" : rest.type === "ISSUED_DAY_STORE" ? "inventory.material_issued_day_store" : "inventory.material_issued_production";
+
     await recordAudit({
       actorId: req.user!.id,
-      action: rest.type === "RECEIVED" ? "inventory.material_received" : "inventory.material_issued",
+      action: auditAction,
       entityType: "InventoryTransaction",
       entityId: txn.id,
       metadata: { itemId, quantity: rest.quantity, unit: rest.unit },
@@ -154,6 +175,83 @@ inventoryRouter.delete("/transactions/:id", async (req: AuthedRequest<{ id: stri
     await prisma.inventoryTransaction.delete({ where: { id: req.params.id } });
 
     await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_removed", entityType: "InventoryTransaction", entityId: req.params.id, metadata: { itemId: txn.itemId, type: txn.type } });
+
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Dispatch transfer log — the two sheets ("FG transfer to Dispatch" /
+// "Bill transfer to Dispatch from Accounts"), told apart by `type`, on one
+// endpoint. Customer links to the Order Tracking customer master. ---
+
+const dispatchTransferInclude = {
+  customer: { select: { id: true, companyName: true } },
+  createdBy: { select: { id: true, fullName: true } },
+} satisfies Prisma.DispatchTransferInclude;
+
+inventoryRouter.get("/dispatch-transfers", async (req, res, next) => {
+  try {
+    const { type, customerId } = req.query as { type?: DispatchTransferType; customerId?: string };
+    const pagination = parsePagination(req);
+
+    const where: Prisma.DispatchTransferWhereInput = {
+      ...(type ? { type } : {}),
+      ...(customerId ? { customerId } : {}),
+    };
+
+    const [total, transfers] = await Promise.all([
+      prisma.dispatchTransfer.count({ where }),
+      prisma.dispatchTransfer.findMany({ where, include: dispatchTransferInclude, orderBy: { date: "desc" }, skip: pagination.skip, take: pagination.take }),
+    ]);
+    setPaginationHeaders(res, total, pagination);
+    res.json(transfers);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.post("/dispatch-transfers", validateBody(createDispatchTransferSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { customerId, ...rest } = req.body as CreateDispatchTransferInput;
+
+    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) return res.status(400).json({ error: "Unknown customer" });
+
+    const transfer = await prisma.dispatchTransfer.create({
+      data: { customerId, ...rest, createdById: req.user!.id },
+      include: dispatchTransferInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: rest.type === "FG" ? "inventory.fg_transfer_to_dispatch" : "inventory.bill_transfer_to_dispatch",
+      entityType: "DispatchTransfer",
+      entityId: transfer.id,
+      metadata: { customerId, productName: rest.productName, quantity: rest.quantity },
+    });
+
+    res.status(201).json(transfer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.delete("/dispatch-transfers/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const transfer = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
+    if (!transfer) return res.status(404).json({ error: "Dispatch transfer not found" });
+
+    await prisma.dispatchTransfer.delete({ where: { id: req.params.id } });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory.dispatch_transfer_removed",
+      entityType: "DispatchTransfer",
+      entityId: req.params.id,
+      metadata: { customerId: transfer.customerId, type: transfer.type },
+    });
 
     res.status(204).send();
   } catch (err) {

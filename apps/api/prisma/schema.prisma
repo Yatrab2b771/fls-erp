@@ -55,6 +55,7 @@ model User {
   rmPlans                RmPlan[]
   batchStageEvents       BatchStageEvent[]
   inventoryTxns          InventoryTransaction[]
+  dispatchTransfers      DispatchTransfer[]
 
   @@map("users")
 }
@@ -120,8 +121,9 @@ model Customer {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  createdBy      User            @relation(fields: [createdById], references: [id])
-  purchaseOrders PurchaseOrder[]
+  createdBy         User               @relation(fields: [createdById], references: [id])
+  purchaseOrders    PurchaseOrder[]
+  dispatchTransfers DispatchTransfer[]
 
   @@map("customers")
 }
@@ -559,15 +561,26 @@ model RmPlanItem {
 
 // ---------------------------------------------------------------------------
 // Phase 7 — Warehouse-level Inventory, reconstructed from "Inventory
-// tool.xlsx": two log sections, MATERIAL RECEIVED and MATERIAL Issued to
-// day store, sharing the same field set (Date, Category RM/PM, Item, Unit,
-// Count, Size, Vendor Name) and distinguished only by direction. The item
-// field is described there as "List from Sanjay & naveen. Option to add
-// item" — a maintained master list, not free text — so it's its own
-// catalog (InventoryItem) that transactions reference, which also lets
-// stock-on-hand be computed per item (sum RECEIVED − sum ISSUED). This is
-// unrelated to the retired InventoryItem above (different shape, different
-// module) — the name is reused because it's the same real-world noun.
+// tool.xlsx": three log sections — MATERIAL RECEIVED, MATERIAL Issued to
+// day store, and MATERIAL Issued to Production — sharing the same field
+// set (Date, Category RM/PM, Item, Unit, Count, Size, Vendor Name) and
+// distinguished only by direction/destination. The item field is
+// described there as "List from Sanjay & naveen. Option to add item" — a
+// maintained master list, not free text — so it's its own catalog
+// (InventoryItem) that transactions reference, which also lets
+// stock-on-hand be computed per item (sum RECEIVED − sum both ISSUED
+// destinations). This is unrelated to the retired InventoryItem above
+// (different shape, different module) — the name is reused because it's
+// the same real-world noun.
+//
+// The sheet also adds two Dispatch-side log sections — "FG transfer to
+// Dispatch" and "Bill transfer to Dispatch from Accounts" — sharing a
+// simpler field set (Date, Customer, Product Name, Qty). Customer links
+// to the existing Order Tracking Customer master rather than free text,
+// to keep it consistent with one real customer list instead of two.
+// Product Name stays free text — there's no product master in this
+// schema (products live as PurchaseOrderItem lines, not a standalone
+// catalog).
 // ---------------------------------------------------------------------------
 
 enum InventoryCategory {
@@ -577,7 +590,8 @@ enum InventoryCategory {
 
 enum InventoryTxnType {
   RECEIVED
-  ISSUED
+  ISSUED_DAY_STORE
+  ISSUED_PRODUCTION
 }
 
 model InventoryItem {
@@ -615,4 +629,32 @@ model InventoryTransaction {
   @@index([itemId])
   @@index([type, date])
   @@map("inventory_transactions")
+}
+
+enum DispatchTransferType {
+  FG
+  BILL
+}
+
+// One row per "FG transfer to Dispatch" / "Bill transfer to Dispatch from
+// Accounts" entry — same field set for both, `type` picks the sheet it
+// belongs to. Both are Store-side dispatch handoff logs, not the Dispatch
+// module's own tracking, so they live in this module alongside the
+// received/issued log rather than in Order Tracking.
+model DispatchTransfer {
+  id          String               @id @default(uuid())
+  type        DispatchTransferType
+  date        DateTime
+  customerId  String
+  productName String // the sheet's "Product Name" — free text, no product master exists
+  quantity    Float // the sheet's "Qty"
+  createdById String
+  createdAt   DateTime             @default(now())
+
+  customer  Customer @relation(fields: [customerId], references: [id])
+  createdBy User     @relation(fields: [createdById], references: [id])
+
+  @@index([customerId])
+  @@index([type, date])
+  @@map("dispatch_transfers")
 }

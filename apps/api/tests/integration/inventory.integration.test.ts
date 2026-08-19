@@ -58,18 +58,21 @@ describe("Inventory module", () => {
     expect(txns.body[0].item.name).toBe("Whey Protein");
   });
 
-  it("computes stock on hand as sum(RECEIVED) - sum(ISSUED) per item", async () => {
+  it("computes stock on hand as sum(RECEIVED) - sum(ISSUED_DAY_STORE) - sum(ISSUED_PRODUCTION) per item", async () => {
     const { token } = await createUser(["STORE"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(token)).send({ category: "RM", name: "Whey Protein", unit: "Kg" });
     const itemId = item.body.id;
 
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-02", unit: "Kg", quantity: 50 });
-    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED", date: "2026-08-03", unit: "Kg", quantity: 30 });
+    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-03", unit: "Kg", quantity: 30 });
+    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_PRODUCTION", date: "2026-08-04", unit: "Kg", quantity: 20 });
 
     const stock = await request(app).get("/api/inventory/stock").set(authHeader(token));
     expect(stock.status).toBe(200);
-    expect(stock.body).toEqual([expect.objectContaining({ receivedQty: 150, issuedQty: 30, onHand: 120 })]);
+    expect(stock.body).toEqual([
+      expect.objectContaining({ receivedQty: 150, issuedDayStoreQty: 30, issuedProductionQty: 20, issuedQty: 50, onHand: 100 }),
+    ]);
   });
 
   it("rejects a transaction against an unknown item", async () => {
@@ -95,5 +98,35 @@ describe("Inventory module", () => {
 
     const ok = await request(app).delete(`/api/inventory/transactions/${txn.body.id}`).set(authHeader(storeToken));
     expect(ok.status).toBe(204);
+  });
+
+  it("logs and lists FG / Bill transfers to Dispatch, keyed to a real customer", async () => {
+    const { token: storeToken } = await createUser(["STORE"]);
+    const { token: bdToken } = await createUser(["BD"]);
+    const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
+
+    const fg = await request(app)
+      .post("/api/inventory/dispatch-transfers")
+      .set(authHeader(storeToken))
+      .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+    expect(fg.status).toBe(201);
+    expect(fg.body.customer.companyName).toBe("Acme Nutrition Pvt. Ltd.");
+
+    const bill = await request(app)
+      .post("/api/inventory/dispatch-transfers")
+      .set(authHeader(storeToken))
+      .send({ type: "BILL", date: "2026-08-11", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+    expect(bill.status).toBe(201);
+
+    const fgList = await request(app).get("/api/inventory/dispatch-transfers?type=FG").set(authHeader(storeToken));
+    expect(fgList.status).toBe(200);
+    expect(fgList.body.length).toBe(1);
+    expect(fgList.body[0].type).toBe("FG");
+
+    const rejectUnknownCustomer = await request(app)
+      .post("/api/inventory/dispatch-transfers")
+      .set(authHeader(storeToken))
+      .send({ type: "FG", date: "2026-08-10", customerId: "00000000-0000-0000-0000-000000000000", productName: "X", quantity: 1 });
+    expect(rejectUnknownCustomer.status).toBe(400);
   });
 });
