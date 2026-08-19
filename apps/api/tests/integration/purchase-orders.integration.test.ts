@@ -137,3 +137,28 @@ describe("PO document upload", () => {
     expect(download.headers["content-type"]).toBe("application/pdf");
   });
 });
+
+describe("GET /api/purchase-orders/:id/export.pdf", () => {
+  it("generates a printable PDF of the PO, open to any authenticated user, at any status", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const customer = await createCustomer(bdToken);
+    const po = await request(app)
+      .post("/api/purchase-orders")
+      .set(authHeader(bdToken))
+      .send({ customerId: customer.id, poNumber: "PO-2001", items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+    expect(po.body.status).toBe("DRAFT");
+
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const exported = await request(app).get(`/api/purchase-orders/${po.body.id}/export.pdf`).set(authHeader(ppicToken));
+    expect(exported.status).toBe(200);
+    expect(exported.headers["content-type"]).toBe("application/pdf");
+    expect(exported.headers["content-disposition"]).toContain("FLS_PO_PO-2001.pdf");
+    expect(Buffer.isBuffer(exported.body) || exported.body instanceof Uint8Array).toBe(true);
+  });
+
+  it("404s for an unknown PO", async () => {
+    const { token } = await createUser(["BD"]);
+    const res = await request(app).get("/api/purchase-orders/00000000-0000-0000-0000-000000000000/export.pdf").set(authHeader(token));
+    expect(res.status).toBe(404);
+  });
+});

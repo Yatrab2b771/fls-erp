@@ -94,13 +94,19 @@ export function PurchaseOrderDetailPage() {
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="pill border-slate-200 bg-slate-50 text-slate-600">
               <ShieldCheck className="h-3 w-3" /> {po.regulatoryBody ?? "No body"} · {po.regulatoryStatus ?? "—"}
             </span>
             <span className="pill border-slate-200 bg-slate-50 text-slate-600">
               <Calendar className="h-3 w-3" /> {po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "No date"}
             </span>
+            <button
+              className="btn-ghost btn-sm"
+              onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
+            >
+              <Download className="h-3 w-3" strokeWidth={2.5} /> Download PDF
+            </button>
           </div>
         </div>
 

@@ -7,6 +7,7 @@ import { parsePagination, setPaginationHeaders } from "../../common/lib/paginati
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { deleteUploadedFile, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
+import { buildPurchaseOrderPdf } from "./po-pdf";
 import {
   createPurchaseOrderSchema,
   reviewPurchaseOrderSchema,
@@ -103,6 +104,27 @@ purchaseOrdersRouter.get("/:id", async (req: AuthedRequest<{ id: string }>, res,
     const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: poInclude });
     if (!order) return res.status(404).json({ error: "Purchase order not found" });
     res.json(order);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// A printable copy of the PO as entered — header fields plus product line
+// items — for BD to hand to a customer or file alongside the uploaded
+// scan. Open to any authenticated user, same as the read routes above;
+// available at any status, not just once approved.
+purchaseOrdersRouter.get("/:id/export.pdf", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, include: poInclude });
+    if (!order) return res.status(404).json({ error: "Purchase order not found" });
+
+    const doc = buildPurchaseOrderPdf(order);
+    await recordAudit({ actorId: req.user!.id, action: "purchase_order.exported_pdf", entityType: "PurchaseOrder", entityId: order.id });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="FLS_PO_${order.poNumber ?? order.id}.pdf"`);
+    doc.pipe(res);
+    doc.end();
   } catch (err) {
     next(err);
   }

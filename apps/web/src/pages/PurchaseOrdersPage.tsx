@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
+import { Download, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useCreateCustomer, useCreatePurchaseOrder, useCustomers, usePurchaseOrders } from "../lib/hooks";
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
-import { ApiError } from "../lib/api";
+import { ApiError, downloadFile } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -94,6 +94,7 @@ export function PurchaseOrdersPage() {
                 <th className="text-center">Products</th>
                 <th>Order Date</th>
                 <th>Status</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -110,6 +111,15 @@ export function PurchaseOrdersPage() {
                   <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
                   <td>
                     <PoStatusBadge status={po.status} />
+                  </td>
+                  <td className="text-right">
+                    <button
+                      className="btn-icon hover:!bg-brand-50 hover:!text-brand-600"
+                      onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
+                      title="Download PDF"
+                    >
+                      <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    </button>
                   </td>
                 </tr>
               ))}
