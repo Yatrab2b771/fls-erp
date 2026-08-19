@@ -85,46 +85,48 @@ export function PurchaseOrdersPage() {
         <EmptyState icon={ShoppingCart} title="No matching purchase orders" hint="Try a different search." accent="slate" />
       ) : (
         <div className="card overflow-hidden">
-          <table className="table-modern w-full">
-            <thead>
-              <tr>
-                <th>PO Number</th>
-                <th>Customer</th>
-                <th>Brand</th>
-                <th className="text-center">Products</th>
-                <th>Order Date</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {filteredOrders.map((po) => (
-                <tr key={po.id}>
-                  <td className="font-bold">
-                    <Link to={`/purchase-orders/${po.id}`} className="text-brand-600 hover:underline">
-                      {po.poNumber ?? po.id.slice(0, 8)}
-                    </Link>
-                  </td>
-                  <td className="text-slate-600">{po.customer.companyName}</td>
-                  <td className="text-slate-600">{po.brandName ?? "—"}</td>
-                  <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
-                  <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
-                  <td>
-                    <PoStatusBadge status={po.status} />
-                  </td>
-                  <td className="text-right">
-                    <button
-                      className="btn-icon hover:!bg-brand-50 hover:!text-brand-600"
-                      onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
-                      title="Download PDF"
-                    >
-                      <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
-                    </button>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="table-modern w-full">
+              <thead>
+                <tr>
+                  <th>PO Number</th>
+                  <th>Customer</th>
+                  <th>Brand</th>
+                  <th className="text-center">Products</th>
+                  <th>Order Date</th>
+                  <th>Status</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filteredOrders.map((po) => (
+                  <tr key={po.id}>
+                    <td className="font-bold">
+                      <Link to={`/purchase-orders/${po.id}`} className="text-brand-600 hover:underline">
+                        {po.poNumber ?? po.id.slice(0, 8)}
+                      </Link>
+                    </td>
+                    <td className="text-slate-600">{po.customer.companyName}</td>
+                    <td className="text-slate-600">{po.brandName ?? "—"}</td>
+                    <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
+                    <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
+                    <td>
+                      <PoStatusBadge status={po.status} />
+                    </td>
+                    <td className="text-right">
+                      <button
+                        className="btn-icon hover:!bg-brand-50 hover:!text-brand-600"
+                        onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
+                        title="Download PDF"
+                      >
+                        <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

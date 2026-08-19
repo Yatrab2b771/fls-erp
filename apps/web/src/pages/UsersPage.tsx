@@ -63,22 +63,24 @@ export function UsersPage() {
         <EmptyState icon={UsersIcon} title="No matching accounts" hint="Try a different search." accent="slate" />
       ) : (
         <div className="card overflow-hidden">
-          <table className="table-modern w-full">
-            <thead>
-              <tr>
-                <th>Email (login id)</th>
-                <th>Full Name</th>
-                <th>Roles</th>
-                <th className="text-center">Status</th>
-                <th className="text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredUsers.map((u) => (
-                <UserRow key={u.id} user={u} />
-              ))}
-            </tbody>
-          </table>
+          <div className="overflow-x-auto">
+            <table className="table-modern w-full">
+              <thead>
+                <tr>
+                  <th>Email (login id)</th>
+                  <th>Full Name</th>
+                  <th>Roles</th>
+                  <th className="text-center">Status</th>
+                  <th className="text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredUsers.map((u) => (
+                  <UserRow key={u.id} user={u} />
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

@@ -235,35 +235,37 @@ export function RmCostingPage() {
                     <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate Costing"}
                   </button>
                 </div>
-                <table className="table-modern w-full">
-                  <thead>
-                    <tr>
-                      <th>Recipe</th>
-                      <th className="text-center">Batch Size (KG)</th>
-                      <th className="text-center">Remove</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {plan.items.length === 0 && (
+                <div className="overflow-x-auto">
+                  <table className="table-modern w-full">
+                    <thead>
                       <tr>
-                        <td colSpan={3} className="p-8 text-center text-xs text-slate-400">
-                          No batches queued yet.
-                        </td>
+                        <th>Recipe</th>
+                        <th className="text-center">Batch Size (KG)</th>
+                        <th className="text-center">Remove</th>
                       </tr>
-                    )}
-                    {plan.items.map((i) => (
-                      <tr key={i.id}>
-                        <td className="font-semibold text-slate-700">{i.recipeName}</td>
-                        <td className="text-center font-mono font-bold text-amber-700">{i.batchSizeKg}</td>
-                        <td className="text-center">
-                          <button className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeItem.mutate(i.id)}>
-                            <X className="h-3.5 w-3.5" strokeWidth={2.25} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {plan.items.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="p-8 text-center text-xs text-slate-400">
+                            No batches queued yet.
+                          </td>
+                        </tr>
+                      )}
+                      {plan.items.map((i) => (
+                        <tr key={i.id}>
+                          <td className="font-semibold text-slate-700">{i.recipeName}</td>
+                          <td className="text-center font-mono font-bold text-amber-700">{i.batchSizeKg}</td>
+                          <td className="text-center">
+                            <button className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeItem.mutate(i.id)}>
+                              <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               {plan.result && (
@@ -310,24 +312,26 @@ export function RmCostingPage() {
                         </button>
                       </div>
                     </div>
-                    <table className="table-modern w-full">
-                      <thead>
-                        <tr>
-                          <th>Ingredient</th>
-                          <th>Brand</th>
-                          <th className="text-center">Total (KG)</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {plan.result.procurement.map((line, idx) => (
-                          <tr key={idx}>
-                            <td className="font-semibold text-slate-700">{line.name}</td>
-                            <td className="text-slate-600">{line.brand}</td>
-                            <td className="text-center font-mono font-bold text-amber-700">{line.totalKg.toFixed(3)}</td>
+                    <div className="overflow-x-auto">
+                      <table className="table-modern w-full">
+                        <thead>
+                          <tr>
+                            <th>Ingredient</th>
+                            <th>Brand</th>
+                            <th className="text-center">Total (KG)</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {plan.result.procurement.map((line, idx) => (
+                            <tr key={idx}>
+                              <td className="font-semibold text-slate-700">{line.name}</td>
+                              <td className="text-slate-600">{line.brand}</td>
+                              <td className="text-center font-mono font-bold text-amber-700">{line.totalKg.toFixed(3)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </>
               )}

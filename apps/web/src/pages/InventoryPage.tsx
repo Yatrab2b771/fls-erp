@@ -152,32 +152,34 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
 
   return (
     <div className="card overflow-hidden">
-      <table className="table-modern w-full">
-        <thead>
-          <tr>
-            <th>Item</th>
-            <th>Category</th>
-            <th>Unit</th>
-            <th className="text-right">Received</th>
-            <th className="text-right">Issued (Day Store)</th>
-            <th className="text-right">Issued (Production)</th>
-            <th className="text-right">On Hand</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((s) => (
-            <tr key={s.item.id}>
-              <td className="font-bold text-slate-800">{s.item.name}</td>
-              <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
-              <td className="text-slate-500">{s.item.unit ?? "—"}</td>
-              <td className="text-right font-mono text-emerald-600">{s.receivedQty}</td>
-              <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
-              <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
-              <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Category</th>
+              <th>Unit</th>
+              <th className="text-right">Received</th>
+              <th className="text-right">Issued (Day Store)</th>
+              <th className="text-right">Issued (Production)</th>
+              <th className="text-right">On Hand</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.item.id}>
+                <td className="font-bold text-slate-800">{s.item.name}</td>
+                <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
+                <td className="text-slate-500">{s.item.unit ?? "—"}</td>
+                <td className="text-right font-mono text-emerald-600">{s.receivedQty}</td>
+                <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
+                <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
+                <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -221,40 +223,42 @@ function TransactionTable({
 
   return (
     <div className="card overflow-hidden">
-      <table className="table-modern w-full">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Item</th>
-            <th>Category</th>
-            <th className="text-right">Qty</th>
-            <th>Unit</th>
-            <th>Size</th>
-            <th>{type === "RECEIVED" ? "Vendor" : "Vendor / Note"}</th>
-            {canWrite && <th />}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((t) => (
-            <tr key={t.id}>
-              <td className="text-slate-500">{new Date(t.date).toLocaleDateString()}</td>
-              <td className="font-bold text-slate-800">{t.item.name}</td>
-              <td className="text-slate-600">{CATEGORY_LABEL[t.item.category]}</td>
-              <td className="text-right font-mono font-bold text-slate-700">{t.quantity}</td>
-              <td className="text-slate-500">{t.unit}</td>
-              <td className="text-slate-500">{t.size ?? "—"}</td>
-              <td className="text-slate-500">{t.vendorName ?? "—"}</td>
-              {canWrite && (
-                <td className="text-right">
-                  <button onClick={() => handleDelete(t.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
-                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
-                  </button>
-                </td>
-              )}
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Item</th>
+              <th>Category</th>
+              <th className="text-right">Qty</th>
+              <th>Unit</th>
+              <th>Size</th>
+              <th>{type === "RECEIVED" ? "Vendor" : "Vendor / Note"}</th>
+              {canWrite && <th />}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.id}>
+                <td className="text-slate-500">{new Date(t.date).toLocaleDateString()}</td>
+                <td className="font-bold text-slate-800">{t.item.name}</td>
+                <td className="text-slate-600">{CATEGORY_LABEL[t.item.category]}</td>
+                <td className="text-right font-mono font-bold text-slate-700">{t.quantity}</td>
+                <td className="text-slate-500">{t.unit}</td>
+                <td className="text-slate-500">{t.size ?? "—"}</td>
+                <td className="text-slate-500">{t.vendorName ?? "—"}</td>
+                {canWrite && (
+                  <td className="text-right">
+                    <button onClick={() => handleDelete(t.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
+                      <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -298,34 +302,36 @@ function DispatchTable({
 
   return (
     <div className="card overflow-hidden">
-      <table className="table-modern w-full">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Customer</th>
-            <th>Product Name</th>
-            <th className="text-right">Qty</th>
-            {canWrite && <th />}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((d) => (
-            <tr key={d.id}>
-              <td className="text-slate-500">{new Date(d.date).toLocaleDateString()}</td>
-              <td className="font-bold text-slate-800">{d.customer.companyName}</td>
-              <td className="text-slate-600">{d.productName}</td>
-              <td className="text-right font-mono font-bold text-slate-700">{d.quantity}</td>
-              {canWrite && (
-                <td className="text-right">
-                  <button onClick={() => handleDelete(d.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
-                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
-                  </button>
-                </td>
-              )}
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Customer</th>
+              <th>Product Name</th>
+              <th className="text-right">Qty</th>
+              {canWrite && <th />}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((d) => (
+              <tr key={d.id}>
+                <td className="text-slate-500">{new Date(d.date).toLocaleDateString()}</td>
+                <td className="font-bold text-slate-800">{d.customer.companyName}</td>
+                <td className="text-slate-600">{d.productName}</td>
+                <td className="text-right font-mono font-bold text-slate-700">{d.quantity}</td>
+                {canWrite && (
+                  <td className="text-right">
+                    <button onClick={() => handleDelete(d.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
+                      <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

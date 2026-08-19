@@ -210,37 +210,39 @@ export function PackagingBomPage() {
                     <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate BOM"}
                   </button>
                 </div>
-                <table className="table-modern w-full">
-                  <thead>
-                    <tr>
-                      <th>Brand</th>
-                      <th>SKU</th>
-                      <th className="text-center">Target Yield</th>
-                      <th className="text-center">Remove</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {plan.items.length === 0 && (
+                <div className="overflow-x-auto">
+                  <table className="table-modern w-full">
+                    <thead>
                       <tr>
-                        <td colSpan={4} className="p-8 text-center text-xs text-slate-400">
-                          No SKUs queued yet.
-                        </td>
+                        <th>Brand</th>
+                        <th>SKU</th>
+                        <th className="text-center">Target Yield</th>
+                        <th className="text-center">Remove</th>
                       </tr>
-                    )}
-                    {plan.items.map((i) => (
-                      <tr key={i.id}>
-                        <td className="font-semibold text-slate-700">{i.brandName}</td>
-                        <td className="text-slate-600">{i.productName}</td>
-                        <td className="text-center font-mono font-bold text-emerald-700">{i.targetYield}</td>
-                        <td className="text-center">
-                          <button className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeItem.mutate(i.id)}>
-                            <X className="h-3.5 w-3.5" strokeWidth={2.25} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {plan.items.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="p-8 text-center text-xs text-slate-400">
+                            No SKUs queued yet.
+                          </td>
+                        </tr>
+                      )}
+                      {plan.items.map((i) => (
+                        <tr key={i.id}>
+                          <td className="font-semibold text-slate-700">{i.brandName}</td>
+                          <td className="text-slate-600">{i.productName}</td>
+                          <td className="text-center font-mono font-bold text-emerald-700">{i.targetYield}</td>
+                          <td className="text-center">
+                            <button className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeItem.mutate(i.id)}>
+                              <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               {plan.result && (
@@ -264,32 +266,34 @@ export function PackagingBomPage() {
                       </button>
                     </div>
                   </div>
-                  <table className="table-modern w-full">
-                    <thead>
-                      <tr>
-                        <th>Category</th>
-                        <th>Component</th>
-                        <th>Specification</th>
-                        <th className="text-center">Base</th>
-                        <th className="text-center">Buffer</th>
-                        <th className="text-center">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {plan.result.lines.map((l, idx) => (
-                        <tr key={idx}>
-                          <td>
-                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${CATEGORY_COLOR[l.category] ?? ""}`}>{CATEGORY_LABEL[l.category] ?? l.category}</span>
-                          </td>
-                          <td className="font-semibold text-slate-700">{l.component}</td>
-                          <td className="text-slate-600">{l.spec}</td>
-                          <td className="text-center font-mono">{l.baseQty}</td>
-                          <td className="text-center font-mono">{l.bufferQty}</td>
-                          <td className="text-center font-mono font-bold text-emerald-700">{l.totalQty}</td>
+                  <div className="overflow-x-auto">
+                    <table className="table-modern w-full">
+                      <thead>
+                        <tr>
+                          <th>Category</th>
+                          <th>Component</th>
+                          <th>Specification</th>
+                          <th className="text-center">Base</th>
+                          <th className="text-center">Buffer</th>
+                          <th className="text-center">Total</th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {plan.result.lines.map((l, idx) => (
+                          <tr key={idx}>
+                            <td>
+                              <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${CATEGORY_COLOR[l.category] ?? ""}`}>{CATEGORY_LABEL[l.category] ?? l.category}</span>
+                            </td>
+                            <td className="font-semibold text-slate-700">{l.component}</td>
+                            <td className="text-slate-600">{l.spec}</td>
+                            <td className="text-center font-mono">{l.baseQty}</td>
+                            <td className="text-center font-mono">{l.bufferQty}</td>
+                            <td className="text-center font-mono font-bold text-emerald-700">{l.totalQty}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </>
