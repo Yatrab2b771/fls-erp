@@ -1,6 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
+import { ChevronDown, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import type { RoleName } from "../lib/types";
 
@@ -36,12 +36,23 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const visibleTabs = TABS.filter((tab) => !tab.roles || hasRole(...tab.roles));
   const displayName = user?.fullName ?? user?.email ?? "";
 
-  // Off-canvas on mobile/tablet, fixed-open on desktop — closed by default
-  // so a small screen never loads with the drawer already covering content.
   const [mobileOpen, setMobileOpen] = useState(false);
-  useEffect(() => setMobileOpen(false), [location.pathname]);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef<HTMLDivElement>(null);
 
-  const activeTab = [...visibleTabs].sort((a, b) => b.to.length - a.to.length).find((t) => (t.end ? location.pathname === t.to : location.pathname.startsWith(t.to)));
+  useEffect(() => {
+    setMobileOpen(false);
+    setProfileOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    function onClick(e: MouseEvent) {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) setProfileOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [profileOpen]);
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -49,93 +60,138 @@ export function AppLayout({ children }: { children: ReactNode }) {
           the whole app so the light theme reads as considered rather than
           flat, without tipping into a dark or busy surface. */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full blur-3xl" style={{ backgroundColor: "rgba(99,102,241,0.08)" }} />
-        <div className="absolute -right-24 top-1/3 h-80 w-80 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.07)" }} />
+        <div className="absolute -left-32 -top-32 h-96 w-96 rounded-full blur-3xl" style={{ backgroundColor: "rgba(99,102,241,0.06)" }} />
+        <div className="absolute -right-24 top-1/3 h-80 w-80 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.05)" }} />
       </div>
 
-      {mobileOpen && <div className="fixed inset-0 z-40 bg-slate-900/30 backdrop-blur-[2px] lg:hidden" onClick={() => setMobileOpen(false)} />}
-
-      <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-72 shrink-0 flex-col border-r border-slate-200/70 bg-white/90 backdrop-blur-xl transition-transform duration-300 ease-out lg:translate-x-0 ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
-      >
-        <div className="flex h-16 items-center gap-2.5 border-b border-slate-100 px-5">
-          <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-600 via-brand-700 to-brand-900 shadow-[0_4px_14px_-3px_rgba(79,70,229,.55),inset_0_1px_0_rgba(255,255,255,.2)]">
-            <div className="absolute inset-0 -z-10 rounded-xl bg-brand-500 opacity-40 blur-md" />
-            <Microscope className="h-4.5 w-4.5 text-white" strokeWidth={2} />
+      <nav className="glass sticky top-0 z-40 shadow-soft">
+        <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-3 px-4 md:px-6">
+          <div className="flex items-center gap-2.5">
+            <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand-600 via-brand-700 to-brand-900 shadow-[0_4px_14px_-3px_rgba(79,70,229,.55),inset_0_1px_0_rgba(255,255,255,.2)]">
+              <div className="absolute inset-0 -z-10 rounded-xl bg-brand-500 opacity-40 blur-md" />
+              <Microscope className="h-4.5 w-4.5 text-white" strokeWidth={2} />
+            </div>
+            <div className="hidden sm:block">
+              <p className="text-sm font-black leading-none tracking-tight text-slate-900">FLS ERP</p>
+              <p className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-black leading-none tracking-tight text-slate-900">FLS ERP</p>
-            <p className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
-          </div>
-          <button className="btn-icon ml-auto lg:hidden" onClick={() => setMobileOpen(false)}>
-            <X className="h-4 w-4" strokeWidth={2.25} />
-          </button>
-        </div>
 
-        <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
-          {visibleTabs.map((tab) => {
-            const Icon = tab.icon;
-            return (
-              <NavLink
-                key={tab.to}
-                to={tab.to}
-                end={tab.end}
-                className={({ isActive }) =>
-                  `group relative flex items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-bold transition-all duration-150 ${
-                    isActive ? "bg-gradient-to-r from-brand-50 to-transparent text-brand-700" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                  }`
-                }
+          {/* Desktop nav — horizontal pills, centered in the remaining space */}
+          <div className="scrollbar-none hidden flex-1 items-center justify-center gap-1 overflow-x-auto md:flex">
+            {visibleTabs.map((tab) => {
+              const Icon = tab.icon;
+              return (
+                <NavLink
+                  key={tab.to}
+                  to={tab.to}
+                  end={tab.end}
+                  className={({ isActive }) =>
+                    `flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-bold transition-all duration-150 ${
+                      isActive ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(79,70,229,.12)]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                    }`
+                  }
+                >
+                  <Icon className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+                  <span className="truncate">{tab.label}</span>
+                </NavLink>
+              );
+            })}
+          </div>
+
+          <div className="ml-auto flex items-center gap-2 md:ml-0">
+            {/* Profile dropdown — desktop */}
+            <div className="relative hidden md:block" ref={profileRef}>
+              <button
+                onClick={() => setProfileOpen((o) => !o)}
+                className="flex items-center gap-2 rounded-xl border border-transparent py-1.5 pl-1.5 pr-2.5 transition-colors hover:border-slate-200 hover:bg-slate-50"
               >
-                {({ isActive }) => (
-                  <>
-                    {isActive && <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-gradient-to-b from-brand-500 to-brand-700 shadow-[0_0_8px_rgba(79,70,229,.5)]" />}
-                    <Icon className={`h-4 w-4 shrink-0 transition-colors ${isActive ? "text-brand-600" : "text-slate-400 group-hover:text-slate-600"}`} strokeWidth={2.25} />
-                    <span className="truncate">{tab.label}</span>
-                  </>
-                )}
-              </NavLink>
-            );
-          })}
-        </nav>
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-slate-700 to-slate-900 text-[11px] font-black text-white shadow-soft">
+                  {initials(displayName)}
+                </div>
+                <div className="text-left">
+                  <p className="max-w-[9rem] truncate text-xs font-bold leading-tight text-slate-800">{displayName}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{user?.roles[0] ?? "No role"}</p>
+                </div>
+                <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition-transform ${profileOpen ? "rotate-180" : ""}`} strokeWidth={2.5} />
+              </button>
 
-        <div className="border-t border-slate-100 p-3">
-          <div className="flex items-center gap-2.5 rounded-xl p-2">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-700 to-slate-900 text-xs font-black text-white shadow-soft">
-              {initials(displayName)}
+              {profileOpen && (
+                <div className="animate-scale-in absolute right-0 top-full z-50 mt-2 w-56 origin-top-right rounded-2xl border border-slate-200/80 bg-white p-2 shadow-lift">
+                  <div className="px-2.5 py-2">
+                    <p className="truncate text-xs font-bold text-slate-800">{displayName}</p>
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {(user?.roles.length ? user.roles : ["No roles"]).map((r) => (
+                        <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-700">
+                          {r}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="my-1 border-t border-slate-100" />
+                  <button onClick={logout} className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50">
+                    <LogOut className="h-3.5 w-3.5" strokeWidth={2.25} /> Log out
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-bold leading-tight text-slate-800">{displayName}</p>
-              <div className="mt-0.5 flex flex-wrap gap-1">
-                {(user?.roles.length ? user.roles : ["No roles"]).map((r) => (
-                  <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-700">
-                    {r}
-                  </span>
-                ))}
-              </div>
-            </div>
-            <button onClick={logout} className="btn-icon shrink-0 hover:!bg-rose-50 hover:!text-rose-600" title="Log out">
-              <LogOut className="h-4 w-4" strokeWidth={2} />
+
+            <button className="btn-icon md:hidden" onClick={() => setMobileOpen((o) => !o)}>
+              {mobileOpen ? <X className="h-5 w-5" strokeWidth={2.25} /> : <Menu className="h-5 w-5" strokeWidth={2.25} />}
             </button>
           </div>
         </div>
-      </aside>
 
-      <div className="lg:pl-72">
-        <div className="glass sticky top-0 z-30 flex h-16 items-center gap-3 px-4 shadow-soft md:px-6">
-          <button className="btn-icon lg:hidden" onClick={() => setMobileOpen(true)}>
-            <Menu className="h-5 w-5" strokeWidth={2.25} />
-          </button>
-          <p className="text-sm font-black tracking-tight text-slate-900">{activeTab?.label ?? "FLS ERP"}</p>
-        </div>
-
-        <main className="mx-auto max-w-[1600px] p-4 md:p-6 xl:p-8">
-          <div key={location.pathname} className="animate-fade-in">
-            {children}
+        {/* Mobile nav — dropdown panel below the bar */}
+        {mobileOpen && (
+          <div className="animate-slide-up border-t border-slate-100 bg-white px-4 py-3 md:hidden">
+            <div className="space-y-1">
+              {visibleTabs.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <NavLink
+                    key={tab.to}
+                    to={tab.to}
+                    end={tab.end}
+                    className={({ isActive }) =>
+                      `flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-[13px] font-bold transition-colors ${
+                        isActive ? "bg-brand-50 text-brand-700" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                      }`
+                    }
+                  >
+                    <Icon className="h-4 w-4 shrink-0" strokeWidth={2.25} />
+                    {tab.label}
+                  </NavLink>
+                );
+              })}
+            </div>
+            <div className="mt-3 flex items-center gap-2.5 border-t border-slate-100 pt-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-700 to-slate-900 text-xs font-black text-white shadow-soft">
+                {initials(displayName)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-bold leading-tight text-slate-800">{displayName}</p>
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {(user?.roles.length ? user.roles : ["No roles"]).map((r) => (
+                    <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-700">
+                      {r}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <button onClick={logout} className="btn-icon shrink-0 hover:!bg-rose-50 hover:!text-rose-600" title="Log out">
+                <LogOut className="h-4 w-4" strokeWidth={2} />
+              </button>
+            </div>
           </div>
-        </main>
-      </div>
+        )}
+      </nav>
+
+      <main className="mx-auto max-w-[1600px] p-4 md:p-6 xl:p-8">
+        <div key={location.pathname} className="animate-fade-in">
+          {children}
+        </div>
+      </main>
     </div>
   );
 }

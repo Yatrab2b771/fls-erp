@@ -17,12 +17,12 @@ const FLOW_STAGES: { label: string; stages: BatchStageId[]; accent: string }[] =
   { label: "Dispatch", stages: ["BILLING_EWAY_BILL", "DISPATCH_PLAN"], accent: "emerald" },
 ];
 
-const FLOW_COLOR: Record<string, string> = {
-  slate: "bg-slate-400",
-  amber: "bg-amber-500",
-  blue: "bg-blue-500",
-  violet: "bg-violet-500",
-  emerald: "bg-emerald-500",
+const FLOW_COLOR: Record<string, { fill: string; dot: string }> = {
+  slate: { fill: "from-slate-300 to-slate-500", dot: "bg-slate-400" },
+  amber: { fill: "from-amber-300 to-amber-500", dot: "bg-amber-500" },
+  blue: { fill: "from-blue-300 to-blue-500", dot: "bg-blue-500" },
+  violet: { fill: "from-violet-300 to-violet-500", dot: "bg-violet-500" },
+  emerald: { fill: "from-emerald-300 to-emerald-500", dot: "bg-emerald-500" },
 };
 
 function greeting() {
@@ -79,24 +79,26 @@ export function DashboardPage() {
     <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[312px_1fr] xl:grid-cols-[340px_1fr]">
       {/* Main column */}
       <div className="min-w-0 space-y-5 lg:order-2">
-        {/* Plain hex-stop inline gradient (not Tailwind's CSS-custom-property
-            gradient utilities) — some browser color/theme extensions reset
-            --tw-gradient-* custom properties and wash this card out to
-            near-white, which a literal `background` value isn't subject to. */}
-        <div
-          className="hero-grid relative overflow-hidden rounded-2xl p-6 shadow-lift sm:p-8"
-          style={{ backgroundColor: "#312e81", backgroundImage: "linear-gradient(135deg, #4338ca 0%, #3730a3 55%, #0f172a 100%)" }}
-        >
-          <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(129,140,248,0.25)" }} />
-          <div className="pointer-events-none absolute -bottom-20 left-1/3 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.15)" }} />
+        {/* Light "premium" hero — a white card carrying a low-opacity brand
+            gradient mesh + soft glow blobs, rather than a solid dark panel.
+            Plain hex-stop inline gradients (not Tailwind's CSS-custom-
+            property gradient utilities) — some browser color/theme
+            extensions reset --tw-gradient-* custom properties and wash a
+            Tailwind gradient out, which a literal `background` value isn't
+            subject to. */}
+        <div className="relative overflow-hidden rounded-2xl border border-slate-200/70 bg-white p-6 shadow-lift sm:p-8">
+          <div
+            className="pointer-events-none absolute inset-0 opacity-[0.07]"
+            style={{ backgroundImage: "linear-gradient(135deg, #4338ca 0%, #7c3aed 50%, #4338ca 100%)" }}
+          />
+          <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full blur-3xl" style={{ backgroundColor: "rgba(99,102,241,0.16)" }} />
+          <div className="pointer-events-none absolute -bottom-24 left-1/4 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.12)" }} />
           <div className="relative">
-            <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.15em]" style={{ color: "#c7d2fe" }}>
+            <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.15em] text-brand-600">
               <Sparkles className="h-3.5 w-3.5" /> {greeting()}, {displayName.split(" ")[0] || "there"}
             </p>
-            <h1 className="mt-1.5 text-2xl font-black tracking-tight sm:text-3xl" style={{ color: "#ffffff" }}>
-              {orgWide ? "Command Center" : "My Dashboard"}
-            </h1>
-            <p className="mt-1.5 max-w-xl text-sm" style={{ color: "#e0e7ff" }}>
+            <h1 className="mt-1.5 text-2xl font-black tracking-tight text-slate-900 sm:text-3xl">{orgWide ? "Command Center" : "My Dashboard"}</h1>
+            <p className="mt-1.5 max-w-xl text-sm text-slate-500">
               {orgWide
                 ? "Order Tracking is one real pipeline — PO Release through Dispatch Plan, every department's status visible at a glance."
                 : "What's actually on your department's plate right now — not the whole company's order book."}
@@ -126,18 +128,26 @@ export function DashboardPage() {
               <Sparkles className="h-3.5 w-3.5" /> Production Flow — where every batch is right now
             </h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
-              {stageCounts.map((s, idx) => (
-                <div key={s.label} className="relative">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10.5px] font-bold uppercase tracking-wide text-slate-500">{s.label}</p>
-                    <p className="text-lg font-black text-slate-900">{s.count}</p>
+              {stageCounts.map((s, idx) => {
+                const color = FLOW_COLOR[s.accent]!;
+                return (
+                  <div key={s.label} className="relative">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10.5px] font-bold uppercase tracking-wide text-slate-500">{s.label}</p>
+                      <p className="text-lg font-black text-slate-900">{s.count}</p>
+                    </div>
+                    <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className={`h-full rounded-full bg-gradient-to-r ${color.fill} transition-all duration-500`}
+                        style={{ width: `${Math.max(6, (s.count / maxCount) * 100)}%` }}
+                      />
+                    </div>
+                    {idx < stageCounts.length - 1 && (
+                      <span className={`absolute -right-[7px] top-[26px] hidden h-2 w-2 rounded-full ring-2 ring-white sm:block ${color.dot}`} />
+                    )}
                   </div>
-                  <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-                    <div className={`h-full rounded-full ${FLOW_COLOR[s.accent]} transition-all`} style={{ width: `${Math.max(6, (s.count / maxCount) * 100)}%` }} />
-                  </div>
-                  {idx < stageCounts.length - 1 && <ArrowRight className="absolute -right-2.5 top-0.5 hidden h-3.5 w-3.5 text-slate-300 sm:block" strokeWidth={2.5} />}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -160,7 +170,7 @@ export function DashboardPage() {
             ) : (
               <div className="divide-y divide-slate-100">
                 {recentOrders.map((po) => (
-                  <Link key={po.id} to={`/purchase-orders/${po.id}`} className="flex items-center justify-between px-4 py-3 text-xs transition-colors hover:bg-slate-50">
+                  <Link key={po.id} to={`/purchase-orders/${po.id}`} className="flex items-center justify-between px-4 py-3 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.brand.500)]">
                     <div>
                       <p className="font-bold text-slate-700">{po.poNumber ?? po.id.slice(0, 8)}</p>
                       <p className="text-slate-400">{po.customer.companyName}</p>
@@ -175,7 +185,7 @@ export function DashboardPage() {
           ) : (
             <div className="divide-y divide-slate-100">
               {myQueueBatches.slice(0, 6).map((b) => (
-                <Link key={b.id} to={`/batches/${b.id}`} className="flex items-center justify-between px-4 py-3 text-xs transition-colors hover:bg-slate-50">
+                <Link key={b.id} to={`/batches/${b.id}`} className="flex items-center justify-between px-4 py-3 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.brand.500)]">
                   <div>
                     <p className="font-bold text-slate-700">{b.batchNo ?? b.id.slice(0, 8)}</p>
                     <p className="text-slate-400">{b.purchaseOrderItem.productName}</p>
@@ -233,7 +243,7 @@ export function DashboardPage() {
           ) : (
             <div className="divide-y divide-slate-100">
               {attentionBatches.slice(0, 5).map((b) => (
-                <Link key={b.id} to={`/batches/${b.id}`} className="block px-4 py-2.5 text-xs transition-colors hover:bg-slate-50">
+                <Link key={b.id} to={`/batches/${b.id}`} className="block px-4 py-2.5 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.rose.500)]">
                   <p className="truncate font-bold text-slate-700">{b.batchNo ?? b.id.slice(0, 8)}</p>
                   <p className="truncate text-slate-400">{b.purchaseOrderItem.productName}</p>
                   <div className="mt-1">
