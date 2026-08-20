@@ -323,6 +323,10 @@ export interface RmPlan {
 export type InventoryCategory = "RM" | "PM";
 export type InventoryTxnType = "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
 export type DispatchTransferType = "FG" | "BILL";
+// Inward QC gate — RECEIVED rows only; null for ISSUED_* rows.
+export type InventoryReceiptStatus = "PENDING_QC" | "QC_APPROVED" | "QC_REJECTED" | "ACCEPTED";
+// Outward QC gate — FG dispatch transfers only; null for BILL rows.
+export type DispatchQcStatus = "PENDING_QC" | "QC_APPROVED" | "QC_REJECTED";
 
 export interface InventoryItem {
   id: string;
@@ -344,6 +348,12 @@ export interface InventoryTransaction {
   createdAt: string;
   item: InventoryItem;
   createdBy: { id: string; fullName: string };
+  receiptStatus: InventoryReceiptStatus | null;
+  qcCheckedBy: { id: string; fullName: string } | null;
+  qcCheckedAt: string | null;
+  qcNote: string | null;
+  acceptedBy: { id: string; fullName: string } | null;
+  acceptedAt: string | null;
 }
 
 export interface InventoryStockLine {
@@ -365,6 +375,10 @@ export interface DispatchTransfer {
   createdAt: string;
   customer: { id: string; companyName: string };
   createdBy: { id: string; fullName: string };
+  qcStatus: DispatchQcStatus | null;
+  qcCheckedBy: { id: string; fullName: string } | null;
+  qcCheckedAt: string | null;
+  qcNote: string | null;
 }
 
 // --- Material Requests (indents) — the department-wise gate: PPIC

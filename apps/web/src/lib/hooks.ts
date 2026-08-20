@@ -8,8 +8,10 @@ import type {
   Customer,
   DispatchTransfer,
   DispatchTransferType,
+  DispatchQcStatus,
   InventoryCategory,
   InventoryItem,
+  InventoryReceiptStatus,
   InventoryRequest,
   InventoryRequestPurpose,
   InventoryRequestStatus,
@@ -310,18 +312,23 @@ export function useCreateInventoryItem() {
   });
 }
 
-export function useInventoryStock(category?: InventoryCategory) {
+export function useInventoryStock(category?: InventoryCategory, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["inventory", "stock", category],
     queryFn: () => api<InventoryStockLine[]>(`/api/inventory/stock${category ? `?category=${category}` : ""}`),
+    enabled: options?.enabled,
   });
 }
 
-export function useInventoryTransactions(filters?: { type?: InventoryTxnType; category?: InventoryCategory; itemId?: string }, options?: { enabled?: boolean }) {
+export function useInventoryTransactions(
+  filters?: { type?: InventoryTxnType; category?: InventoryCategory; itemId?: string; receiptStatus?: InventoryReceiptStatus },
+  options?: { enabled?: boolean },
+) {
   const params = new URLSearchParams();
   if (filters?.type) params.set("type", filters.type);
   if (filters?.category) params.set("category", filters.category);
   if (filters?.itemId) params.set("itemId", filters.itemId);
+  if (filters?.receiptStatus) params.set("receiptStatus", filters.receiptStatus);
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "transactions", filters],
@@ -377,6 +384,31 @@ export function useDeleteInventoryTransaction() {
 
 export function useInventoryVendors() {
   return useQuery({ queryKey: ["inventory", "vendors"], queryFn: () => api<string[]>("/api/inventory/vendors") });
+}
+
+// --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA_QC reviews
+// it here, then Store accepts it before it counts toward stock. ---
+
+function invalidateInventoryLedger(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+}
+
+export function useQcReviewTransaction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT"; note?: string }) =>
+      api<InventoryTransaction>(`/api/inventory/transactions/${id}/qc`, { method: "PATCH", body }),
+    onSuccess: () => invalidateInventoryLedger(qc),
+  });
+}
+
+export function useAcceptTransaction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<InventoryTransaction>(`/api/inventory/transactions/${id}/accept`, { method: "POST" }),
+    onSuccess: () => invalidateInventoryLedger(qc),
+  });
 }
 
 // --- Material Requests — the department-wise gate: PPIC requests,
@@ -442,15 +474,28 @@ export function useDeleteInventoryRequest() {
 // --- Dispatch transfer log — "FG transfer to Dispatch" / "Bill transfer
 // to Dispatch from Accounts" ---
 
-export function useDispatchTransfers(filters?: { type?: DispatchTransferType; customerId?: string }, options?: { enabled?: boolean }) {
+export function useDispatchTransfers(filters?: { type?: DispatchTransferType; customerId?: string; qcStatus?: DispatchQcStatus }, options?: { enabled?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.type) params.set("type", filters.type);
   if (filters?.customerId) params.set("customerId", filters.customerId);
+  if (filters?.qcStatus) params.set("qcStatus", filters.qcStatus);
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "dispatch-transfers", filters],
     queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers${qs ? `?${qs}` : ""}`),
     enabled: options?.enabled,
+  });
+}
+
+// Outward QC gate — FG rows only; BILL rows have no qcStatus.
+export function useQcReviewDispatchTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT"; note?: string }) =>
+      api<DispatchTransfer>(`/api/inventory/dispatch-transfers/${id}/qc`, { method: "PATCH", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] });
+    },
   });
 }
 

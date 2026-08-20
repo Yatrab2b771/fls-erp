@@ -63,6 +63,9 @@ model User {
   dispatchTransfers      DispatchTransfer[]
   inventoryRequested     InventoryRequest[]      @relation("InventoryRequestRequestedBy")
   inventoryReviewed      InventoryRequest[]      @relation("InventoryRequestReviewedBy")
+  inventoryQcChecked     InventoryTransaction[]  @relation("InventoryTxnQcCheckedBy")
+  inventoryAccepted      InventoryTransaction[]  @relation("InventoryTxnAcceptedBy")
+  dispatchQcChecked      DispatchTransfer[]      @relation("DispatchTransferQcCheckedBy")
 
   @@map("users")
 }
@@ -601,6 +604,17 @@ enum InventoryTxnType {
   ISSUED_PRODUCTION
 }
 
+// Inward QC gate on a RECEIVED row — meaningless for ISSUED_* rows
+// (null there). QC_REJECTED is terminal; ACCEPTED is the only state that
+// counts toward receivedQty in the stock formula, so a delivery sitting
+// in QC or rejected doesn't inflate on-hand stock.
+enum InventoryReceiptStatus {
+  PENDING_QC
+  QC_APPROVED
+  QC_REJECTED
+  ACCEPTED
+}
+
 model InventoryItem {
   id        String            @id @default(uuid())
   category  InventoryCategory
@@ -677,17 +691,40 @@ model InventoryTransaction {
   fulfillsRequestId String?           @unique
   fulfillsRequest   InventoryRequest? @relation(fields: [fulfillsRequestId], references: [id])
 
-  item      InventoryItem @relation(fields: [itemId], references: [id])
-  createdBy User          @relation(fields: [createdById], references: [id])
+  // Inward QC — set on create for RECEIVED rows only (PENDING_QC),
+  // stays null for ISSUED_* rows the whole way through.
+  receiptStatus InventoryReceiptStatus?
+  qcCheckedById String?
+  qcCheckedAt   DateTime?
+  qcNote        String?
+  acceptedById  String?
+  acceptedAt    DateTime?
+
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  createdBy   User          @relation(fields: [createdById], references: [id])
+  qcCheckedBy User?         @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
+  acceptedBy  User?         @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
 
   @@index([itemId])
   @@index([type, date])
+  @@index([receiptStatus])
   @@map("inventory_transactions")
 }
 
 enum DispatchTransferType {
   FG
   BILL
+}
+
+// Outward QC gate — FG rows only (goods physically leaving); BILL rows
+// (a billing document, not goods) skip QC entirely and stay null. Not a
+// stock gate — Dispatch Transfer never affects stock either way, QC
+// here only blocks the transfer from being treated as cleared to hand
+// off to Dispatch.
+enum DispatchQcStatus {
+  PENDING_QC
+  QC_APPROVED
+  QC_REJECTED
 }
 
 // One row per "FG transfer to Dispatch" / "Bill transfer to Dispatch from
@@ -705,10 +742,19 @@ model DispatchTransfer {
   createdById String
   createdAt   DateTime             @default(now())
 
-  customer  Customer @relation(fields: [customerId], references: [id])
-  createdBy User     @relation(fields: [createdById], references: [id])
+  // Outward QC — set on create for FG rows only (PENDING_QC); stays
+  // null for BILL rows.
+  qcStatus      DispatchQcStatus?
+  qcCheckedById String?
+  qcCheckedAt   DateTime?
+  qcNote        String?
+
+  customer    Customer @relation(fields: [customerId], references: [id])
+  createdBy   User     @relation(fields: [createdById], references: [id])
+  qcCheckedBy User?    @relation("DispatchTransferQcCheckedBy", fields: [qcCheckedById], references: [id])
 
   @@index([customerId])
   @@index([type, date])
+  @@index([qcStatus])
   @@map("dispatch_transfers")
 }

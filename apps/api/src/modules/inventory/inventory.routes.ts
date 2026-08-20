@@ -11,6 +11,7 @@ import {
   createInventoryTransactionSchema,
   importInventoryTransactionsSchema,
   issueInventoryRequestSchema,
+  qcReviewSchema,
   reviewInventoryRequestSchema,
   updateInventoryItemSchema,
   type CreateDispatchTransferInput,
@@ -19,10 +20,11 @@ import {
   type CreateInventoryTransactionInput,
   type ImportInventoryTransactionsInput,
   type IssueInventoryRequestInput,
+  type QcReviewInput,
   type ReviewInventoryRequestInput,
   type UpdateInventoryItemInput,
 } from "./inventory.schemas";
-import type { DispatchTransferType, InventoryCategory, InventoryRequestStatus, Prisma } from "@prisma/client";
+import type { DispatchQcStatus, DispatchTransferType, InventoryCategory, InventoryReceiptStatus, InventoryRequestStatus, Prisma } from "@prisma/client";
 
 export const inventoryRouter = Router();
 
@@ -92,7 +94,9 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, nex
 
     const [items, receivedTotals, issuedDayStoreTotals, issuedProductionTotals] = await Promise.all([
       prisma.inventoryItem.findMany({ where: category ? { category } : undefined, orderBy: [{ category: "asc" }, { name: "asc" }] }),
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED" }, _sum: { quantity: true } }),
+      // Only ACCEPTED counts — a delivery still sitting in QC, or one QC
+      // rejected, hasn't actually become usable stock yet.
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED", receiptStatus: "ACCEPTED" }, _sum: { quantity: true } }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
     ]);
@@ -137,14 +141,23 @@ inventoryRouter.get("/vendors", requireRole("STORE"), async (_req, res, next) =>
 // Issued to day store" / "MATERIAL Issued to Production"), told apart by
 // `type`, on one endpoint ---
 
-const txnInclude = { item: true, createdBy: { select: { id: true, fullName: true } } } satisfies Prisma.InventoryTransactionInclude;
+const txnInclude = {
+  item: true,
+  createdBy: { select: { id: true, fullName: true } },
+  qcCheckedBy: { select: { id: true, fullName: true } },
+  acceptedBy: { select: { id: true, fullName: true } },
+} satisfies Prisma.InventoryTransactionInclude;
 
-inventoryRouter.get("/transactions", requireRole("STORE"), async (req, res, next) => {
+// QA_QC needs to see the Received log (to know what's awaiting inward
+// QC), not the rest of the ledger — the frontend scopes what it actually
+// shows per role, same pattern as PPIC's narrower Inventory access above.
+inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC"), async (req, res, next) => {
   try {
-    const { type, category, itemId } = req.query as {
+    const { type, category, itemId, receiptStatus } = req.query as {
       type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
       category?: InventoryCategory;
       itemId?: string;
+      receiptStatus?: InventoryReceiptStatus;
     };
     const pagination = parsePagination(req);
 
@@ -152,6 +165,7 @@ inventoryRouter.get("/transactions", requireRole("STORE"), async (req, res, next
       ...(type ? { type } : {}),
       ...(itemId ? { itemId } : {}),
       ...(category ? { item: { category } } : {}),
+      ...(receiptStatus ? { receiptStatus } : {}),
     };
 
     const [total, transactions] = await Promise.all([
@@ -209,6 +223,9 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
         size: row.size,
         vendorName: row.vendorName,
         createdById: req.user!.id,
+        // Same inward QC gate as a single manual entry — a bulk sheet
+        // doesn't get to skip QA/QC just because it came in as a batch.
+        receiptStatus: type === "RECEIVED" ? "PENDING_QC" : undefined,
       })),
     });
 
@@ -242,7 +259,10 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
 
     const txn = await prisma.inventoryTransaction.create({
-      data: { itemId, ...rest, createdById: req.user!.id },
+      // Inward QC gate: a fresh RECEIVED row starts PENDING_QC and won't
+      // count toward stock until QA/QC approves it and Store accepts it
+      // (see PATCH /transactions/:id/qc and POST /transactions/:id/accept).
+      data: { itemId, ...rest, createdById: req.user!.id, receiptStatus: rest.type === "RECEIVED" ? "PENDING_QC" : undefined },
       include: txnInclude,
     });
 
@@ -273,6 +293,59 @@ inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: Au
     await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_removed", entityType: "InventoryTransaction", entityId: req.params.id, metadata: { itemId: txn.itemId, type: txn.type } });
 
     res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA/QC checks it
+// (this route), then Store accepts it (the next route) before it counts
+// toward stock. QC_REJECTED is terminal. ---
+
+inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC"), validateBody(qcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Transaction not found" });
+    if (existing.type !== "RECEIVED") return res.status(400).json({ error: "Only a Material Received entry goes through inward QC" });
+    if (existing.receiptStatus !== "PENDING_QC") return res.status(409).json({ error: `This entry is already ${existing.receiptStatus?.toLowerCase().replace("_", " ")}` });
+
+    const { action, note } = req.body as QcReviewInput;
+
+    const updated = await prisma.inventoryTransaction.update({
+      where: { id: req.params.id },
+      data: { receiptStatus: action === "APPROVE" ? "QC_APPROVED" : "QC_REJECTED", qcCheckedById: req.user!.id, qcCheckedAt: new Date(), qcNote: note },
+      include: txnInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: action === "APPROVE" ? "inventory.receipt_qc_approved" : "inventory.receipt_qc_rejected",
+      entityType: "InventoryTransaction",
+      entityId: updated.id,
+      metadata: { note },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.post("/transactions/:id/accept", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Transaction not found" });
+    if (existing.receiptStatus !== "QC_APPROVED") return res.status(409).json({ error: "Only a QC-approved entry can be accepted into stock" });
+
+    const updated = await prisma.inventoryTransaction.update({
+      where: { id: req.params.id },
+      data: { receiptStatus: "ACCEPTED", acceptedById: req.user!.id, acceptedAt: new Date() },
+      include: txnInclude,
+    });
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory.receipt_accepted", entityType: "InventoryTransaction", entityId: updated.id, metadata: { quantity: updated.quantity } });
+
+    res.json(updated);
   } catch (err) {
     next(err);
   }
@@ -437,16 +510,20 @@ inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req
 const dispatchTransferInclude = {
   customer: { select: { id: true, companyName: true } },
   createdBy: { select: { id: true, fullName: true } },
+  qcCheckedBy: { select: { id: true, fullName: true } },
 } satisfies Prisma.DispatchTransferInclude;
 
-inventoryRouter.get("/dispatch-transfers", requireRole("STORE"), async (req, res, next) => {
+// QA_QC needs to see FG transfers awaiting outward QC — BILL rows never
+// carry a qcStatus, so there's nothing for QA_QC to act on there.
+inventoryRouter.get("/dispatch-transfers", requireRole("STORE", "QA_QC"), async (req, res, next) => {
   try {
-    const { type, customerId } = req.query as { type?: DispatchTransferType; customerId?: string };
+    const { type, customerId, qcStatus } = req.query as { type?: DispatchTransferType; customerId?: string; qcStatus?: DispatchQcStatus };
     const pagination = parsePagination(req);
 
     const where: Prisma.DispatchTransferWhereInput = {
       ...(type ? { type } : {}),
       ...(customerId ? { customerId } : {}),
+      ...(qcStatus ? { qcStatus } : {}),
     };
 
     const [total, transfers] = await Promise.all([
@@ -468,7 +545,10 @@ inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(c
     if (!customer) return res.status(400).json({ error: "Unknown customer" });
 
     const transfer = await prisma.dispatchTransfer.create({
-      data: { customerId, ...rest, createdById: req.user!.id },
+      // Outward QC gate: an FG row starts PENDING_QC (see PATCH
+      // /dispatch-transfers/:id/qc); BILL rows are paperwork, not goods,
+      // so they carry no qcStatus at all.
+      data: { customerId, ...rest, createdById: req.user!.id, qcStatus: rest.type === "FG" ? "PENDING_QC" : undefined },
       include: dispatchTransferInclude,
     });
 
@@ -481,6 +561,39 @@ inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(c
     });
 
     res.status(201).json(transfer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Outward QC gate — FG rows only; BILL rows have no qcStatus and
+// this route rejects them outright. QC_REJECTED is terminal, same as
+// the inward gate. ---
+
+inventoryRouter.patch("/dispatch-transfers/:id/qc", requireRole("QA_QC"), validateBody(qcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Dispatch transfer not found" });
+    if (existing.type !== "FG") return res.status(400).json({ error: "Only an FG transfer goes through outward QC" });
+    if (existing.qcStatus !== "PENDING_QC") return res.status(409).json({ error: `This transfer is already ${existing.qcStatus?.toLowerCase().replace("_", " ")}` });
+
+    const { action, note } = req.body as QcReviewInput;
+
+    const updated = await prisma.dispatchTransfer.update({
+      where: { id: req.params.id },
+      data: { qcStatus: action === "APPROVE" ? "QC_APPROVED" : "QC_REJECTED", qcCheckedById: req.user!.id, qcCheckedAt: new Date(), qcNote: note },
+      include: dispatchTransferInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: action === "APPROVE" ? "inventory.dispatch_qc_approved" : "inventory.dispatch_qc_rejected",
+      entityType: "DispatchTransfer",
+      entityId: updated.id,
+      metadata: { note },
+    });
+
+    res.json(updated);
   } catch (err) {
     next(err);
   }

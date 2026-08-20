@@ -91,6 +91,17 @@ export const issueInventoryRequestSchema = z.object({
   size: z.string().max(120).optional(),
 });
 
+// --- Quality Check gates — QA/QC checks, Store/Dispatch acts on the
+// result. Reject requires a note both times, same "why" requirement as
+// rejecting a Material Request. ---
+
+export const qcReviewSchema = z
+  .object({
+    action: z.enum(["APPROVE", "REJECT"]),
+    note: z.string().max(500).optional(),
+  })
+  .refine((v) => v.action !== "REJECT" || !!v.note, { message: "A note is required when rejecting QC", path: ["note"] });
+
 export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>;
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;
 export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTransactionSchema>;
@@ -99,3 +110,4 @@ export type ImportInventoryTransactionsInput = z.infer<typeof importInventoryTra
 export type CreateInventoryRequestInput = z.infer<typeof createInventoryRequestSchema>;
 export type ReviewInventoryRequestInput = z.infer<typeof reviewInventoryRequestSchema>;
 export type IssueInventoryRequestInput = z.infer<typeof issueInventoryRequestSchema>;
+export type QcReviewInput = z.infer<typeof qcReviewSchema>;

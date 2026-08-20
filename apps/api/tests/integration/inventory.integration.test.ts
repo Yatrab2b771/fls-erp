@@ -61,11 +61,20 @@ describe("Inventory module", () => {
   it("computes stock on hand as sum(RECEIVED) - sum(ISSUED_DAY_STORE) - sum(ISSUED_PRODUCTION) per item", async () => {
     const { token } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: qaToken } = await createUser(["QA_QC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(token)).send({ category: "RM", name: "Whey Protein", unit: "Kg" });
     const itemId = item.body.id;
 
-    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
-    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-02", unit: "Kg", quantity: 50 });
+    // A RECEIVED row only counts once it clears inward QC and Store
+    // accepts it — see the dedicated "Inward QC gate" describe block.
+    const r1 = await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
+    await request(app).patch(`/api/inventory/transactions/${r1.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+    await request(app).post(`/api/inventory/transactions/${r1.body.id}/accept`).set(authHeader(token));
+
+    const r2 = await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-02", unit: "Kg", quantity: 50 });
+    await request(app).patch(`/api/inventory/transactions/${r2.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+    await request(app).post(`/api/inventory/transactions/${r2.body.id}/accept`).set(authHeader(token));
+
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-03", unit: "Kg", quantity: 30 });
 
     // ISSUED_PRODUCTION can only reach the ledger through an approved
@@ -231,6 +240,120 @@ describe("Inventory module", () => {
 
       const asStore = await request(app).get("/api/inventory/requests").set(authHeader(storeToken));
       expect(asStore.body.length).toBe(2);
+    });
+  });
+
+  describe("Inward QC gate — Material Received", () => {
+    it("starts PENDING_QC and doesn't count toward stock until QC-approved and accepted", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const itemId = item.body.id;
+
+      const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
+      expect(created.body.receiptStatus).toBe("PENDING_QC");
+
+      const stockBefore = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stockBefore.body[0].receivedQty).toBe(0);
+      expect(stockBefore.body[0].onHand).toBe(0);
+
+      const acceptBeforeQc = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
+      expect(acceptBeforeQc.status).toBe(409);
+
+      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      expect(approved.status).toBe(200);
+      expect(approved.body.receiptStatus).toBe("QC_APPROVED");
+
+      const stockStillPending = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stockStillPending.body[0].receivedQty).toBe(0);
+
+      const accepted = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
+      expect(accepted.status).toBe(200);
+      expect(accepted.body.receiptStatus).toBe("ACCEPTED");
+
+      const stockAfter = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stockAfter.body[0].receivedQty).toBe(100);
+      expect(stockAfter.body[0].onHand).toBe(100);
+    });
+
+    it("is role-gated: only QA_QC reviews, only Store accepts", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
+
+      const deniedQc = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+      expect(deniedQc.status).toBe(403);
+
+      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+
+      const deniedAccept = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(qaToken));
+      expect(deniedAccept.status).toBe(403);
+    });
+
+    it("QC rejection requires a note and is terminal — a rejected entry can't be accepted", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
+
+      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "REJECT" });
+      expect(missingNote.status).toBe(400);
+
+      const rejected = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "REJECT", note: "Damaged packaging" });
+      expect(rejected.status).toBe(200);
+      expect(rejected.body.receiptStatus).toBe("QC_REJECTED");
+
+      const accept = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
+      expect(accept.status).toBe(409);
+    });
+  });
+
+  describe("Outward QC gate — FG dispatch transfers", () => {
+    it("an FG transfer starts PENDING_QC; a BILL transfer never gets a qcStatus", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: bdToken } = await createUser(["BD"]);
+      const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
+
+      const fg = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+      expect(fg.body.qcStatus).toBe("PENDING_QC");
+
+      const bill = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "BILL", date: "2026-08-11", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+      expect(bill.body.qcStatus).toBeNull();
+    });
+
+    it("only QA_QC can review outward QC, and a BILL transfer can't go through it", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const { token: bdToken } = await createUser(["BD"]);
+      const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
+      const fg = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+      const bill = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "BILL", date: "2026-08-11", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
+
+      const deniedRole = await request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+      expect(deniedRole.status).toBe(403);
+
+      const wrongType = await request(app).patch(`/api/inventory/dispatch-transfers/${bill.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      expect(wrongType.status).toBe(400);
+
+      const approved = await request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      expect(approved.status).toBe(200);
+      expect(approved.body.qcStatus).toBe("QC_APPROVED");
+
+      const again = await request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      expect(again.status).toBe(409);
     });
   });
 });
