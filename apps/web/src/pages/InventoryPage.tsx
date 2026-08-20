@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, Boxes, FileText, Package, Plus, Send, Trash2, Truck, Upload, UserPlus, Warehouse, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, Boxes, Download, FileText, Package, Plus, Send, Trash2, Truck, Upload, UserPlus, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useCreateDispatchTransfer,
@@ -16,6 +16,7 @@ import {
 } from "../lib/hooks";
 import type { DispatchTransferType, InventoryCategory, InventoryTxnType } from "../lib/types";
 import { parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
+import { exportDispatchReport, exportStockReport, exportTransactionReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -84,6 +85,20 @@ export function InventoryPage() {
     setShowForm(false);
   }
 
+  function handleExport() {
+    if (tab === "stock") {
+      if (!filteredStock?.length) return toast.error("Nothing to export — no stock rows match.");
+      exportStockReport(filteredStock);
+    } else if (dispatchTab) {
+      if (!filteredDispatch?.length) return toast.error("Nothing to export — no entries match.");
+      exportDispatchReport(filteredDispatch, DISPATCH_TYPE_LABEL[tab], DISPATCH_TYPE_LABEL[tab].replace(/\s+/g, "_"));
+    } else {
+      if (!filteredTxns?.length) return toast.error("Nothing to export — no entries match.");
+      exportTransactionReport(filteredTxns, TXN_TYPE_LABEL[tab], TXN_TYPE_LABEL[tab].replace(/\s+/g, "_"));
+    }
+    toast.success("Report downloaded — ready to share with the department.");
+  }
+
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file next time
@@ -109,27 +124,32 @@ export function InventoryPage() {
           <h1 className="text-2xl font-black tracking-tight text-slate-900">Inventory</h1>
           <p className="text-sm text-slate-500">Warehouse-level material received, material issued, and dispatch transfers.</p>
         </div>
-        {canWrite && (
-          <div className="flex items-center gap-2">
-            {materialTab && (
-              <>
-                <button className="btn-ghost" disabled={importTxns.isPending} onClick={() => importFileRef.current?.click()}>
-                  <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
-                </button>
-                <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
-              </>
-            )}
-            <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
-              {showForm ? (
-                <X className="h-4 w-4" strokeWidth={2.5} />
-              ) : (
+        <div className="flex items-center gap-2">
+          <button className="btn-ghost" onClick={handleExport} title="Download this tab as an Excel report">
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
+          </button>
+          {canWrite && (
+            <>
+              {materialTab && (
                 <>
-                  <Plus className="h-4 w-4" strokeWidth={2.5} /> Log Entry
+                  <button className="btn-ghost" disabled={importTxns.isPending} onClick={() => importFileRef.current?.click()}>
+                    <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
+                  </button>
+                  <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
                 </>
               )}
-            </button>
-          </div>
-        )}
+              <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
+                {showForm ? (
+                  <X className="h-4 w-4" strokeWidth={2.5} />
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4" strokeWidth={2.5} /> Log Entry
+                  </>
+                )}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
