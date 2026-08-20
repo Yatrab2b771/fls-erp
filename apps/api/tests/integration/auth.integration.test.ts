@@ -25,6 +25,30 @@ describe("POST /api/auth/register + login", () => {
   });
 });
 
+describe("POST /api/auth/login rate limiting", () => {
+  it("is keyed by IP + email together, not IP alone — exhausting one account's attempts doesn't lock out a different account from the same IP", async () => {
+    await request(app).post("/api/auth/register").send({ email: "victim@fls.test", password: "SuperSecret123", fullName: "Victim" });
+    await request(app).post("/api/auth/register").send({ email: "bystander@fls.test", password: "SuperSecret123", fullName: "Bystander" });
+
+    // Burn through the 10-attempt window on one account (e.g. someone
+    // mistyping their password repeatedly).
+    let lastStatus = 0;
+    for (let i = 0; i < 10; i++) {
+      const res = await request(app).post("/api/auth/login").send({ email: "victim@fls.test", password: "WrongPassword" });
+      lastStatus = res.status;
+    }
+    expect(lastStatus).toBe(401); // the 10 allowed attempts still just fail auth, not rate-limited yet
+
+    const eleventh = await request(app).post("/api/auth/login").send({ email: "victim@fls.test", password: "WrongPassword" });
+    expect(eleventh.status).toBe(429);
+
+    // A different account hitting the API from the same test client (same
+    // source IP in this harness) is completely unaffected.
+    const bystander = await request(app).post("/api/auth/login").send({ email: "bystander@fls.test", password: "SuperSecret123" });
+    expect(bystander.status).toBe(200);
+  });
+});
+
 describe("GET /api/auth/me", () => {
   it("requires a bearer token and returns the current user's roles", async () => {
     const denied = await request(app).get("/api/auth/me");
