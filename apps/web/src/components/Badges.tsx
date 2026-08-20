@@ -50,6 +50,24 @@ export function PoStatusBadge({ status }: { status: "DRAFT" | "APPROVED" | "REJE
   return <span className={`pill ${PO_STATUS_COLOR[status]}`}>{status[0]}{status.slice(1).toLowerCase()}</span>;
 }
 
+// Material Request lifecycle — PENDING → APPROVED/REJECTED → ISSUED.
+const REQUEST_STATUS_COLOR: Record<"PENDING" | "APPROVED" | "REJECTED" | "ISSUED", string> = {
+  PENDING: "bg-amber-50 text-amber-700 border-amber-200",
+  APPROVED: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  REJECTED: "bg-rose-50 text-rose-700 border-rose-200",
+  ISSUED: "bg-brand-50 text-brand-700 border-brand-200",
+};
+
+export function RequestStatusBadge({ status }: { status: "PENDING" | "APPROVED" | "REJECTED" | "ISSUED" }) {
+  return (
+    <span className={`pill ${REQUEST_STATUS_COLOR[status]}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${status === "PENDING" ? "animate-pulse bg-amber-500" : status === "APPROVED" ? "bg-emerald-500" : status === "REJECTED" ? "bg-rose-500" : "bg-brand-500"}`} />
+      {status[0]}
+      {status.slice(1).toLowerCase()}
+    </span>
+  );
+}
+
 export function DelayBadge({ delay }: { delay: BatchDelay }) {
   if (!delay.isDelayed) return null;
   const against = delay.against === "dispatchPlanDate" ? "Dispatch Plan" : "Production Plan";

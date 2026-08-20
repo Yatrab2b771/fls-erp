@@ -49,6 +49,7 @@ beforeEach(async () => {
   await prisma.$transaction([
     prisma.dispatchTransfer.deleteMany(),
     prisma.inventoryTransaction.deleteMany(),
+    prisma.inventoryRequest.deleteMany(),
     prisma.inventoryItem.deleteMany(),
     prisma.batchStageEvent.deleteMany(),
     prisma.batch.deleteMany(),

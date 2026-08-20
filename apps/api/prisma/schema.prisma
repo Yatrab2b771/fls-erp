@@ -56,6 +56,8 @@ model User {
   batchStageEvents       BatchStageEvent[]
   inventoryTxns          InventoryTransaction[]
   dispatchTransfers      DispatchTransfer[]
+  inventoryRequested     InventoryRequest[]      @relation("InventoryRequestRequestedBy")
+  inventoryReviewed      InventoryRequest[]      @relation("InventoryRequestReviewedBy")
 
   @@map("users")
 }
@@ -603,9 +605,50 @@ model InventoryItem {
   updatedAt DateTime          @updatedAt
 
   transactions InventoryTransaction[]
+  requests     InventoryRequest[]
 
   @@unique([category, name])
   @@map("inventory_items")
+}
+
+enum InventoryRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ISSUED
+}
+
+// The department-wise gate this module was missing: PPIC raises a
+// material indent (same real-world role that owns the Batch pipeline's
+// Indent Issue stage) *before* Store can decide what actually leaves the
+// shelf for Production — Store can no longer just log an
+// ISSUED_PRODUCTION entry out of thin air. Day Store issuance and
+// Received stay direct Store entries; this gate is specifically the
+// "which material goes to production" decision point called out as
+// missing.
+model InventoryRequest {
+  id              String                 @id @default(uuid())
+  itemId          String
+  category        InventoryCategory
+  requestedQty    Float
+  purpose         InventoryTxnType // ISSUED_DAY_STORE | ISSUED_PRODUCTION — never RECEIVED, enforced at the API
+  neededBy        DateTime?
+  note            String?
+  status          InventoryRequestStatus @default(PENDING)
+  requestedById   String
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String? // required by the API when rejecting
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  item        InventoryItem         @relation(fields: [itemId], references: [id])
+  requestedBy User                  @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy  User?                 @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
+  fulfillment InventoryTransaction?
+
+  @@index([status])
+  @@map("inventory_requests")
 }
 
 // One row per Material Received / Material Issued entry off the Warehouse
@@ -622,6 +665,12 @@ model InventoryTransaction {
   vendorName  String? // mainly for RECEIVED; optional either direction
   createdById String
   createdAt   DateTime         @default(now())
+
+  // Set only when this ISSUED_* row is Store fulfilling an approved
+  // InventoryRequest, not a direct entry — @unique because one approved
+  // request is fulfilled by exactly one issue transaction.
+  fulfillsRequestId String?           @unique
+  fulfillsRequest   InventoryRequest? @relation(fields: [fulfillsRequestId], references: [id])
 
   item      InventoryItem @relation(fields: [itemId], references: [id])
   createdBy User          @relation(fields: [createdById], references: [id])

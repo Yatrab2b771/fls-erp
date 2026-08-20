@@ -3,6 +3,9 @@ import { z } from "zod";
 const CATEGORIES = ["RM", "PM"] as const;
 const TXN_TYPES = ["RECEIVED", "ISSUED_DAY_STORE", "ISSUED_PRODUCTION"] as const;
 const DISPATCH_TRANSFER_TYPES = ["FG", "BILL"] as const;
+// A request's purpose is never RECEIVED — receiving stock isn't something
+// a department "requests", it's what Store logs when it arrives.
+const REQUEST_PURPOSES = ["ISSUED_DAY_STORE", "ISSUED_PRODUCTION"] as const;
 
 export const createInventoryItemSchema = z.object({
   category: z.enum(CATEGORIES),
@@ -57,8 +60,42 @@ export const importInventoryTransactionsSchema = z.object({
     .max(2000),
 });
 
+// --- Material Requests (indents) — the department-wise gate: PPIC raises
+// one of these before Store can decide what actually gets issued to
+// Production (or Day Store). Mirrors PurchaseOrder's Draft → Approve/
+// Reject shape, plus a third terminal step (Issued) once Store fulfills it. ---
+
+export const createInventoryRequestSchema = z.object({
+  itemId: z.string().uuid(),
+  category: z.enum(CATEGORIES),
+  requestedQty: z.coerce.number().positive(),
+  purpose: z.enum(REQUEST_PURPOSES),
+  neededBy: z.coerce.date().optional(),
+  note: z.string().max(500).optional(),
+});
+
+export const reviewInventoryRequestSchema = z
+  .object({
+    action: z.enum(["APPROVE", "REJECT"]),
+    rejectionReason: z.string().min(1).max(500).optional(),
+  })
+  .refine((v) => v.action !== "REJECT" || !!v.rejectionReason, { message: "A rejection reason is required", path: ["rejectionReason"] });
+
+// What Store actually issued against an approved request — quantity is
+// separate from requestedQty so a partial issue is honest about what
+// left the shelf, not just an echo of what was asked for.
+export const issueInventoryRequestSchema = z.object({
+  date: z.coerce.date(),
+  unit: z.string().min(1).max(40),
+  quantity: z.coerce.number().positive(),
+  size: z.string().max(120).optional(),
+});
+
 export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>;
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;
 export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTransactionSchema>;
 export type CreateDispatchTransferInput = z.infer<typeof createDispatchTransferSchema>;
 export type ImportInventoryTransactionsInput = z.infer<typeof importInventoryTransactionsSchema>;
+export type CreateInventoryRequestInput = z.infer<typeof createInventoryRequestSchema>;
+export type ReviewInventoryRequestInput = z.infer<typeof reviewInventoryRequestSchema>;
+export type IssueInventoryRequestInput = z.infer<typeof issueInventoryRequestSchema>;

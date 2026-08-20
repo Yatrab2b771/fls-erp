@@ -14,11 +14,15 @@ import type { RoleName } from "../lib/types";
 // user (unchanged), so nothing is actually inaccessible, just decluttered.
 // Inventory is different: the API itself is locked to STORE/ADMIN (it's
 // the Warehouse department's own tool, not a company-wide view), so the
-// tab is hidden the same way, not just decluttered.
+// tab is hidden the same way, not just decluttered. PPIC also gets in
+// now, but only for the Material Requests workflow — the API still
+// blocks PPIC from the received/issued ledger and dispatch log
+// themselves (see inventory.routes.ts), the page just adapts what it
+// shows per role.
 const TABS: { to: string; label: string; icon: typeof Truck; roles?: RoleName[]; end?: boolean }[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/purchase-orders", label: "Order Tracking", icon: Truck },
-  { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE"] },
+  { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC"] },
   { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["PPIC", "PURCHASE"] },
   { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["PPIC", "BD"] },
   { to: "/users", label: "Users", icon: ShieldCheck, roles: ["ADMIN"] },

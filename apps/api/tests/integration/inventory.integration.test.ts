@@ -60,13 +60,19 @@ describe("Inventory module", () => {
 
   it("computes stock on hand as sum(RECEIVED) - sum(ISSUED_DAY_STORE) - sum(ISSUED_PRODUCTION) per item", async () => {
     const { token } = await createUser(["STORE"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(token)).send({ category: "RM", name: "Whey Protein", unit: "Kg" });
     const itemId = item.body.id;
 
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-02", unit: "Kg", quantity: 50 });
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-03", unit: "Kg", quantity: 30 });
-    await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_PRODUCTION", date: "2026-08-04", unit: "Kg", quantity: 20 });
+
+    // ISSUED_PRODUCTION can only reach the ledger through an approved
+    // Material Request — see the dedicated describe block below.
+    const req = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId, category: "RM", requestedQty: 20, purpose: "ISSUED_PRODUCTION" });
+    await request(app).patch(`/api/inventory/requests/${req.body.id}/review`).set(authHeader(token)).send({ action: "APPROVE" });
+    await request(app).post(`/api/inventory/requests/${req.body.id}/issue`).set(authHeader(token)).send({ date: "2026-08-04", unit: "Kg", quantity: 20 });
 
     const stock = await request(app).get("/api/inventory/stock").set(authHeader(token));
     expect(stock.status).toBe(200);
@@ -128,5 +134,103 @@ describe("Inventory module", () => {
       .set(authHeader(storeToken))
       .send({ type: "FG", date: "2026-08-10", customerId: "00000000-0000-0000-0000-000000000000", productName: "X", quantity: 1 });
     expect(rejectUnknownCustomer.status).toBe(400);
+  });
+
+  describe("Material Requests — the department-wise gate on Issued to Production", () => {
+    it("blocks a direct ISSUED_PRODUCTION entry — it must come from an approved request", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      const direct = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(storeToken))
+        .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(direct.status).toBe(400);
+
+      // ADMIN can still bypass, same override pattern as the Batch pipeline's JUMP action.
+      const { token: adminToken } = await createUser(["ADMIN"]);
+      const asAdmin = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(adminToken))
+        .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(asAdmin.status).toBe(201);
+    });
+
+    it("only PPIC can raise a request; only Store can review or issue it", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const { token: plainToken } = await createUser([]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      const deniedCreate = await request(app)
+        .post("/api/inventory/requests")
+        .set(authHeader(plainToken))
+        .send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
+      expect(deniedCreate.status).toBe(403);
+
+      const created = await request(app)
+        .post("/api/inventory/requests")
+        .set(authHeader(ppicToken))
+        .send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
+      expect(created.status).toBe(201);
+      expect(created.body.status).toBe("PENDING");
+
+      const deniedReview = await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(ppicToken)).send({ action: "APPROVE" });
+      expect(deniedReview.status).toBe(403);
+
+      const approved = await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+      expect(approved.status).toBe(200);
+      expect(approved.body.status).toBe("APPROVED");
+
+      const deniedIssue = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(ppicToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(deniedIssue.status).toBe(403);
+
+      const issued = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(issued.status).toBe(201);
+      expect(issued.body.type).toBe("ISSUED_PRODUCTION");
+
+      const doubleIssue = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(doubleIssue.status).toBe(409);
+    });
+
+    it("rejecting a request requires a reason, and a rejected request can't be issued", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const created = await request(app)
+        .post("/api/inventory/requests")
+        .set(authHeader(ppicToken))
+        .send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
+
+      const missingReason = await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(storeToken)).send({ action: "REJECT" });
+      expect(missingReason.status).toBe(400);
+
+      const rejected = await request(app)
+        .patch(`/api/inventory/requests/${created.body.id}/review`)
+        .set(authHeader(storeToken))
+        .send({ action: "REJECT", rejectionReason: "Not enough stock this week" });
+      expect(rejected.status).toBe(200);
+      expect(rejected.body.status).toBe("REJECTED");
+
+      const issueRejected = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(issueRejected.status).toBe(409);
+    });
+
+    it("PPIC only sees its own requests; Store/Admin see all", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken1 } = await createUser(["PPIC"]);
+      const { token: ppicToken2 } = await createUser(["PPIC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      await request(app).post("/api/inventory/requests").set(authHeader(ppicToken1)).send({ itemId: item.body.id, category: "RM", requestedQty: 5, purpose: "ISSUED_PRODUCTION" });
+      await request(app).post("/api/inventory/requests").set(authHeader(ppicToken2)).send({ itemId: item.body.id, category: "RM", requestedQty: 7, purpose: "ISSUED_DAY_STORE" });
+
+      const asPpic1 = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken1));
+      expect(asPpic1.body.length).toBe(1);
+      expect(asPpic1.body[0].requestedQty).toBe(5);
+
+      const asStore = await request(app).get("/api/inventory/requests").set(authHeader(storeToken));
+      expect(asStore.body.length).toBe(2);
+    });
   });
 });

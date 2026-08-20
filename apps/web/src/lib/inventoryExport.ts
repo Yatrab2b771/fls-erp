@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { DispatchTransfer, InventoryStockLine, InventoryTransaction } from "./types";
+import type { DispatchTransfer, InventoryRequest, InventoryStockLine, InventoryTransaction } from "./types";
 
 // Builds and downloads a single-sheet workbook straight from whatever the
 // page already has loaded — no round trip to the server. Each report is
@@ -49,6 +49,26 @@ export function exportTransactionReport(rows: InventoryTransaction[], sheetName:
       "Logged By": r.createdBy.fullName,
     })),
     `FLS_Inventory_${filenamePart}_${todayStamp()}.xlsx`,
+  );
+}
+
+export function exportRequestsReport(rows: InventoryRequest[]) {
+  download(
+    "Material Requests",
+    rows.map((r) => ({
+      Date: new Date(r.createdAt).toLocaleDateString(),
+      Item: r.item.name,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Purpose: r.purpose === "ISSUED_PRODUCTION" ? "Issued to Production" : "Issued to Day Store",
+      "Requested Qty": r.requestedQty,
+      Status: r.status,
+      "Requested By": r.requestedBy.fullName,
+      "Reviewed By": r.reviewedBy?.fullName ?? "",
+      "Rejection Reason": r.rejectionReason ?? "",
+      "Needed By": r.neededBy ? new Date(r.neededBy).toLocaleDateString() : "",
+      Note: r.note ?? "",
+    })),
+    `FLS_Inventory_Material_Requests_${todayStamp()}.xlsx`,
   );
 }
 

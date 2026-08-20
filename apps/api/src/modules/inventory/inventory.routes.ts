@@ -7,31 +7,38 @@ import { validateBody } from "../../common/middleware/validate";
 import {
   createDispatchTransferSchema,
   createInventoryItemSchema,
+  createInventoryRequestSchema,
   createInventoryTransactionSchema,
   importInventoryTransactionsSchema,
+  issueInventoryRequestSchema,
+  reviewInventoryRequestSchema,
   updateInventoryItemSchema,
   type CreateDispatchTransferInput,
   type CreateInventoryItemInput,
+  type CreateInventoryRequestInput,
   type CreateInventoryTransactionInput,
   type ImportInventoryTransactionsInput,
+  type IssueInventoryRequestInput,
+  type ReviewInventoryRequestInput,
   type UpdateInventoryItemInput,
 } from "./inventory.schemas";
-import type { DispatchTransferType, InventoryCategory, Prisma } from "@prisma/client";
+import type { DispatchTransferType, InventoryCategory, InventoryRequestStatus, Prisma } from "@prisma/client";
 
 export const inventoryRouter = Router();
 
 inventoryRouter.use(requireAuth);
 
 // Unlike Order Tracking/BOM/RM Costing, this module is NOT open to every
-// authenticated user — Store owns the Warehouse tool this ports, and
-// nobody outside Store/Admin has a reason to see stock levels or the
-// received/issued log. One router-level gate covers reads and writes
-// alike (ADMIN always passes via requireRole's own override).
-inventoryRouter.use(requireRole("STORE"));
+// authenticated user by default. Store owns the Warehouse tool this
+// ports, so the ledger (transactions, dispatch transfers) and item
+// writes stay STORE/ADMIN-only, gated per-route below (no more router-
+// level blanket gate) — because PPIC now needs narrow access of its own:
+// read the catalog/stock to know what to request, and use the Material
+// Requests endpoints, without seeing the received/issued log itself.
 
 // --- Item catalog — "List from Sanjay & naveen. Option to add item" ---
 
-inventoryRouter.get("/items", async (req, res, next) => {
+inventoryRouter.get("/items", requireRole("STORE", "PPIC"), async (req, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
     const items = await prisma.inventoryItem.findMany({
@@ -44,7 +51,7 @@ inventoryRouter.get("/items", async (req, res, next) => {
   }
 });
 
-inventoryRouter.post("/items", validateBody(createInventoryItemSchema), async (req: AuthedRequest, res, next) => {
+inventoryRouter.post("/items", requireRole("STORE"), validateBody(createInventoryItemSchema), async (req: AuthedRequest, res, next) => {
   try {
     const data = req.body as CreateInventoryItemInput;
 
@@ -61,7 +68,7 @@ inventoryRouter.post("/items", validateBody(createInventoryItemSchema), async (r
   }
 });
 
-inventoryRouter.patch("/items/:id", validateBody(updateInventoryItemSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.patch("/items/:id", requireRole("STORE"), validateBody(updateInventoryItemSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.inventoryItem.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Inventory item not found" });
@@ -79,7 +86,7 @@ inventoryRouter.patch("/items/:id", validateBody(updateInventoryItemSchema), asy
 
 // --- Stock on hand — sum(RECEIVED) − sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) per item ---
 
-inventoryRouter.get("/stock", async (req, res, next) => {
+inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
 
@@ -108,13 +115,31 @@ inventoryRouter.get("/stock", async (req, res, next) => {
   }
 });
 
+// --- Reference data for the vendor field — distinct vendor names already
+// used on a Material Received entry, offered as a combobox so the form
+// nudges toward reusing a known vendor without forbidding a new one. ---
+
+inventoryRouter.get("/vendors", requireRole("STORE"), async (_req, res, next) => {
+  try {
+    const rows = await prisma.inventoryTransaction.findMany({
+      where: { vendorName: { not: null } },
+      distinct: ["vendorName"],
+      select: { vendorName: true },
+      orderBy: { vendorName: "asc" },
+    });
+    res.json(rows.map((r) => r.vendorName).filter((v): v is string => !!v));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- Transaction log — the three sheets ("MATERIAL RECEIVED" / "MATERIAL
 // Issued to day store" / "MATERIAL Issued to Production"), told apart by
 // `type`, on one endpoint ---
 
 const txnInclude = { item: true, createdBy: { select: { id: true, fullName: true } } } satisfies Prisma.InventoryTransactionInclude;
 
-inventoryRouter.get("/transactions", async (req, res, next) => {
+inventoryRouter.get("/transactions", requireRole("STORE"), async (req, res, next) => {
   try {
     const { type, category, itemId } = req.query as {
       type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
@@ -143,11 +168,17 @@ inventoryRouter.get("/transactions", async (req, res, next) => {
 // --- Bulk import — one Excel sheet's worth of Received/Issued rows at
 // once, parsed client-side (apps/web's inventoryImport.ts) into the same
 // shape as a single Log Entry. Items are resolved-or-created by
-// (category, name), same as the "+ New" option on the manual form. ---
+// (category, name), same as the "+ New" option on the manual form.
+// ISSUED_PRODUCTION is excluded — see the same note on POST /transactions
+// below; a spreadsheet row can't carry an approved Material Request. ---
 
-inventoryRouter.post("/transactions/import", validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
+inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { type, rows } = req.body as ImportInventoryTransactionsInput;
+
+    if (type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
+      return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
+    }
 
     // Resolve every distinct (category, name) pair to an item id up front,
     // creating any item this sheet mentions for the first time — one
@@ -194,9 +225,18 @@ inventoryRouter.post("/transactions/import", validateBody(importInventoryTransac
   }
 });
 
-inventoryRouter.post("/transactions", validateBody(createInventoryTransactionSchema), async (req: AuthedRequest, res, next) => {
+inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createInventoryTransactionSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { itemId, ...rest } = req.body as CreateInventoryTransactionInput;
+
+    // The department-wise gate: Store can no longer decide on its own what
+    // gets issued to Production — that has to come from PPIC's approved
+    // Material Request, fulfilled via POST /requests/:id/issue. ADMIN can
+    // still bypass for data correction, same override pattern as the
+    // Batch pipeline's JUMP action.
+    if (rest.type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
+      return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
+    }
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
@@ -223,7 +263,7 @@ inventoryRouter.post("/transactions", validateBody(createInventoryTransactionSch
   }
 });
 
-inventoryRouter.delete("/transactions/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const txn = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
     if (!txn) return res.status(404).json({ error: "Transaction not found" });
@@ -231,6 +271,158 @@ inventoryRouter.delete("/transactions/:id", async (req: AuthedRequest<{ id: stri
     await prisma.inventoryTransaction.delete({ where: { id: req.params.id } });
 
     await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_removed", entityType: "InventoryTransaction", entityId: req.params.id, metadata: { itemId: txn.itemId, type: txn.type } });
+
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Material Requests (indents) — the department-wise approval gate.
+// PPIC raises a request against an item; Store approves or rejects it;
+// only an approved request can be issued, which is what actually creates
+// the ISSUED_* ledger row above (see /requests/:id/issue). Real-world
+// shape: Draft-less "PENDING → APPROVED/REJECTED → ISSUED", same
+// Approve/Reject language as PurchaseOrder's review flow. ---
+
+const requestInclude = {
+  item: true,
+  requestedBy: { select: { id: true, fullName: true } },
+  reviewedBy: { select: { id: true, fullName: true } },
+  fulfillment: true,
+} satisfies Prisma.InventoryRequestInclude;
+
+inventoryRouter.get("/requests", requireRole("STORE", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const { status } = req.query as { status?: InventoryRequestStatus };
+    const isStoreOrAdmin = req.user!.roles.includes("STORE") || req.user!.roles.includes("ADMIN");
+
+    const where: Prisma.InventoryRequestWhereInput = {
+      ...(status ? { status } : {}),
+      // PPIC (not also Store/Admin) only ever sees its own indents —
+      // it's a request queue, not a window into the whole warehouse.
+      ...(isStoreOrAdmin ? {} : { requestedById: req.user!.id }),
+    };
+
+    const requests = await prisma.inventoryRequest.findMany({ where, include: requestInclude, orderBy: { createdAt: "desc" } });
+    res.json(requests);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.post("/requests", requireRole("PPIC"), validateBody(createInventoryRequestSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const data = req.body as CreateInventoryRequestInput;
+
+    const item = await prisma.inventoryItem.findUnique({ where: { id: data.itemId } });
+    if (!item) return res.status(400).json({ error: "Unknown inventory item" });
+    if (item.category !== data.category) return res.status(400).json({ error: "Category doesn't match the selected item" });
+
+    const request = await prisma.inventoryRequest.create({
+      data: { ...data, requestedById: req.user!.id },
+      include: requestInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory_request.created",
+      entityType: "InventoryRequest",
+      entityId: request.id,
+      metadata: { itemId: data.itemId, purpose: data.purpose, requestedQty: data.requestedQty },
+    });
+
+    res.status(201).json(request);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.patch("/requests/:id/review", requireRole("STORE"), validateBody(reviewInventoryRequestSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryRequest.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Request not found" });
+    if (existing.status !== "PENDING") return res.status(409).json({ error: `This request is already ${existing.status.toLowerCase()}` });
+
+    const { action, rejectionReason } = req.body as ReviewInventoryRequestInput;
+
+    const updated = await prisma.inventoryRequest.update({
+      where: { id: req.params.id },
+      data: {
+        status: action === "APPROVE" ? "APPROVED" : "REJECTED",
+        reviewedById: req.user!.id,
+        reviewedAt: new Date(),
+        rejectionReason: action === "REJECT" ? rejectionReason : null,
+      },
+      include: requestInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: action === "APPROVE" ? "inventory_request.approved" : "inventory_request.rejected",
+      entityType: "InventoryRequest",
+      entityId: updated.id,
+      metadata: { rejectionReason },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(issueInventoryRequestSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryRequest.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Request not found" });
+    if (existing.status !== "APPROVED") return res.status(409).json({ error: "Only an approved request can be issued" });
+
+    const data = req.body as IssueInventoryRequestInput;
+
+    const [txn] = await prisma.$transaction([
+      prisma.inventoryTransaction.create({
+        data: {
+          itemId: existing.itemId,
+          type: existing.purpose,
+          date: data.date,
+          unit: data.unit,
+          quantity: data.quantity,
+          size: data.size,
+          createdById: req.user!.id,
+          fulfillsRequestId: existing.id,
+        },
+        include: txnInclude,
+      }),
+      prisma.inventoryRequest.update({ where: { id: existing.id }, data: { status: "ISSUED" } }),
+    ]);
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory_request.issued",
+      entityType: "InventoryRequest",
+      entityId: existing.id,
+      metadata: { transactionId: txn.id, quantity: data.quantity },
+    });
+
+    res.status(201).json(txn);
+  } catch (err) {
+    next(err);
+  }
+});
+
+inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryRequest.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Request not found" });
+    if (existing.status === "ISSUED") return res.status(409).json({ error: "An issued request is part of the permanent ledger and can't be removed" });
+
+    const isOwner = existing.requestedById === req.user!.id;
+    const isStoreOrAdmin = req.user!.roles.includes("STORE") || req.user!.roles.includes("ADMIN");
+    if (!isOwner && !isStoreOrAdmin) return res.status(403).json({ error: "You do not have permission to perform this action" });
+
+    await prisma.inventoryRequest.delete({ where: { id: req.params.id } });
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory_request.removed", entityType: "InventoryRequest", entityId: req.params.id, metadata: { status: existing.status } });
 
     res.status(204).send();
   } catch (err) {
@@ -247,7 +439,7 @@ const dispatchTransferInclude = {
   createdBy: { select: { id: true, fullName: true } },
 } satisfies Prisma.DispatchTransferInclude;
 
-inventoryRouter.get("/dispatch-transfers", async (req, res, next) => {
+inventoryRouter.get("/dispatch-transfers", requireRole("STORE"), async (req, res, next) => {
   try {
     const { type, customerId } = req.query as { type?: DispatchTransferType; customerId?: string };
     const pagination = parsePagination(req);
@@ -268,7 +460,7 @@ inventoryRouter.get("/dispatch-transfers", async (req, res, next) => {
   }
 });
 
-inventoryRouter.post("/dispatch-transfers", validateBody(createDispatchTransferSchema), async (req: AuthedRequest, res, next) => {
+inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(createDispatchTransferSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { customerId, ...rest } = req.body as CreateDispatchTransferInput;
 
@@ -294,7 +486,7 @@ inventoryRouter.post("/dispatch-transfers", validateBody(createDispatchTransferS
   }
 });
 
-inventoryRouter.delete("/dispatch-transfers/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.delete("/dispatch-transfers/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const transfer = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
     if (!transfer) return res.status(404).json({ error: "Dispatch transfer not found" });

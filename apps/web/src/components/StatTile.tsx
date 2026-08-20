@@ -19,7 +19,11 @@ export function StatTile({ icon: Icon, label, value, accent = "brand" }: { icon:
         <Icon className="h-5 w-5" strokeWidth={2} />
       </div>
       <div className="min-w-0">
-        <p className="text-2xl font-black leading-none tracking-tight text-slate-900">{value}</p>
+        {/* Numeric values get the big number treatment; a string value (a
+            short status line, not a count) gets a smaller size and
+            truncates instead of wrapping — a long string at text-2xl
+            would otherwise wrap across 2-3 lines and blow out the tile. */}
+        <p className={`truncate font-black leading-tight tracking-tight text-slate-900 ${typeof value === "number" ? "text-2xl leading-none" : "text-sm sm:text-base"}`}>{value}</p>
         <p className="mt-1 truncate text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
       </div>
     </div>

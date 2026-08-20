@@ -10,6 +10,9 @@ import type {
   DispatchTransferType,
   InventoryCategory,
   InventoryItem,
+  InventoryRequest,
+  InventoryRequestPurpose,
+  InventoryRequestStatus,
   InventoryStockLine,
   InventoryTransaction,
   InventoryTxnType,
@@ -314,7 +317,7 @@ export function useInventoryStock(category?: InventoryCategory) {
   });
 }
 
-export function useInventoryTransactions(filters?: { type?: InventoryTxnType; category?: InventoryCategory; itemId?: string }) {
+export function useInventoryTransactions(filters?: { type?: InventoryTxnType; category?: InventoryCategory; itemId?: string }, options?: { enabled?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.type) params.set("type", filters.type);
   if (filters?.category) params.set("category", filters.category);
@@ -323,6 +326,7 @@ export function useInventoryTransactions(filters?: { type?: InventoryTxnType; ca
   return useQuery({
     queryKey: ["inventory", "transactions", filters],
     queryFn: () => api<InventoryTransaction[]>(`/api/inventory/transactions${qs ? `?${qs}` : ""}`),
+    enabled: options?.enabled,
   });
 }
 
@@ -371,10 +375,74 @@ export function useDeleteInventoryTransaction() {
   });
 }
 
+export function useInventoryVendors() {
+  return useQuery({ queryKey: ["inventory", "vendors"], queryFn: () => api<string[]>("/api/inventory/vendors") });
+}
+
+// --- Material Requests — the department-wise gate: PPIC requests,
+// Store approves/rejects/issues. See inventory.routes.ts. ---
+
+export function useInventoryRequests(status?: InventoryRequestStatus, options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "requests", status],
+    queryFn: () => api<InventoryRequest[]>(`/api/inventory/requests${status ? `?status=${status}` : ""}`),
+    enabled: options?.enabled,
+  });
+}
+
+export interface CreateInventoryRequestPayload {
+  itemId: string;
+  category: InventoryCategory;
+  requestedQty: number;
+  purpose: InventoryRequestPurpose;
+  neededBy?: string;
+  note?: string;
+}
+
+function invalidateRequests(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["inventory", "requests"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+}
+
+export function useCreateInventoryRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateInventoryRequestPayload) => api<InventoryRequest>("/api/inventory/requests", { method: "POST", body }),
+    onSuccess: () => invalidateRequests(qc),
+  });
+}
+
+export function useReviewInventoryRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT"; rejectionReason?: string }) =>
+      api<InventoryRequest>(`/api/inventory/requests/${id}/review`, { method: "PATCH", body }),
+    onSuccess: () => invalidateRequests(qc),
+  });
+}
+
+export function useIssueInventoryRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; date: string; unit: string; quantity: number; size?: string }) =>
+      api<InventoryTransaction>(`/api/inventory/requests/${id}/issue`, { method: "POST", body }),
+    onSuccess: () => invalidateRequests(qc),
+  });
+}
+
+export function useDeleteInventoryRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/inventory/requests/${id}`, { method: "DELETE" }),
+    onSuccess: () => invalidateRequests(qc),
+  });
+}
+
 // --- Dispatch transfer log — "FG transfer to Dispatch" / "Bill transfer
 // to Dispatch from Accounts" ---
 
-export function useDispatchTransfers(filters?: { type?: DispatchTransferType; customerId?: string }) {
+export function useDispatchTransfers(filters?: { type?: DispatchTransferType; customerId?: string }, options?: { enabled?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.type) params.set("type", filters.type);
   if (filters?.customerId) params.set("customerId", filters.customerId);
@@ -382,6 +450,7 @@ export function useDispatchTransfers(filters?: { type?: DispatchTransferType; cu
   return useQuery({
     queryKey: ["inventory", "dispatch-transfers", filters],
     queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers${qs ? `?${qs}` : ""}`),
+    enabled: options?.enabled,
   });
 }
 

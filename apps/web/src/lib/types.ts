@@ -366,6 +366,31 @@ export interface DispatchTransfer {
   createdBy: { id: string; fullName: string };
 }
 
+// --- Material Requests (indents) — the department-wise gate: PPIC
+// requests, Store approves/rejects/issues. See inventory.routes.ts. ---
+
+export type InventoryRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "ISSUED";
+// A request's purpose is never RECEIVED — see inventory.schemas.ts.
+export type InventoryRequestPurpose = Exclude<InventoryTxnType, "RECEIVED">;
+
+export interface InventoryRequest {
+  id: string;
+  itemId: string;
+  category: InventoryCategory;
+  requestedQty: number;
+  purpose: InventoryRequestPurpose;
+  neededBy: string | null;
+  note: string | null;
+  status: InventoryRequestStatus;
+  rejectionReason: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  item: InventoryItem;
+  requestedBy: { id: string; fullName: string };
+  reviewedBy: { id: string; fullName: string } | null;
+  fulfillment: InventoryTransaction | null;
+}
+
 // --- User management (admin only) ---
 
 export interface ManagedUser {
