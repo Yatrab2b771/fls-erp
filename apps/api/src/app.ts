@@ -20,6 +20,16 @@ import { inventoryRouter } from "./modules/inventory/inventory.routes";
 export function createApp() {
   const app = express();
 
+  // Render (and most PaaS hosts) put the app behind a reverse proxy, so
+  // the real client IP only reaches us via X-Forwarded-For. Without this,
+  // req.ip resolves to the proxy's own IP for every request — which
+  // breaks loginRateLimit by bucketing every visitor together under one
+  // IP, so one person's repeated attempts can lock out everyone else.
+  // `1` trusts exactly one hop (the platform's own proxy), not an
+  // arbitrary chain, so a client can't spoof X-Forwarded-For to dodge
+  // the limiter.
+  app.set("trust proxy", 1);
+
   // The API and the React app (apps/web, served by Vite in dev / its own
   // static host in prod) are separate origins, so CORS is real here, not
   // vestigial like it was when one Express app served both.
