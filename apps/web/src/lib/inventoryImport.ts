@@ -60,6 +60,12 @@ export interface ImportInventoryRow {
 export interface ParsedInventoryImport {
   rows: ImportInventoryRow[];
   skipped: number; // rows dropped for missing a required field
+  // Diagnostics only, for when rows.length is 0 and it's not obvious
+  // why — the exact column headers this workbook actually has, so a
+  // header mismatch (typo, extra space, wrong sheet) is visible instead
+  // of a bare "no usable rows" message.
+  sheetNames: string[];
+  detectedHeaders: string[];
 }
 
 /**
@@ -71,11 +77,13 @@ export interface ParsedInventoryImport {
 export function parseInventoryTransactionWorkbook(buffer: ArrayBuffer, defaultCategory: "RM" | "PM"): ParsedInventoryImport {
   const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
   const rows: ImportInventoryRow[] = [];
+  const detectedHeaders = new Set<string>();
   let skipped = 0;
 
   for (const sheetName of workbook.SheetNames) {
     const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
     for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
       const itemName = asText(row, ITEM_COLUMNS);
       const dateRaw = firstNonEmpty(row, DATE_COLUMNS);
       const unit = asText(row, UNIT_COLUMNS);
@@ -103,5 +111,5 @@ export function parseInventoryTransactionWorkbook(buffer: ArrayBuffer, defaultCa
     }
   }
 
-  return { rows, skipped };
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
 }

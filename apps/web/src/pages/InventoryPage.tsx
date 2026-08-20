@@ -210,8 +210,16 @@ export function InventoryPage() {
 
     try {
       const buffer = await file.arrayBuffer();
-      const { rows, skipped } = parseInventoryTransactionWorkbook(buffer, "RM");
-      if (!rows.length) return toast.error("No usable rows found — check the Item, Date, Unit, and Count/Quantity columns.");
+      const { rows, skipped, sheetNames, detectedHeaders } = parseInventoryTransactionWorkbook(buffer, "RM");
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Inventory import] No usable rows.", { fileName: file.name, fileSize: file.size, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Item + Date + Unit + Count together. Check DevTools console for details.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}) — is this the right file?`,
+        );
+      }
 
       const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
