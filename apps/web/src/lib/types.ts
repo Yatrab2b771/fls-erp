@@ -320,6 +320,15 @@ export interface RmPlan {
 // production) log, plus the Dispatch-side FG/Bill transfer log,
 // reconstructed from "Inventory tool.xlsx" — see the Prisma schema comment.
 
+// Every inventory action attributes to a real account, with its
+// employeeId included so reports/exports can show "Name (FLS-0007)" —
+// the same disambiguation Users/AppLayout already use.
+export interface PersonRef {
+  id: string;
+  employeeId: number;
+  fullName: string;
+}
+
 export type InventoryCategory = "RM" | "PM";
 export type InventoryTxnType = "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
 export type DispatchTransferType = "FG" | "BILL";
@@ -347,12 +356,12 @@ export interface InventoryTransaction {
   vendorName: string | null;
   createdAt: string;
   item: InventoryItem;
-  createdBy: { id: string; fullName: string };
+  createdBy: PersonRef;
   receiptStatus: InventoryReceiptStatus | null;
-  qcCheckedBy: { id: string; fullName: string } | null;
+  qcCheckedBy: PersonRef | null;
   qcCheckedAt: string | null;
   qcNote: string | null;
-  acceptedBy: { id: string; fullName: string } | null;
+  acceptedBy: PersonRef | null;
   acceptedAt: string | null;
 }
 
@@ -374,9 +383,9 @@ export interface DispatchTransfer {
   quantity: number;
   createdAt: string;
   customer: { id: string; companyName: string };
-  createdBy: { id: string; fullName: string };
+  createdBy: PersonRef;
   qcStatus: DispatchQcStatus | null;
-  qcCheckedBy: { id: string; fullName: string } | null;
+  qcCheckedBy: PersonRef | null;
   qcCheckedAt: string | null;
   qcNote: string | null;
 }
@@ -401,8 +410,8 @@ export interface InventoryRequest {
   reviewedAt: string | null;
   createdAt: string;
   item: InventoryItem;
-  requestedBy: { id: string; fullName: string };
-  reviewedBy: { id: string; fullName: string } | null;
+  requestedBy: PersonRef;
+  reviewedBy: PersonRef | null;
   fulfillment: InventoryTransaction | null;
 }
 

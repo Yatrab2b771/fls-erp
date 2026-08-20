@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Download,
+  FileSpreadsheet,
   FileText,
   Package,
   PackageCheck,
@@ -45,7 +46,7 @@ import {
 } from "../lib/hooks";
 import type { DispatchTransfer, DispatchTransferType, InventoryCategory, InventoryRequest, InventoryRequestPurpose, InventoryTransaction, InventoryTxnType } from "../lib/types";
 import { parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
-import { exportDispatchReport, exportRequestsReport, exportStockReport, exportTransactionReport } from "../lib/inventoryExport";
+import { downloadInventoryImportTemplate, exportDispatchReport, exportRequestsReport, exportStockReport, exportTransactionReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -235,6 +236,9 @@ export function InventoryPage() {
           </button>
           {canWrite && (canLogDirectly || tab === "RECEIVED") && (
             <>
+              <button className="btn-ghost" onClick={downloadInventoryImportTemplate} title="Download a blank template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
+              </button>
               <button className="btn-ghost" disabled={importTxns.isPending} onClick={() => importFileRef.current?.click()}>
                 <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
               </button>

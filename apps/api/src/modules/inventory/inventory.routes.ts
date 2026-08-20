@@ -143,9 +143,9 @@ inventoryRouter.get("/vendors", requireRole("STORE"), async (_req, res, next) =>
 
 const txnInclude = {
   item: true,
-  createdBy: { select: { id: true, fullName: true } },
-  qcCheckedBy: { select: { id: true, fullName: true } },
-  acceptedBy: { select: { id: true, fullName: true } },
+  createdBy: { select: { id: true, employeeId: true, fullName: true } },
+  qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
+  acceptedBy: { select: { id: true, employeeId: true, fullName: true } },
 } satisfies Prisma.InventoryTransactionInclude;
 
 // QA_QC needs to see the Received log (to know what's awaiting inward
@@ -360,8 +360,8 @@ inventoryRouter.post("/transactions/:id/accept", requireRole("STORE"), async (re
 
 const requestInclude = {
   item: true,
-  requestedBy: { select: { id: true, fullName: true } },
-  reviewedBy: { select: { id: true, fullName: true } },
+  requestedBy: { select: { id: true, employeeId: true, fullName: true } },
+  reviewedBy: { select: { id: true, employeeId: true, fullName: true } },
   fulfillment: true,
 } satisfies Prisma.InventoryRequestInclude;
 
@@ -509,8 +509,8 @@ inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req
 
 const dispatchTransferInclude = {
   customer: { select: { id: true, companyName: true } },
-  createdBy: { select: { id: true, fullName: true } },
-  qcCheckedBy: { select: { id: true, fullName: true } },
+  createdBy: { select: { id: true, employeeId: true, fullName: true } },
+  qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
 } satisfies Prisma.DispatchTransferInclude;
 
 // QA_QC needs to see FG transfers awaiting outward QC — BILL rows never
