@@ -199,10 +199,14 @@ export function InventoryPage() {
     toast.success("Report downloaded — ready to share with the department.");
   }
 
+  // Import Excel is offered on Received and Issued to Day Store — the
+  // same two tabs the manual Log Entry form covers directly.
+  const canImport = canLogDirectly || tab === "RECEIVED";
+
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same file next time
-    if (!file || !canLogDirectly) return;
+    if (!file || !canImport) return;
 
     try {
       const buffer = await file.arrayBuffer();
@@ -234,7 +238,7 @@ export function InventoryPage() {
           <button className="btn-ghost" onClick={handleExport} title="Download this tab as an Excel report">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
           </button>
-          {canWrite && (canLogDirectly || tab === "RECEIVED") && (
+          {canWrite && canImport && (
             <>
               <button className="btn-ghost" onClick={downloadInventoryImportTemplate} title="Download a blank template with the correct columns">
                 <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
