@@ -511,6 +511,7 @@ const dispatchTransferInclude = {
   customer: { select: { id: true, companyName: true } },
   createdBy: { select: { id: true, employeeId: true, fullName: true } },
   qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
+  sourceRequest: { include: { item: true } },
 } satisfies Prisma.DispatchTransferInclude;
 
 // QA_QC needs to see FG transfers awaiting outward QC — BILL rows never
@@ -544,6 +545,13 @@ inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(c
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) return res.status(400).json({ error: "Unknown customer" });
 
+    if (rest.sourceRequestId) {
+      if (rest.type !== "FG") return res.status(400).json({ error: "A source request can only be linked to an FG transfer" });
+      const sourceRequest = await prisma.inventoryRequest.findUnique({ where: { id: rest.sourceRequestId } });
+      if (!sourceRequest) return res.status(400).json({ error: "Unknown material request" });
+      if (sourceRequest.status !== "ISSUED") return res.status(400).json({ error: "Only an issued request can be linked as a source — nothing left the shelf for it yet" });
+    }
+
     const transfer = await prisma.dispatchTransfer.create({
       // Outward QC gate: an FG row starts PENDING_QC (see PATCH
       // /dispatch-transfers/:id/qc); BILL rows are paperwork, not goods,
@@ -557,7 +565,7 @@ inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(c
       action: rest.type === "FG" ? "inventory.fg_transfer_to_dispatch" : "inventory.bill_transfer_to_dispatch",
       entityType: "DispatchTransfer",
       entityId: transfer.id,
-      metadata: { customerId, productName: rest.productName, quantity: rest.quantity },
+      metadata: { customerId, productName: rest.productName, quantity: rest.quantity, sourceRequestId: rest.sourceRequestId },
     });
 
     res.status(201).json(transfer);

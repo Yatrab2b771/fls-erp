@@ -124,6 +124,7 @@ export function exportDispatchReport(rows: DispatchTransfer[], sheetName: string
             "QC By": formatPerson(r.qcCheckedBy),
             "QC At": formatTimestamp(r.qcCheckedAt),
             "QC Note": r.qcNote ?? "",
+            "Source Request": r.sourceRequest ? `${r.sourceRequest.item.name} (${r.sourceRequest.requestedQty})` : "",
           }
         : {}),
     })),

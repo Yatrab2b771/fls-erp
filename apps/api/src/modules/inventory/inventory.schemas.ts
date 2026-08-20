@@ -30,12 +30,15 @@ export const createInventoryTransactionSchema = z.object({
 
 // One "FG transfer to Dispatch" / "Bill transfer to Dispatch from Accounts"
 // row — same field set for both, `type` picks the sheet it belongs to.
+// sourceRequestId is a manual traceability tag (FG rows only, enforced
+// in the route) — not derived, Production isn't tracked here.
 export const createDispatchTransferSchema = z.object({
   type: z.enum(DISPATCH_TRANSFER_TYPES),
   date: z.coerce.date(),
   customerId: z.string().uuid(),
   productName: z.string().min(1).max(200),
   quantity: z.coerce.number().positive(),
+  sourceRequestId: z.string().uuid().optional(),
 });
 
 // Bulk upload of the same "Material Received/Issued" row shape — one

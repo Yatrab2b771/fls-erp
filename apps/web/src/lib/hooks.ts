@@ -505,6 +505,7 @@ export interface CreateDispatchTransferPayload {
   customerId: string;
   productName: string;
   quantity: number;
+  sourceRequestId?: string;
 }
 
 export function useCreateDispatchTransfer() {

@@ -704,16 +704,27 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
   const toast = useToast();
   const [type, setType] = useState<DispatchTransferType>(initialType);
   const { data: customers } = useCustomers();
+  // Only ISSUED requests represent material that actually left the
+  // shelf — those are the only ones worth tracing an FG shipment back
+  // to. Fetched regardless of `type` so switching to FG doesn't need a
+  // fresh round trip.
+  const { data: issuedRequests } = useInventoryRequests("ISSUED");
   const createTransfer = useCreateDispatchTransfer();
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [productName, setProductName] = useState("");
   const [quantity, setQuantity] = useState("");
+  const [sourceRequestId, setSourceRequestId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const sortedCustomers = useMemo(() => customers ?? [], [customers]);
+
+  function switchType(next: DispatchTransferType) {
+    setType(next);
+    if (next !== "FG") setSourceRequestId("");
+  }
 
   async function handleSubmit() {
     setError(null);
@@ -730,6 +741,7 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
         customerId,
         productName: productName.trim(),
         quantity: Number(quantity),
+        sourceRequestId: type === "FG" && sourceRequestId ? sourceRequestId : undefined,
       });
       toast.success(type === "FG" ? "FG transfer logged — awaiting outward QC." : `${DISPATCH_TYPE_LABEL[type]} entry logged.`);
       onDone();
@@ -747,7 +759,7 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
           <button
             key={t}
             type="button"
-            onClick={() => setType(t)}
+            onClick={() => switchType(t)}
             className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-bold transition-all duration-150 ${
               type === t ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
             }`}
@@ -788,6 +800,20 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
           <label className="label">Qty</label>
           <input className="field font-mono" type="number" min="0" step="any" placeholder="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
         </div>
+        {type === "FG" && (
+          <div className="sm:col-span-2 lg:col-span-3">
+            <label className="label">Traces Back to Material Request (optional)</label>
+            <select className="field" value={sourceRequestId} onChange={(e) => setSourceRequestId(e.target.value)}>
+              <option value="">— Not linked —</option>
+              {issuedRequests?.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.item.name} · {r.requestedQty} · issued {r.fulfillment ? new Date(r.fulfillment.date).toLocaleDateString() : ""}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-slate-400">A manual tag, not a calculation — pick the request this shipment's material came from, if you know it.</p>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -1048,6 +1074,11 @@ function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTrans
             {transfer.qcCheckedBy && <> · QC by {transfer.qcCheckedBy.fullName}</>}
           </p>
           {transfer.qcStatus === "QC_REJECTED" && transfer.qcNote && <p className="mt-1.5 text-xs font-bold text-rose-600">Reason: {transfer.qcNote}</p>}
+          {transfer.sourceRequest && (
+            <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-brand-700">
+              <ClipboardList className="h-3.5 w-3.5" strokeWidth={2.5} /> Traces to request: {transfer.sourceRequest.item.name} · {transfer.sourceRequest.requestedQty}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">

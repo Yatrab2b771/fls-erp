@@ -356,4 +356,42 @@ describe("Inventory module", () => {
       expect(again.status).toBe(409);
     });
   });
+
+  describe("FG transfer → Material Request traceability tag", () => {
+    it("only accepts an ISSUED request, and only on an FG transfer", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const { token: bdToken } = await createUser(["BD"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
+
+      const pendingRequest = await request(app)
+        .post("/api/inventory/requests")
+        .set(authHeader(ppicToken))
+        .send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
+
+      const linkToPending = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Gold 1Kg", quantity: 50, sourceRequestId: pendingRequest.body.id });
+      expect(linkToPending.status).toBe(400);
+
+      const linkToBill = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "BILL", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Gold 1Kg", quantity: 50, sourceRequestId: pendingRequest.body.id });
+      expect(linkToBill.status).toBe(400);
+
+      await request(app).patch(`/api/inventory/requests/${pendingRequest.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+      await request(app).post(`/api/inventory/requests/${pendingRequest.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-09", unit: "Kg", quantity: 10 });
+
+      const linkToIssued = await request(app)
+        .post("/api/inventory/dispatch-transfers")
+        .set(authHeader(storeToken))
+        .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Gold 1Kg", quantity: 50, sourceRequestId: pendingRequest.body.id });
+      expect(linkToIssued.status).toBe(201);
+      expect(linkToIssued.body.sourceRequest.id).toBe(pendingRequest.body.id);
+      expect(linkToIssued.body.sourceRequest.item.name).toBe("Whey Protein");
+    });
+  });
 });

@@ -665,6 +665,12 @@ model InventoryRequest {
   requestedBy User                  @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
   reviewedBy  User?                 @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
   fulfillment InventoryTransaction?
+  // Traceability only — Production turning this raw material into a
+  // finished shipment isn't tracked anywhere in this system, so this
+  // isn't derived or enforced, just a manual tag Store can set when
+  // logging the eventual FG transfer. Many transfers can point back to
+  // one request (a batch can ship in parts), so it's not @unique.
+  fgTransfers DispatchTransfer[]
 
   @@index([status])
   @@map("inventory_requests")
@@ -749,12 +755,21 @@ model DispatchTransfer {
   qcCheckedAt   DateTime?
   qcNote        String?
 
-  customer    Customer @relation(fields: [customerId], references: [id])
-  createdBy   User     @relation(fields: [createdById], references: [id])
-  qcCheckedBy User?    @relation("DispatchTransferQcCheckedBy", fields: [qcCheckedById], references: [id])
+  // Optional traceability tag, FG rows only — "this shipment came from
+  // that Material Request". Manual, not derived: Production turning RM
+  // into a finished shipment isn't tracked here, so Store sets this by
+  // hand when they know the link. Not required, not unique — one
+  // request's material can ship across several transfers.
+  sourceRequestId String?
+
+  customer      Customer          @relation(fields: [customerId], references: [id])
+  createdBy     User              @relation(fields: [createdById], references: [id])
+  qcCheckedBy   User?             @relation("DispatchTransferQcCheckedBy", fields: [qcCheckedById], references: [id])
+  sourceRequest InventoryRequest? @relation(fields: [sourceRequestId], references: [id])
 
   @@index([customerId])
   @@index([type, date])
   @@index([qcStatus])
+  @@index([sourceRequestId])
   @@map("dispatch_transfers")
 }

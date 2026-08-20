@@ -388,6 +388,13 @@ export interface DispatchTransfer {
   qcCheckedBy: PersonRef | null;
   qcCheckedAt: string | null;
   qcNote: string | null;
+  // Manual traceability tag, FG rows only — "this shipment came from
+  // that Material Request". Not derived (Production isn't tracked
+  // here), not required. requestedBy/reviewedBy/fulfillment aren't
+  // included on this nested shape — fetch the full InventoryRequest
+  // from the Material Requests tab for those.
+  sourceRequestId: string | null;
+  sourceRequest: (Pick<InventoryRequest, "id" | "category" | "requestedQty" | "purpose" | "status"> & { item: InventoryItem }) | null;
 }
 
 // --- Material Requests (indents) — the department-wise gate: PPIC
