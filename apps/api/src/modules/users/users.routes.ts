@@ -19,7 +19,7 @@ usersRouter.get("/", requireRole("ADMIN"), async (req, res, next) => {
     const [total, users] = await Promise.all([
       prisma.user.count(),
       prisma.user.findMany({
-        select: { id: true, email: true, fullName: true, isActive: true, createdAt: true, roles: { include: { role: true } } },
+        select: { id: true, employeeId: true, email: true, fullName: true, isActive: true, createdAt: true, roles: { include: { role: true } } },
         orderBy: { createdAt: "asc" },
         skip: pagination.skip,
         take: pagination.take,
@@ -59,19 +59,36 @@ usersRouter.post("/:userId/roles", requireRole("ADMIN"), validateBody(grantRoleS
   }
 });
 
-const setActiveSchema = z.object({ isActive: z.boolean() });
+// isActive and fullName are independent, optional edits on the same
+// row — at least one is required. A tokenVersion bump only makes sense
+// for isActive (it's what forces existing sessions to re-check), not a
+// plain rename.
+const updateUserSchema = z
+  .object({ isActive: z.boolean().optional(), fullName: z.string().min(1).max(200).optional() })
+  .refine((v) => v.isActive !== undefined || v.fullName !== undefined, { message: "Provide isActive and/or fullName" });
 
-usersRouter.patch("/:userId", requireRole("ADMIN"), validateBody(setActiveSchema), async (req: AuthedRequest<{ userId: string }>, res, next) => {
+usersRouter.patch("/:userId", requireRole("ADMIN"), validateBody(updateUserSchema), async (req: AuthedRequest<{ userId: string }>, res, next) => {
   try {
     const { userId } = req.params;
-    const { isActive } = req.body as { isActive: boolean };
+    const { isActive, fullName } = req.body as { isActive?: boolean; fullName?: string };
 
     const targetUser = await prisma.user.findUnique({ where: { id: userId } });
     if (!targetUser) return res.status(404).json({ error: "User not found" });
 
-    const updated = await prisma.user.update({ where: { id: userId }, data: { isActive, tokenVersion: { increment: 1 } } });
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(isActive !== undefined ? { isActive, tokenVersion: { increment: 1 } } : {}),
+        ...(fullName !== undefined ? { fullName } : {}),
+      },
+    });
 
-    await recordAudit({ actorId: req.user!.id, action: isActive ? "user.activated" : "user.deactivated", entityType: "User", entityId: userId });
+    if (isActive !== undefined) {
+      await recordAudit({ actorId: req.user!.id, action: isActive ? "user.activated" : "user.deactivated", entityType: "User", entityId: userId });
+    }
+    if (fullName !== undefined) {
+      await recordAudit({ actorId: req.user!.id, action: "user.renamed", entityType: "User", entityId: userId, metadata: { from: targetUser.fullName, to: fullName } });
+    }
 
     res.json({ id: updated.id, email: updated.email, fullName: updated.fullName, isActive: updated.isActive });
   } catch (err) {

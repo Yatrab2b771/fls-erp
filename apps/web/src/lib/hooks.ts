@@ -524,6 +524,14 @@ export function useSetUserActive() {
   });
 }
 
+export function useRenameUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, fullName }: { userId: string; fullName: string }) => api(`/api/users/${userId}`, { method: "PATCH", body: { fullName } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
+  });
+}
+
 export function useResetPassword() {
   return useMutation({
     mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) => api(`/api/users/${userId}/reset-password`, { method: "POST", body: { newPassword } }),

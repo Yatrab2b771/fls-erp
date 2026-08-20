@@ -10,8 +10,8 @@ import { changePasswordSchema, loginSchema, registerSchema, type ChangePasswordI
 
 export const authRouter = Router();
 
-function serializeUser(user: { id: string; email: string; fullName: string; roles: { role: { name: string } }[] }) {
-  return { id: user.id, email: user.email, fullName: user.fullName, roles: user.roles.map((r) => r.role.name) };
+function serializeUser(user: { id: string; employeeId: number; email: string; fullName: string; roles: { role: { name: string } }[] }) {
+  return { id: user.id, employeeId: user.employeeId, email: user.email, fullName: user.fullName, roles: user.roles.map((r) => r.role.name) };
 }
 
 // New users register with no roles — only an Admin can grant roles

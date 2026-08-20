@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { ChevronDown, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
+import { formatEmployeeId } from "../lib/format";
 import type { RoleName } from "../lib/types";
 
 // Order Tracking is the whole pipeline now (PO intake through Dispatch,
@@ -124,6 +125,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 <div className="animate-scale-in absolute right-0 top-full z-50 mt-2 w-56 origin-top-right rounded-2xl border border-slate-200/80 bg-white p-2 shadow-lift">
                   <div className="px-2.5 py-2">
                     <p className="truncate text-xs font-bold text-slate-800">{displayName}</p>
+                    {user && <p className="mt-0.5 font-mono text-[10px] font-bold text-slate-400">{formatEmployeeId(user.employeeId)}</p>}
                     <div className="mt-1.5 flex flex-wrap gap-1">
                       {(user?.roles.length ? user.roles : ["No roles"]).map((r) => (
                         <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-700">

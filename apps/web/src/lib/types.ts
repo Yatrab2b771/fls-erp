@@ -2,6 +2,7 @@ export type RoleName = "ADMIN" | "BD" | "PPIC" | "STORE" | "PURCHASE" | "ACCOUNT
 
 export interface CurrentUser {
   id: string;
+  employeeId: number;
   email: string;
   fullName: string;
   roles: RoleName[];
@@ -395,6 +396,7 @@ export interface InventoryRequest {
 
 export interface ManagedUser {
   id: string;
+  employeeId: number;
   email: string;
   fullName: string;
   isActive: boolean;

@@ -34,6 +34,11 @@ enum RoleName {
 
 model User {
   id           String   @id @default(uuid())
+  // A short, permanent, human-readable identifier — the UUID id isn't
+  // something anyone can read aloud or tell two same-named people apart
+  // by. DB-generated autoincrement, so it's guaranteed unique with no
+  // generation logic to get wrong; formatted as "FLS-0007" in the UI.
+  employeeId   Int      @unique @default(autoincrement())
   email        String   @unique
   passwordHash String
   fullName     String

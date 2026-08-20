@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { KeyRound, Plus, ShieldCheck, UserCheck, Users as UsersIcon, X } from "lucide-react";
-import { useCreateUser, useGrantRole, useResetPassword, useRevokeRole, useSetUserActive, useUsers } from "../lib/hooks";
+import { Check, KeyRound, Pencil, Plus, ShieldCheck, UserCheck, Users as UsersIcon, X } from "lucide-react";
+import { useCreateUser, useGrantRole, useRenameUser, useResetPassword, useRevokeRole, useSetUserActive, useUsers } from "../lib/hooks";
 import { ALL_ROLES, type ManagedUser, type RoleName } from "../lib/types";
 import { ApiError } from "../lib/api";
+import { formatEmployeeId } from "../lib/format";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -67,6 +68,7 @@ export function UsersPage() {
             <table className="table-modern w-full">
               <thead>
                 <tr>
+                  <th>ID</th>
                   <th>Email (login id)</th>
                   <th>Full Name</th>
                   <th>Roles</th>
@@ -162,18 +164,71 @@ function UserRow({ user }: { user: ManagedUser }) {
   const revokeRole = useRevokeRole();
   const setActive = useSetUserActive();
   const resetPassword = useResetPassword();
+  const renameUser = useRenameUser();
   const toast = useToast();
   const [addingRole, setAddingRole] = useState<RoleName | "">("");
   const [showReset, setShowReset] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [resetMessage, setResetMessage] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(user.fullName);
 
   const availableRoles = ALL_ROLES.filter((r) => !user.roles.includes(r));
 
+  async function handleSaveName() {
+    const trimmed = nameDraft.trim();
+    if (!trimmed) return;
+    if (trimmed === user.fullName) return setEditingName(false);
+    try {
+      await renameUser.mutateAsync({ userId: user.id, fullName: trimmed });
+      toast.success("Name updated.");
+      setEditingName(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update name");
+    }
+  }
+
   return (
     <tr className="align-top">
+      <td className="font-mono text-[11px] font-bold text-slate-500">{formatEmployeeId(user.employeeId)}</td>
       <td className="font-mono text-xs text-slate-700">{user.email}</td>
-      <td className="text-xs font-bold text-slate-700">{user.fullName}</td>
+      <td className="text-xs font-bold text-slate-700">
+        {editingName ? (
+          <div className="flex items-center gap-1.5">
+            <input
+              autoFocus
+              className="field !py-1 !px-2 text-xs"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSaveName();
+                if (e.key === "Escape") {
+                  setNameDraft(user.fullName);
+                  setEditingName(false);
+                }
+              }}
+            />
+            <button className="btn-icon shrink-0" disabled={renameUser.isPending} onClick={handleSaveName} title="Save">
+              <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} />
+            </button>
+            <button
+              className="btn-icon shrink-0"
+              onClick={() => {
+                setNameDraft(user.fullName);
+                setEditingName(false);
+              }}
+              title="Cancel"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={2.5} />
+            </button>
+          </div>
+        ) : (
+          <button className="group flex items-center gap-1.5 text-left" onClick={() => setEditingName(true)} title="Click to rename">
+            {user.fullName}
+            <Pencil className="h-3 w-3 shrink-0 text-slate-300 group-hover:text-slate-500" strokeWidth={2.25} />
+          </button>
+        )}
+      </td>
       <td>
         <div className="flex flex-wrap items-center gap-1.5">
           {user.roles.length === 0 && <span className="text-[10px] text-slate-400">No roles</span>}
