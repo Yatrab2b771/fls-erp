@@ -1,7 +1,7 @@
 export interface FieldDef {
   name: string;
   label: string;
-  type: "text" | "number" | "date" | "select";
+  type: "text" | "number" | "date" | "select" | "combo";
   options?: readonly string[];
 }
 
@@ -38,6 +38,25 @@ export function FieldGrid({
                 </option>
               ))}
             </select>
+          ) : field.type === "combo" ? (
+            // A dropdown of the common phase names, but still free text —
+            // this field describes whichever process step is underway
+            // (e.g. "Blending"), which a strict <select> can't enumerate
+            // for every product.
+            <>
+              <input
+                list={`${field.name}-options`}
+                className="field"
+                disabled={disabled}
+                value={values[field.name] ?? ""}
+                onChange={(e) => onChange?.(field.name, e.target.value)}
+              />
+              <datalist id={`${field.name}-options`}>
+                {field.options?.map((opt) => (
+                  <option key={opt} value={opt} />
+                ))}
+              </datalist>
+            </>
           ) : (
             <input
               type={field.type}

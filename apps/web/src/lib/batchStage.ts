@@ -50,6 +50,11 @@ const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const PACK_APPROVAL_STATUSES = ["Approved", "Not approved"] as const;
 const TRANSPORT_TYPES = ["By Land", "By Courier", "By Air"] as const;
 const CUSTOMER_CONFIRMATIONS = ["Received", "Not Received"] as const;
+// Common process-phase names for the two free-text status fields below —
+// offered as a combobox, not a strict enum, since the actual phase varies
+// by product and this list can't be exhaustive.
+const MANUFACTURING_STATUSES = ["Not Started", "Blending", "Mixing", "Filling", "Capping", "In Progress", "Completed", "On Hold"] as const;
+const PACKAGING_STATUSES = ["Not Started", "Labelling", "Cartoning", "Sealing", "Shrink Wrapping", "In Progress", "Completed", "On Hold"] as const;
 
 // The department fields captured at each stage — per Date.docx/
 // FLS-MPS.xlsx, mirroring apps/api's BATCH_STAGE_FIELD_SCHEMA exactly.
@@ -83,7 +88,7 @@ export const BATCH_STAGE_FIELDS: Partial<Record<BatchStageId, FieldDef[]>> = {
   ],
   PRODUCTION_EXECUTION: [
     { name: "manufacturingStartDate", label: "Start Date", type: "date" },
-    { name: "manufacturingStatus", label: "Manufacturing Status", type: "text" },
+    { name: "manufacturingStatus", label: "Manufacturing Status", type: "combo", options: MANUFACTURING_STATUSES },
     { name: "manufacturingEndDate", label: "End Date", type: "date" },
     { name: "manufacturingRemarks", label: "Remarks", type: "text" },
   ],
@@ -94,7 +99,7 @@ export const BATCH_STAGE_FIELDS: Partial<Record<BatchStageId, FieldDef[]>> = {
   ],
   PACKAGING: [
     { name: "packagingStartDate", label: "Start Date", type: "date" },
-    { name: "packagingStatus", label: "Packaging Status", type: "text" },
+    { name: "packagingStatus", label: "Packaging Status", type: "combo", options: PACKAGING_STATUSES },
     { name: "packagingEndDate", label: "End Date", type: "date" },
     { name: "packagingRemarks", label: "Remarks", type: "text" },
   ],
