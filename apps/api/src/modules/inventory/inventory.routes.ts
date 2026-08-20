@@ -8,10 +8,12 @@ import {
   createDispatchTransferSchema,
   createInventoryItemSchema,
   createInventoryTransactionSchema,
+  importInventoryTransactionsSchema,
   updateInventoryItemSchema,
   type CreateDispatchTransferInput,
   type CreateInventoryItemInput,
   type CreateInventoryTransactionInput,
+  type ImportInventoryTransactionsInput,
   type UpdateInventoryItemInput,
 } from "./inventory.schemas";
 import type { DispatchTransferType, InventoryCategory, Prisma } from "@prisma/client";
@@ -133,6 +135,60 @@ inventoryRouter.get("/transactions", async (req, res, next) => {
     ]);
     setPaginationHeaders(res, total, pagination);
     res.json(transactions);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Bulk import — one Excel sheet's worth of Received/Issued rows at
+// once, parsed client-side (apps/web's inventoryImport.ts) into the same
+// shape as a single Log Entry. Items are resolved-or-created by
+// (category, name), same as the "+ New" option on the manual form. ---
+
+inventoryRouter.post("/transactions/import", validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { type, rows } = req.body as ImportInventoryTransactionsInput;
+
+    // Resolve every distinct (category, name) pair to an item id up front,
+    // creating any item this sheet mentions for the first time — one
+    // upsert per unique item rather than per row.
+    const uniqueItems = new Map<string, { category: "RM" | "PM"; name: string }>();
+    for (const row of rows) uniqueItems.set(`${row.category}::${row.itemName}`, { category: row.category, name: row.itemName });
+
+    const itemIds = new Map<string, string>();
+    let itemsCreated = 0;
+    for (const [key, { category, name }] of uniqueItems) {
+      const existing = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name } } });
+      if (existing) {
+        itemIds.set(key, existing.id);
+      } else {
+        const created = await prisma.inventoryItem.create({ data: { category, name } });
+        itemIds.set(key, created.id);
+        itemsCreated += 1;
+      }
+    }
+
+    const result = await prisma.inventoryTransaction.createMany({
+      data: rows.map((row) => ({
+        itemId: itemIds.get(`${row.category}::${row.itemName}`)!,
+        type,
+        date: row.date,
+        unit: row.unit,
+        quantity: row.quantity,
+        size: row.size,
+        vendorName: row.vendorName,
+        createdById: req.user!.id,
+      })),
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory.transactions_imported",
+      entityType: "InventoryTransaction",
+      metadata: { type, rowCount: result.count, itemsCreated },
+    });
+
+    res.status(201).json({ transactionsCreated: result.count, itemsCreated });
   } catch (err) {
     next(err);
   }

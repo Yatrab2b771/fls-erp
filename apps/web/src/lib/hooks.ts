@@ -20,6 +20,7 @@ import type {
   RoleName,
 } from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
+import type { ImportInventoryRow } from "./inventoryImport";
 
 // --- Customers ---
 
@@ -342,6 +343,19 @@ export function useCreateInventoryTransaction() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
       qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+    },
+  });
+}
+
+export function useImportInventoryTransactions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[] }) =>
+      api<{ transactionsCreated: number; itemsCreated: number }>("/api/inventory/transactions/import", { method: "POST", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "items"] });
     },
   });
 }

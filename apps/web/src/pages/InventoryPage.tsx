@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, Boxes, FileText, Package, Plus, Send, Trash2, Truck, UserPlus, Warehouse, X } from "lucide-react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { ArrowDownToLine, ArrowUpFromLine, Boxes, FileText, Package, Plus, Send, Trash2, Truck, Upload, UserPlus, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useCreateDispatchTransfer,
@@ -9,11 +9,13 @@ import {
   useDeleteDispatchTransfer,
   useDeleteInventoryTransaction,
   useDispatchTransfers,
+  useImportInventoryTransactions,
   useInventoryItems,
   useInventoryStock,
   useInventoryTransactions,
 } from "../lib/hooks";
 import type { DispatchTransferType, InventoryCategory, InventoryTxnType } from "../lib/types";
+import { parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -54,12 +56,16 @@ function isDispatchTab(tab: ViewTab): tab is DispatchTransferType {
 export function InventoryPage() {
   const { hasRole } = useAuth();
   const canWrite = hasRole("STORE");
+  const toast = useToast();
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const importTxns = useImportInventoryTransactions();
 
   const [tab, setTab] = useState<ViewTab>("stock");
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
 
   const dispatchTab = isDispatchTab(tab);
+  const materialTab = tab !== "stock" && !dispatchTab;
 
   const { data: stock, isLoading: stockLoading } = useInventoryStock();
   const { data: transactions, isLoading: txnLoading } = useInventoryTransactions(tab === "stock" || dispatchTab ? undefined : { type: tab });
@@ -78,6 +84,24 @@ export function InventoryPage() {
     setShowForm(false);
   }
 
+  async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file next time
+    if (!file || !materialTab) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped } = parseInventoryTransactionWorkbook(buffer, "RM");
+      if (!rows.length) return toast.error("No usable rows found — check the Item, Date, Unit, and Count/Quantity columns.");
+
+      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows });
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      toast.success(`Imported ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -86,15 +110,25 @@ export function InventoryPage() {
           <p className="text-sm text-slate-500">Warehouse-level material received, material issued, and dispatch transfers.</p>
         </div>
         {canWrite && (
-          <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
-            {showForm ? (
-              <X className="h-4 w-4" strokeWidth={2.5} />
-            ) : (
+          <div className="flex items-center gap-2">
+            {materialTab && (
               <>
-                <Plus className="h-4 w-4" strokeWidth={2.5} /> Log Entry
+                <button className="btn-ghost" disabled={importTxns.isPending} onClick={() => importFileRef.current?.click()}>
+                  <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
+                </button>
+                <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
               </>
             )}
-          </button>
+            <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
+              {showForm ? (
+                <X className="h-4 w-4" strokeWidth={2.5} />
+              ) : (
+                <>
+                  <Plus className="h-4 w-4" strokeWidth={2.5} /> Log Entry
+                </>
+              )}
+            </button>
+          </div>
         )}
       </div>
 
