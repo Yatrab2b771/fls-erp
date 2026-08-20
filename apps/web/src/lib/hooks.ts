@@ -25,7 +25,7 @@ import type {
   RoleName,
 } from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
-import type { ImportInventoryRequestRow, ImportInventoryRow } from "./inventoryImport";
+import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow } from "./inventoryImport";
 
 // --- Customers ---
 
@@ -520,6 +520,15 @@ export function useCreateDispatchTransfer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: CreateDispatchTransferPayload) => api<DispatchTransfer>("/api/inventory/dispatch-transfers", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
+  });
+}
+
+export function useImportDispatchTransfers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { type: DispatchTransferType; rows: ImportDispatchTransferRow[] }) =>
+      api<{ transfersCreated: number; unknownCustomers: string[] }>("/api/inventory/dispatch-transfers/import", { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
   });
 }

@@ -424,4 +424,37 @@ describe("Inventory module", () => {
       expect(list.body.every((r: { status: string }) => r.status === "PENDING")).toBe(true);
     });
   });
+
+  describe("POST /api/inventory/dispatch-transfers/import — bulk shipment sheet", () => {
+    it("matches customers by exact name, never creates one, and reports unmatched names back", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: bdToken } = await createUser(["BD"]);
+      await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
+
+      const denied = await request(app)
+        .post("/api/inventory/dispatch-transfers/import")
+        .set(authHeader(bdToken))
+        .send({ type: "FG", rows: [{ customerName: "Acme Nutrition Pvt. Ltd.", date: "2026-08-10", productName: "Whey Gold 1Kg", quantity: 50 }] });
+      expect(denied.status).toBe(403);
+
+      const imported = await request(app)
+        .post("/api/inventory/dispatch-transfers/import")
+        .set(authHeader(storeToken))
+        .send({
+          type: "FG",
+          rows: [
+            { customerName: "Acme Nutrition Pvt. Ltd.", date: "2026-08-10", productName: "Whey Gold 1Kg", quantity: 50 },
+            { customerName: "Acme Nutrition Pvt. Ltd.", date: "2026-08-10", productName: "BCAA 2:1:1", quantity: 30 },
+            { customerName: "Nonexistent Customer LLC", date: "2026-08-10", productName: "Creatine", quantity: 20 },
+          ],
+        });
+      expect(imported.status).toBe(201);
+      expect(imported.body.transfersCreated).toBe(2);
+      expect(imported.body.unknownCustomers).toEqual(["Nonexistent Customer LLC"]);
+
+      const list = await request(app).get("/api/inventory/dispatch-transfers?type=FG").set(authHeader(storeToken));
+      expect(list.body.length).toBe(2);
+      expect(list.body.every((d: { qcStatus: string }) => d.qcStatus === "PENDING_QC")).toBe(true);
+    });
+  });
 });

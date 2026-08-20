@@ -184,3 +184,56 @@ export function parseInventoryRequestWorkbook(buffer: ArrayBuffer, defaultCatego
 
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
 }
+
+// --- Dispatch Transfers (FG / Bill) bulk import — customers are
+// matched by exact name against the existing directory, never created
+// (customer creation is BD-only, enforced server-side); a row whose
+// customer doesn't match is included in the payload anyway and the API
+// reports back which names it couldn't match, since only the server
+// knows the current customer directory. ---
+
+const CUSTOMER_COLUMNS = ["Customer", "Customer Name", "Company"];
+const PRODUCT_NAME_COLUMNS = ["Product Name", "Product", "Item"];
+
+export interface ImportDispatchTransferRow {
+  customerName: string;
+  date: string;
+  productName: string;
+  quantity: number;
+}
+
+export interface ParsedDispatchTransferImport {
+  rows: ImportDispatchTransferRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parseDispatchTransferWorkbook(buffer: ArrayBuffer): ParsedDispatchTransferImport {
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+  const rows: ImportDispatchTransferRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const customerName = asText(row, CUSTOMER_COLUMNS);
+      const productName = asText(row, PRODUCT_NAME_COLUMNS);
+      const dateRaw = firstNonEmpty(row, DATE_COLUMNS);
+      const date = parseDate(dateRaw);
+      const quantityRaw = firstNonEmpty(row, QUANTITY_COLUMNS);
+      const quantity = quantityRaw === undefined ? NaN : Number(quantityRaw);
+
+      if (!customerName || !productName || !date || !Number.isFinite(quantity) || quantity <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      rows.push({ customerName, date, productName, quantity });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}

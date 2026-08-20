@@ -158,3 +158,14 @@ export function downloadInventoryRequestImportTemplate() {
     "FLS_Inventory_Request_Template.xlsx",
   );
 }
+
+export function downloadDispatchImportTemplate(type: "FG" | "BILL") {
+  download(
+    type === "FG" ? "FG Transfers" : "Bill Transfers",
+    [
+      { Customer: "Acme Nutrition Pvt. Ltd.", Date: "20-08-2026", "Product Name": "Whey Gold 1Kg", Qty: 50 },
+      { Customer: "", Date: "", "Product Name": "", Qty: "" },
+    ],
+    `FLS_Inventory_${type === "FG" ? "FG" : "Bill"}_Transfer_Template.xlsx`,
+  );
+}

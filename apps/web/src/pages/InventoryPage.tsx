@@ -33,6 +33,7 @@ import {
   useDeleteInventoryRequest,
   useDeleteInventoryTransaction,
   useDispatchTransfers,
+  useImportDispatchTransfers,
   useImportInventoryRequests,
   useImportInventoryTransactions,
   useInventoryItems,
@@ -46,8 +47,9 @@ import {
   useReviewInventoryRequest,
 } from "../lib/hooks";
 import type { DispatchTransfer, DispatchTransferType, InventoryCategory, InventoryRequest, InventoryRequestPurpose, InventoryTransaction, InventoryTxnType } from "../lib/types";
-import { parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
+import { parseDispatchTransferWorkbook, parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
 import {
+  downloadDispatchImportTemplate,
   downloadInventoryImportTemplate,
   downloadInventoryRequestImportTemplate,
   exportDispatchReport,
@@ -150,8 +152,10 @@ export function InventoryPage() {
   const toast = useToast();
   const importFileRef = useRef<HTMLInputElement>(null);
   const importRequestsFileRef = useRef<HTMLInputElement>(null);
+  const importDispatchFileRef = useRef<HTMLInputElement>(null);
   const importTxns = useImportInventoryTransactions();
   const importRequests = useImportInventoryRequests();
+  const importDispatch = useImportDispatchTransfers();
 
   // Land on the first tab this role can actually see — "stock" 403s for
   // a QA_QC-only account, so it can't be a blind default.
@@ -265,6 +269,35 @@ export function InventoryPage() {
     }
   }
 
+  async function handleImportDispatchFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !dispatchTab || !canWrite) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped, sheetNames, detectedHeaders } = parseDispatchTransferWorkbook(buffer);
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Dispatch transfer import] No usable rows.", { fileName: file.name, fileSize: file.size, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Customer + Date + Product + Qty together. Check DevTools console for details.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}) — is this the right file?`,
+        );
+      }
+
+      const result = await importDispatch.mutateAsync({ type: tab as DispatchTransferType, rows });
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      const unknownNote = result.unknownCustomers.length
+        ? ` — ${result.unknownCustomers.length} row(s) skipped, unknown customer(s): ${result.unknownCustomers.join(", ")}. Ask BD to add them first.`
+        : "";
+      toast.success(`Imported ${result.transfersCreated} ${DISPATCH_TYPE_LABEL[tab as DispatchTransferType].toLowerCase()} entr${result.transfersCreated === 1 ? "y" : "ies"}${skippedNote}${unknownNote}.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
+    }
+  }
+
   // Received also opens the manual Log Entry form — Store still logs the
   // initial arrival by hand (or Excel import), it's what happens *after*
   // that changed (QC gate before it counts as stock).
@@ -302,6 +335,17 @@ export function InventoryPage() {
                 <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importRequests.isPending ? "Importing…" : "Import Excel"}
               </button>
               <input ref={importRequestsFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportRequestsFile} />
+            </>
+          )}
+          {dispatchTab && canWrite && (
+            <>
+              <button className="btn-ghost" onClick={() => downloadDispatchImportTemplate(tab as DispatchTransferType)} title="Download a blank template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
+              </button>
+              <button className="btn-ghost" disabled={importDispatch.isPending} onClick={() => importDispatchFileRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importDispatch.isPending ? "Importing…" : "Import Excel"}
+              </button>
+              <input ref={importDispatchFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportDispatchFile} />
             </>
           )}
           {tab === "ISSUED_PRODUCTION" && canWrite && (

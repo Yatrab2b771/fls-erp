@@ -9,6 +9,7 @@ import {
   createInventoryItemSchema,
   createInventoryRequestSchema,
   createInventoryTransactionSchema,
+  importDispatchTransfersSchema,
   importInventoryRequestsSchema,
   importInventoryTransactionsSchema,
   issueInventoryRequestSchema,
@@ -19,6 +20,7 @@ import {
   type CreateInventoryItemInput,
   type CreateInventoryRequestInput,
   type CreateInventoryTransactionInput,
+  type ImportDispatchTransfersInput,
   type ImportInventoryRequestsInput,
   type ImportInventoryTransactionsInput,
   type IssueInventoryRequestInput,
@@ -620,6 +622,48 @@ inventoryRouter.post("/dispatch-transfers", requireRole("STORE"), validateBody(c
     });
 
     res.status(201).json(transfer);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Bulk upload — customers are matched by exact companyName against the
+// existing directory, never created here (customer creation is
+// BD-only). A row whose customer doesn't match anything gets skipped
+// and named back in the response so Store knows to ask BD to add it.
+inventoryRouter.post("/dispatch-transfers/import", requireRole("STORE"), validateBody(importDispatchTransfersSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { type, rows } = req.body as ImportDispatchTransfersInput;
+
+    const uniqueNames = [...new Set(rows.map((r) => r.customerName))];
+    const customers = await prisma.customer.findMany({ where: { companyName: { in: uniqueNames } } });
+    const customerIdByName = new Map(customers.map((c) => [c.companyName, c.id]));
+
+    const unknownCustomers = uniqueNames.filter((n) => !customerIdByName.has(n));
+    const usableRows = rows.filter((r) => customerIdByName.has(r.customerName));
+
+    const result = usableRows.length
+      ? await prisma.dispatchTransfer.createMany({
+          data: usableRows.map((row) => ({
+            type,
+            date: row.date,
+            customerId: customerIdByName.get(row.customerName)!,
+            productName: row.productName,
+            quantity: row.quantity,
+            createdById: req.user!.id,
+            qcStatus: type === "FG" ? "PENDING_QC" : undefined,
+          })),
+        })
+      : { count: 0 };
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory.dispatch_transfers_imported",
+      entityType: "DispatchTransfer",
+      metadata: { type, rowCount: result.count, unknownCustomers },
+    });
+
+    res.status(201).json({ transfersCreated: result.count, unknownCustomers });
   } catch (err) {
     next(err);
   }

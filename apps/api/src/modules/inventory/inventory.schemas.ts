@@ -63,6 +63,26 @@ export const importInventoryTransactionsSchema = z.object({
     .max(2000),
 });
 
+// Bulk upload of dispatch transfers — unlike items, customers are NOT
+// resolved-or-created here: customer creation is BD-only (see
+// customers.routes.ts), so Store can't spin up new ones through this
+// import. A row whose customerName doesn't match an existing customer
+// is skipped and reported back, not auto-created.
+export const importDispatchTransfersSchema = z.object({
+  type: z.enum(DISPATCH_TRANSFER_TYPES),
+  rows: z
+    .array(
+      z.object({
+        customerName: z.string().min(1).max(200),
+        date: z.coerce.date(),
+        productName: z.string().min(1).max(200),
+        quantity: z.coerce.number().positive(),
+      }),
+    )
+    .min(1)
+    .max(1000),
+});
+
 // --- Material Requests (indents) — the department-wise gate: PPIC raises
 // one of these before Store can decide what actually gets issued to
 // Production (or Day Store). Mirrors PurchaseOrder's Draft → Approve/
@@ -129,6 +149,7 @@ export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;
 export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTransactionSchema>;
 export type CreateDispatchTransferInput = z.infer<typeof createDispatchTransferSchema>;
+export type ImportDispatchTransfersInput = z.infer<typeof importDispatchTransfersSchema>;
 export type ImportInventoryTransactionsInput = z.infer<typeof importInventoryTransactionsSchema>;
 export type CreateInventoryRequestInput = z.infer<typeof createInventoryRequestSchema>;
 export type ImportInventoryRequestsInput = z.infer<typeof importInventoryRequestsSchema>;
