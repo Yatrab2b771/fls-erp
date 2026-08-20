@@ -25,7 +25,7 @@ import type {
   RoleName,
 } from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
-import type { ImportInventoryRow } from "./inventoryImport";
+import type { ImportInventoryRequestRow, ImportInventoryRow } from "./inventoryImport";
 
 // --- Customers ---
 
@@ -441,6 +441,14 @@ export function useCreateInventoryRequest() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: CreateInventoryRequestPayload) => api<InventoryRequest>("/api/inventory/requests", { method: "POST", body }),
+    onSuccess: () => invalidateRequests(qc),
+  });
+}
+
+export function useImportInventoryRequests() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { rows: ImportInventoryRequestRow[] }) => api<{ requestsCreated: number; itemsCreated: number }>("/api/inventory/requests/import", { method: "POST", body }),
     onSuccess: () => invalidateRequests(qc),
   });
 }

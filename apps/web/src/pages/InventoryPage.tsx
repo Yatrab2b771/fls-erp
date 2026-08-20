@@ -33,6 +33,7 @@ import {
   useDeleteInventoryRequest,
   useDeleteInventoryTransaction,
   useDispatchTransfers,
+  useImportInventoryRequests,
   useImportInventoryTransactions,
   useInventoryItems,
   useInventoryRequests,
@@ -45,8 +46,15 @@ import {
   useReviewInventoryRequest,
 } from "../lib/hooks";
 import type { DispatchTransfer, DispatchTransferType, InventoryCategory, InventoryRequest, InventoryRequestPurpose, InventoryTransaction, InventoryTxnType } from "../lib/types";
-import { parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
-import { downloadInventoryImportTemplate, exportDispatchReport, exportRequestsReport, exportStockReport, exportTransactionReport } from "../lib/inventoryExport";
+import { parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
+import {
+  downloadInventoryImportTemplate,
+  downloadInventoryRequestImportTemplate,
+  exportDispatchReport,
+  exportRequestsReport,
+  exportStockReport,
+  exportTransactionReport,
+} from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -141,7 +149,9 @@ export function InventoryPage() {
 
   const toast = useToast();
   const importFileRef = useRef<HTMLInputElement>(null);
+  const importRequestsFileRef = useRef<HTMLInputElement>(null);
   const importTxns = useImportInventoryTransactions();
+  const importRequests = useImportInventoryRequests();
 
   // Land on the first tab this role can actually see — "stock" 403s for
   // a QA_QC-only account, so it can't be a blind default.
@@ -229,6 +239,32 @@ export function InventoryPage() {
     }
   }
 
+  async function handleImportRequestsFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !canRequest) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped, sheetNames, detectedHeaders } = parseInventoryRequestWorkbook(buffer, "RM");
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Inventory request import] No usable rows.", { fileName: file.name, fileSize: file.size, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Item + Requested Qty together. Check DevTools console for details.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}) — is this the right file?`,
+        );
+      }
+
+      const result = await importRequests.mutateAsync({ rows });
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      toast.success(`Sent ${result.requestsCreated} request${result.requestsCreated === 1 ? "" : "s"} to Store for approval${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
+    }
+  }
+
   // Received also opens the manual Log Entry form — Store still logs the
   // initial arrival by hand (or Excel import), it's what happens *after*
   // that changed (QC gate before it counts as stock).
@@ -255,6 +291,17 @@ export function InventoryPage() {
                 <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
               </button>
               <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
+            </>
+          )}
+          {isRequestsTab && canRequest && (
+            <>
+              <button className="btn-ghost" onClick={downloadInventoryRequestImportTemplate} title="Download a blank template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
+              </button>
+              <button className="btn-ghost" disabled={importRequests.isPending} onClick={() => importRequestsFileRef.current?.click()}>
+                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importRequests.isPending ? "Importing…" : "Import Excel"}
+              </button>
+              <input ref={importRequestsFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportRequestsFile} />
             </>
           )}
           {tab === "ISSUED_PRODUCTION" && canWrite && (

@@ -9,6 +9,7 @@ import {
   createInventoryItemSchema,
   createInventoryRequestSchema,
   createInventoryTransactionSchema,
+  importInventoryRequestsSchema,
   importInventoryTransactionsSchema,
   issueInventoryRequestSchema,
   qcReviewSchema,
@@ -18,6 +19,7 @@ import {
   type CreateInventoryItemInput,
   type CreateInventoryRequestInput,
   type CreateInventoryTransactionInput,
+  type ImportInventoryRequestsInput,
   type ImportInventoryTransactionsInput,
   type IssueInventoryRequestInput,
   type QcReviewInput,
@@ -406,6 +408,55 @@ inventoryRouter.post("/requests", requireRole("PPIC"), validateBody(createInvent
     });
 
     res.status(201).json(request);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Bulk indent sheet — same resolve-or-create-item pattern as the
+// transactions import, but purpose is per-row since a real sheet mixes
+// Production and Day Store lines. Every row lands as its own PENDING
+// request, same as if PPIC had submitted them one at a time.
+inventoryRouter.post("/requests/import", requireRole("PPIC"), validateBody(importInventoryRequestsSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { rows } = req.body as ImportInventoryRequestsInput;
+
+    const uniqueItems = new Map<string, { category: "RM" | "PM"; name: string }>();
+    for (const row of rows) uniqueItems.set(`${row.category}::${row.itemName}`, { category: row.category, name: row.itemName });
+
+    const itemIds = new Map<string, string>();
+    let itemsCreated = 0;
+    for (const [key, { category, name }] of uniqueItems) {
+      const existing = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name } } });
+      if (existing) {
+        itemIds.set(key, existing.id);
+      } else {
+        const created = await prisma.inventoryItem.create({ data: { category, name } });
+        itemIds.set(key, created.id);
+        itemsCreated += 1;
+      }
+    }
+
+    const result = await prisma.inventoryRequest.createMany({
+      data: rows.map((row) => ({
+        itemId: itemIds.get(`${row.category}::${row.itemName}`)!,
+        category: row.category,
+        requestedQty: row.requestedQty,
+        purpose: row.purpose,
+        neededBy: row.neededBy,
+        note: row.note,
+        requestedById: req.user!.id,
+      })),
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory_requests.imported",
+      entityType: "InventoryRequest",
+      metadata: { rowCount: result.count, itemsCreated },
+    });
+
+    res.status(201).json({ requestsCreated: result.count, itemsCreated });
   } catch (err) {
     next(err);
   }

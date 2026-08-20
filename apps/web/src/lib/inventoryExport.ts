@@ -146,3 +146,15 @@ export function downloadInventoryImportTemplate() {
     "FLS_Inventory_Import_Template.xlsx",
   );
 }
+
+export function downloadInventoryRequestImportTemplate() {
+  download(
+    "Material Requests",
+    [
+      { Item: "Whey Protein Concentrate", Category: "RM", "Requested Qty": 50, Purpose: "Production", "Needed By": "25-08-2026", Note: "For batch GB-BCAA-0098" },
+      { Item: "Jar 1Kg HDPE", Category: "PM", "Requested Qty": 500, Purpose: "Day Store", "Needed By": "", Note: "" },
+      { Item: "", Category: "", "Requested Qty": "", Purpose: "", "Needed By": "", Note: "" },
+    ],
+    "FLS_Inventory_Request_Template.xlsx",
+  );
+}

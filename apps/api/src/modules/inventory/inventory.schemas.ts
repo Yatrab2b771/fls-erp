@@ -77,6 +77,26 @@ export const createInventoryRequestSchema = z.object({
   note: z.string().max(500).optional(),
 });
 
+// Bulk upload of Material Requests — same resolve-or-create-item pattern
+// as importInventoryTransactionsSchema, but purpose is a per-row column
+// (not one setting for the whole sheet) since a real indent sheet mixes
+// Production and Day Store lines naturally.
+export const importInventoryRequestsSchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        category: z.enum(CATEGORIES),
+        itemName: z.string().min(1).max(200),
+        requestedQty: z.coerce.number().positive(),
+        purpose: z.enum(REQUEST_PURPOSES),
+        neededBy: z.coerce.date().optional(),
+        note: z.string().max(500).optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+});
+
 export const reviewInventoryRequestSchema = z
   .object({
     action: z.enum(["APPROVE", "REJECT"]),
@@ -111,6 +131,7 @@ export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTran
 export type CreateDispatchTransferInput = z.infer<typeof createDispatchTransferSchema>;
 export type ImportInventoryTransactionsInput = z.infer<typeof importInventoryTransactionsSchema>;
 export type CreateInventoryRequestInput = z.infer<typeof createInventoryRequestSchema>;
+export type ImportInventoryRequestsInput = z.infer<typeof importInventoryRequestsSchema>;
 export type ReviewInventoryRequestInput = z.infer<typeof reviewInventoryRequestSchema>;
 export type IssueInventoryRequestInput = z.infer<typeof issueInventoryRequestSchema>;
 export type QcReviewInput = z.infer<typeof qcReviewSchema>;

@@ -113,3 +113,74 @@ export function parseInventoryTransactionWorkbook(buffer: ArrayBuffer, defaultCa
 
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
 }
+
+// --- Material Requests (indents) bulk import — a different sheet shape
+// than the transaction log: no Date/Unit/Vendor, but Purpose is a
+// per-row column since a real indent sheet mixes Production and Day
+// Store lines rather than being all one type. ---
+
+const REQUESTED_QTY_COLUMNS = ["Requested Qty", "Qty", "Quantity", "Count"];
+const PURPOSE_COLUMNS = ["Purpose", "For", "Issue Type"];
+const NEEDED_BY_COLUMNS = ["Needed By", "Required By"];
+const NOTE_COLUMNS = ["Note", "Remarks"];
+
+function parsePurpose(value: unknown): "ISSUED_PRODUCTION" | "ISSUED_DAY_STORE" {
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (text.includes("day store") || text.includes("day_store")) return "ISSUED_DAY_STORE";
+  return "ISSUED_PRODUCTION"; // default — the common case, and what a blank/unrecognized cell means
+}
+
+export interface ImportInventoryRequestRow {
+  category: "RM" | "PM";
+  itemName: string;
+  requestedQty: number;
+  purpose: "ISSUED_PRODUCTION" | "ISSUED_DAY_STORE";
+  neededBy?: string;
+  note?: string;
+}
+
+export interface ParsedInventoryRequestImport {
+  rows: ImportInventoryRequestRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parseInventoryRequestWorkbook(buffer: ArrayBuffer, defaultCategory: "RM" | "PM"): ParsedInventoryRequestImport {
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+  const rows: ImportInventoryRequestRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const itemName = asText(row, ITEM_COLUMNS);
+      const quantityRaw = firstNonEmpty(row, REQUESTED_QTY_COLUMNS);
+      const quantity = quantityRaw === undefined ? NaN : Number(quantityRaw);
+
+      if (!itemName || !Number.isFinite(quantity) || quantity <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      const categoryText = asText(row, CATEGORY_COLUMNS)?.toUpperCase();
+      const category: "RM" | "PM" = categoryText === "RM" || categoryText === "PM" ? categoryText : defaultCategory;
+      const neededByRaw = firstNonEmpty(row, NEEDED_BY_COLUMNS);
+
+      rows.push({
+        category,
+        itemName,
+        requestedQty: quantity,
+        purpose: parsePurpose(firstNonEmpty(row, PURPOSE_COLUMNS)),
+        neededBy: neededByRaw !== undefined ? parseDate(neededByRaw) : undefined,
+        note: asText(row, NOTE_COLUMNS),
+      });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}

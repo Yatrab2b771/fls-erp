@@ -394,4 +394,34 @@ describe("Inventory module", () => {
       expect(linkToIssued.body.sourceRequest.item.name).toBe("Whey Protein");
     });
   });
+
+  describe("POST /api/inventory/requests/import — bulk indent sheet", () => {
+    it("is restricted to PPIC, creates one PENDING request per row, resolving-or-creating items same as the transactions import", async () => {
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const { token: storeToken } = await createUser(["STORE"]);
+
+      const denied = await request(app)
+        .post("/api/inventory/requests/import")
+        .set(authHeader(storeToken))
+        .send({ rows: [{ category: "RM", itemName: "Whey Protein", requestedQty: 10, purpose: "ISSUED_PRODUCTION" }] });
+      expect(denied.status).toBe(403);
+
+      const imported = await request(app)
+        .post("/api/inventory/requests/import")
+        .set(authHeader(ppicToken))
+        .send({
+          rows: [
+            { category: "RM", itemName: "Whey Protein", requestedQty: 10, purpose: "ISSUED_PRODUCTION" },
+            { category: "RM", itemName: "Whey Protein", requestedQty: 5, purpose: "ISSUED_DAY_STORE" }, // same item, different row — no collapsing
+            { category: "PM", itemName: "Jar 1Kg", requestedQty: 200, purpose: "ISSUED_PRODUCTION", note: "For batch GB-0098" },
+          ],
+        });
+      expect(imported.status).toBe(201);
+      expect(imported.body).toEqual({ requestsCreated: 3, itemsCreated: 2 });
+
+      const list = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
+      expect(list.body.length).toBe(3);
+      expect(list.body.every((r: { status: string }) => r.status === "PENDING")).toBe(true);
+    });
+  });
 });
