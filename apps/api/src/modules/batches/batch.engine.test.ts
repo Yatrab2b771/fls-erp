@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeDelay, type DelayFields } from "./batch.engine";
+import { computeDelay, computeWastage, type DelayFields } from "./batch.engine";
 
 describe("computeDelay", () => {
   const blankDelay: DelayFields = { dispatchDate: null, dispatchPlanDate: null, manufacturingStartDate: null, productionPlanDate: null };
@@ -35,5 +35,26 @@ describe("computeDelay", () => {
       now,
     );
     expect(result.against).toBe("dispatchPlanDate");
+  });
+});
+
+describe("computeWastage", () => {
+  it("is null until both input and output are recorded", () => {
+    expect(computeWastage({ inputQty: null, outputQty: null })).toEqual({ wastageQty: null, wastagePct: null });
+    expect(computeWastage({ inputQty: 100, outputQty: null })).toEqual({ wastageQty: null, wastagePct: null });
+    expect(computeWastage({ inputQty: null, outputQty: 99 })).toEqual({ wastageQty: null, wastagePct: null });
+  });
+
+  it("computes the loss and its percentage of input, e.g. sieving loss", () => {
+    // 100 kg in, 99.9 kg out — 0.1 kg (0.1%) lost, matching the sieving example.
+    expect(computeWastage({ inputQty: 100, outputQty: 99.9 })).toEqual({ wastageQty: 0.1, wastagePct: 0.1 });
+  });
+
+  it("never goes negative — output can't exceed input in a wastage sense, so it floors at 0", () => {
+    expect(computeWastage({ inputQty: 100, outputQty: 105 })).toEqual({ wastageQty: 0, wastagePct: 0 });
+  });
+
+  it("no output at all means total wastage", () => {
+    expect(computeWastage({ inputQty: 100, outputQty: 0 })).toEqual({ wastageQty: 100, wastagePct: 100 });
   });
 });

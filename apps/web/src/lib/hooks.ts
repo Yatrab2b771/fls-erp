@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type {
+  AppNotification,
   Batch,
   BomPlan,
   CatalogBrand,
   CatalogSku,
   Customer,
+  DayStore,
   DispatchTransfer,
   DispatchTransferType,
   DispatchQcStatus,
@@ -19,13 +21,15 @@ import type {
   InventoryTransaction,
   InventoryTxnType,
   ManagedUser,
+  Plant,
+  PreInventoryRequirement,
   PurchaseOrder,
   RecipeSummary,
   RmPlan,
   RoleName,
 } from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
-import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow } from "./inventoryImport";
+import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow, ImportRequirementRow } from "./inventoryImport";
 
 // --- Customers ---
 
@@ -226,6 +230,14 @@ export function useCalculateBomPlan(planId: string) {
   });
 }
 
+// Turns a calculated plan straight into Pre-Inventory requirements (S1)
+// — one PM requirement per component/spec line.
+export function useSendBomPlanToPreInventory(planId: string) {
+  return useMutation({
+    mutationFn: () => api<{ requirementsCreated: number; itemsCreated: number }>(`/api/bom/plans/${planId}/send-to-pre-inventory`, { method: "POST" }),
+  });
+}
+
 // --- RM Costing module ---
 
 export function useRecipes() {
@@ -292,6 +304,14 @@ export function useCalculateRmPlan(planId: string) {
   });
 }
 
+// Turns a calculated plan's procurement rollup straight into
+// Pre-Inventory requirements (S1) — one RM requirement per ingredient.
+export function useSendRmPlanToPreInventory(planId: string) {
+  return useMutation({
+    mutationFn: () => api<{ requirementsCreated: number; itemsCreated: number }>(`/api/rm-costing/plans/${planId}/send-to-pre-inventory`, { method: "POST" }),
+  });
+}
+
 // The old separate "MPS Pipeline" hooks have been retired along with the
 // module — see useTransitionBatchStage above.
 
@@ -345,6 +365,8 @@ export interface CreateInventoryTransactionPayload {
   quantity: number;
   size?: string;
   vendorName?: string;
+  dayStoreId?: string;
+  isOpeningStock?: boolean;
 }
 
 export function useCreateInventoryTransaction() {
@@ -361,7 +383,7 @@ export function useCreateInventoryTransaction() {
 export function useImportInventoryTransactions() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[] }) =>
+    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[]; isOpeningStock?: boolean }) =>
       api<{ transactionsCreated: number; itemsCreated: number }>("/api/inventory/transactions/import", { method: "POST", body }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
@@ -382,8 +404,8 @@ export function useDeleteInventoryTransaction() {
   });
 }
 
-export function useInventoryVendors() {
-  return useQuery({ queryKey: ["inventory", "vendors"], queryFn: () => api<string[]>("/api/inventory/vendors") });
+export function useInventoryVendors(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["inventory", "vendors"], queryFn: () => api<string[]>("/api/inventory/vendors"), enabled: options?.enabled });
 }
 
 // --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA_QC reviews
@@ -397,7 +419,7 @@ function invalidateInventoryLedger(qc: ReturnType<typeof useQueryClient>) {
 export function useQcReviewTransaction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT"; note?: string }) =>
+    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT"; note?: string; rejectedQty?: number }) =>
       api<InventoryTransaction>(`/api/inventory/transactions/${id}/qc`, { method: "PATCH", body }),
     onSuccess: () => invalidateInventoryLedger(qc),
   });
@@ -429,6 +451,7 @@ export interface CreateInventoryRequestPayload {
   purpose: InventoryRequestPurpose;
   neededBy?: string;
   note?: string;
+  plantId?: string;
 }
 
 function invalidateRequests(qc: ReturnType<typeof useQueryClient>) {
@@ -465,7 +488,7 @@ export function useReviewInventoryRequest() {
 export function useIssueInventoryRequest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; date: string; unit: string; quantity: number; size?: string }) =>
+    mutationFn: ({ id, ...body }: { id: string; date: string; unit: string; quantity: number; size?: string; dayStoreId?: string }) =>
       api<InventoryTransaction>(`/api/inventory/requests/${id}/issue`, { method: "POST", body }),
     onSuccess: () => invalidateRequests(qc),
   });
@@ -514,6 +537,7 @@ export interface CreateDispatchTransferPayload {
   productName: string;
   quantity: number;
   sourceRequestId?: string;
+  plantId?: string;
 }
 
 export function useCreateDispatchTransfer() {
@@ -538,6 +562,115 @@ export function useDeleteDispatchTransfer() {
   return useMutation({
     mutationFn: (id: string) => api(`/api/inventory/dispatch-transfers/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
+  });
+}
+
+// S9 — Dispatch confirms the shipment actually went out; Finance
+// (Accounts) then raises the invoice. Both FG-only, both one-shot.
+export function useConfirmDispatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, dispatchNote }: { id: string; dispatchNote?: string }) =>
+      api<DispatchTransfer>(`/api/inventory/dispatch-transfers/${id}/dispatch`, { method: "PATCH", body: { dispatchNote } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
+  });
+}
+
+export function useInvoiceDispatchTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, invoiceNumber }: { id: string; invoiceNumber: string }) =>
+      api<DispatchTransfer>(`/api/inventory/dispatch-transfers/${id}/invoice`, { method: "PATCH", body: { invoiceNumber } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] }),
+  });
+}
+
+// --- Day Stores / Plants — named, growable identities Store/Admin can
+// add to. See locations.routes.ts. ---
+
+export function useDayStores() {
+  return useQuery({ queryKey: ["inventory", "day-stores"], queryFn: () => api<DayStore[]>("/api/inventory/day-stores") });
+}
+
+export function useCreateDayStore() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api<DayStore>("/api/inventory/day-stores", { method: "POST", body: { name } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "day-stores"] }),
+  });
+}
+
+export function usePlants() {
+  return useQuery({ queryKey: ["inventory", "plants"], queryFn: () => api<Plant[]>("/api/inventory/plants") });
+}
+
+export function useCreatePlant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api<Plant>("/api/inventory/plants", { method: "POST", body: { name } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "plants"] }),
+  });
+}
+
+// --- Pre-Inventory — S1-S4: PPIC states a requirement, Warehouse says
+// what's available, Purchase logs a PO for the shortfall, Finance reads
+// the resulting vendor list. See pre-inventory.routes.ts. ---
+
+export function usePreInventoryRequirements(filters?: { category?: InventoryCategory; short?: boolean }) {
+  const params = new URLSearchParams();
+  if (filters?.category) params.set("category", filters.category);
+  if (filters?.short) params.set("short", "true");
+  const qs = params.toString();
+  return useQuery({
+    queryKey: ["pre-inventory", "requirements", filters],
+    queryFn: () => api<PreInventoryRequirement[]>(`/api/inventory/requirements${qs ? `?${qs}` : ""}`),
+  });
+}
+
+export interface CreateRequirementPayload {
+  date: string;
+  category: InventoryCategory;
+  itemId: string;
+  unit: string;
+  requiredQty: number;
+  size?: string;
+  note?: string;
+}
+
+function invalidateRequirements(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["pre-inventory", "requirements"] });
+}
+
+export function useCreateRequirement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateRequirementPayload) => api<PreInventoryRequirement>("/api/inventory/requirements", { method: "POST", body }),
+    onSuccess: () => invalidateRequirements(qc),
+  });
+}
+
+export function useImportRequirements() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { rows: ImportRequirementRow[] }) => api<{ requirementsCreated: number; itemsCreated: number }>("/api/inventory/requirements/import", { method: "POST", body }),
+    onSuccess: () => invalidateRequirements(qc),
+  });
+}
+
+export function useSetRequirementPurchase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; poNumber: string; vendorName: string; eta: string }) =>
+      api<PreInventoryRequirement>(`/api/inventory/requirements/${id}/purchase`, { method: "PATCH", body }),
+    onSuccess: () => invalidateRequirements(qc),
+  });
+}
+
+export function useDeleteRequirement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/inventory/requirements/${id}`, { method: "DELETE" }),
+    onSuccess: () => invalidateRequirements(qc),
   });
 }
 
@@ -598,5 +731,39 @@ export function useRenameUser() {
 export function useResetPassword() {
   return useMutation({
     mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) => api(`/api/users/${userId}/reset-password`, { method: "POST", body: { newPassword } }),
+  });
+}
+
+// --- Notifications ---
+
+interface NotificationsResponse {
+  notifications: AppNotification[];
+  unreadCount: number;
+}
+
+// Polls every 30s so the bell badge stays current without a websocket —
+// cheap enough given the payload is capped at 30 rows, and matches the
+// "good enough" freshness bar the rest of the app uses.
+export function useNotifications() {
+  return useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => api<NotificationsResponse>("/api/notifications"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useMarkNotificationRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<AppNotification>(`/api/notifications/${id}/read`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+}
+
+export function useMarkAllNotificationsRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<{ markedRead: number }>("/api/notifications/read-all", { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
 }

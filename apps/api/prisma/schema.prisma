@@ -50,22 +50,29 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  roles                  UserRole[]
-  auditLogs              AuditLog[]
-  customersCreated       Customer[]
-  purchaseOrders         PurchaseOrder[]         @relation("PurchaseOrderCreatedBy")
-  purchaseOrdersReviewed PurchaseOrder[]         @relation("PurchaseOrderReviewedBy")
-  uploadedDocuments      PurchaseOrderDocument[]
-  bomPlans               BomPlan[]
-  rmPlans                RmPlan[]
-  batchStageEvents       BatchStageEvent[]
-  inventoryTxns          InventoryTransaction[]
-  dispatchTransfers      DispatchTransfer[]
-  inventoryRequested     InventoryRequest[]      @relation("InventoryRequestRequestedBy")
-  inventoryReviewed      InventoryRequest[]      @relation("InventoryRequestReviewedBy")
-  inventoryQcChecked     InventoryTransaction[]  @relation("InventoryTxnQcCheckedBy")
-  inventoryAccepted      InventoryTransaction[]  @relation("InventoryTxnAcceptedBy")
-  dispatchQcChecked      DispatchTransfer[]      @relation("DispatchTransferQcCheckedBy")
+  roles                     UserRole[]
+  auditLogs                 AuditLog[]
+  customersCreated          Customer[]
+  purchaseOrders            PurchaseOrder[]           @relation("PurchaseOrderCreatedBy")
+  purchaseOrdersReviewed    PurchaseOrder[]           @relation("PurchaseOrderReviewedBy")
+  uploadedDocuments         PurchaseOrderDocument[]
+  bomPlans                  BomPlan[]
+  rmPlans                   RmPlan[]
+  batchStageEvents          BatchStageEvent[]
+  inventoryTxns             InventoryTransaction[]
+  dispatchTransfers         DispatchTransfer[]
+  inventoryRequested        InventoryRequest[]        @relation("InventoryRequestRequestedBy")
+  inventoryReviewed         InventoryRequest[]        @relation("InventoryRequestReviewedBy")
+  inventoryQcChecked        InventoryTransaction[]    @relation("InventoryTxnQcCheckedBy")
+  inventoryAccepted         InventoryTransaction[]    @relation("InventoryTxnAcceptedBy")
+  dispatchQcChecked         DispatchTransfer[]        @relation("DispatchTransferQcCheckedBy")
+  notifications             Notification[]
+  dayStoresCreated          DayStore[]                @relation("DayStoreCreatedBy")
+  plantsCreated             Plant[]                   @relation("PlantCreatedBy")
+  preInventoryRequested     PreInventoryRequirement[] @relation("PreInventoryRequirementRequestedBy")
+  preInventoryPurchased     PreInventoryRequirement[] @relation("PreInventoryRequirementPurchaseBy")
+  dispatchTransfersSent     DispatchTransfer[]        @relation("DispatchTransferDispatchedBy")
+  dispatchTransfersInvoiced DispatchTransfer[]        @relation("DispatchTransferInvoicedBy")
 
   @@map("users")
 }
@@ -110,6 +117,30 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([createdAt])
   @@map("audit_log")
+}
+
+// One row per recipient per event — never a shared/broadcast row, so
+// "read" is always a fact about one person, not a global flag. A
+// role-wide notice (e.g. "new material awaiting inward QC") fans out to
+// one row per user holding that role at the moment it fires; a role
+// grant/revoke afterward doesn't retroactively change who already got
+// notified, matching how AuditLog treats every action as a point-in-
+// time fact. `link` is a frontend route, not a raw entity id, so the
+// notification bell can navigate straight to the relevant screen.
+model Notification {
+  id          String    @id @default(uuid())
+  recipientId String
+  title       String
+  body        String?
+  link        String?
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, readAt])
+  @@index([recipientId, createdAt])
+  @@map("notifications")
 }
 
 // ---------------------------------------------------------------------------
@@ -297,11 +328,22 @@ model Batch {
   manufacturingStatus    String?
   manufacturingEndDate   DateTime?
   manufacturingRemarks   String?
+  // Wastage — mechanical/process loss (e.g. sieving loss), Production's
+  // own entry. wastageQty is derived (inputQty - outputQty), never
+  // stored — see computeWastage in batch.engine.ts. Distinct from
+  // mfgRejectedQty below: this is material lost to the process itself,
+  // not a quality call.
+  inputQty               Float?
+  outputQty              Float?
 
   // QA Gate — Manufacturing (includes "Hold")
-  mfgQaStatus String? // Approved | Not Approved | Hold
-  mfgQcStatus String?
-  mfgRemarks  String?
+  mfgQaStatus    String? // Approved | Not Approved | Hold
+  mfgQcStatus    String?
+  mfgRemarks     String?
+  // Quality rejection — QC's own entry, independent of wastage above
+  // (same input, two separate numbers, per the business rule: never
+  // derive one from the other).
+  mfgRejectedQty Float?
 
   // Packaging
   packagingStartDate DateTime?
@@ -623,16 +665,110 @@ model InventoryItem {
   createdAt DateTime          @default(now())
   updatedAt DateTime          @updatedAt
 
-  transactions InventoryTransaction[]
-  requests     InventoryRequest[]
+  transactions             InventoryTransaction[]
+  requests                 InventoryRequest[]
+  preInventoryRequirements PreInventoryRequirement[]
 
   @@unique([category, name])
   @@map("inventory_items")
 }
 
+// ---------------------------------------------------------------------------
+// Phase 9 — Pre-Inventory (RM/PM requirement planning) + Day Store / Plant
+// identities, reconstructed from the "Pre inventory" sheet added to
+// "Inventory tool.xlsx" and the client's S1-S9 flow description. Two
+// pieces:
+//
+// 1. Pre-Inventory: an upstream planning loop that runs BEFORE the
+//    Warehouse ledger above — PPIC states what RM/PM it will need
+//    (S1), Warehouse says how much is already on hand against that need
+//    (S2), Purchase raises a PO for whatever's short — PO Number/Vendor
+//    Name/ETA (S3), and Finance/Accounts reads the resulting vendor list
+//    to plan payments (S4). One row, progressively filled in by three
+//    departments — same shape as InventoryRequest's Draft ->
+//    Approve/Reject, not three separate tables.
+//
+// 2. Day Store / Plant: named, admin/Store-managed identities (not a
+//    fixed count of 4 — the client's flow just happens to have 4 today,
+//    more can be added) that tag the existing ISSUED_DAY_STORE /
+//    ISSUED_PRODUCTION legs and FG dispatch transfers so "issued to
+//    which Day Store" and "which Plant this came from" are real,
+//    filterable facts (S6-S8) instead of one flat bucket each. This is a
+//    traceability tag on the existing ledger, not a parallel stock
+//    ledger — stock-on-hand math is unchanged.
+// ---------------------------------------------------------------------------
+
+model DayStore {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  createdById String
+  createdAt   DateTime @default(now())
+
+  createdBy    User                   @relation("DayStoreCreatedBy", fields: [createdById], references: [id])
+  transactions InventoryTransaction[]
+
+  @@map("day_stores")
+}
+
+model Plant {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  createdById String
+  createdAt   DateTime @default(now())
+
+  createdBy         User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
+  transactions      InventoryTransaction[]
+  requests          InventoryRequest[]
+  dispatchTransfers DispatchTransfer[]
+
+  @@map("plants")
+}
+
+// One requirement line — created by PPIC (S1). Step 2 ("what's already
+// available") is no longer a manual Warehouse action — it's read live
+// off the same stock-on-hand math the Inventory ledger already uses
+// (see stock.ts's getOnHandByItemId), every time this row is fetched,
+// so it can never go stale the way a one-time manual entry could.
+// Only if that live number falls short of requiredQty does Purchase
+// act (S3: PO Number / Vendor Name / ETA). Finance/Accounts reads this
+// list read-only to plan vendor payments (S4).
+model PreInventoryRequirement {
+  id            String            @id @default(uuid())
+  date          DateTime
+  category      InventoryCategory
+  itemId        String
+  unit          String
+  requiredQty   Float
+  size          String?
+  note          String?
+  requestedById String
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  // Purchase — S3, meaningful once live stock < requiredQty
+  poNumber     String?
+  vendorName   String?
+  eta          DateTime?
+  purchaseById String?
+  purchaseAt   DateTime?
+
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  requestedBy User          @relation("PreInventoryRequirementRequestedBy", fields: [requestedById], references: [id])
+  purchaseBy  User?         @relation("PreInventoryRequirementPurchaseBy", fields: [purchaseById], references: [id])
+
+  @@index([category])
+  @@index([itemId])
+  @@map("pre_inventory_requirements")
+}
+
+// PARTIALLY_ISSUED sits between APPROVED and ISSUED — Store doesn't
+// have to have the full requestedQty on hand to issue something; each
+// issue is its own InventoryTransaction (see fulfillments below), and
+// the request only reaches ISSUED once their total covers requestedQty.
 enum InventoryRequestStatus {
   PENDING
   APPROVED
+  PARTIALLY_ISSUED
   REJECTED
   ISSUED
 }
@@ -661,16 +797,26 @@ model InventoryRequest {
   createdAt       DateTime               @default(now())
   updatedAt       DateTime               @updatedAt
 
-  item        InventoryItem         @relation(fields: [itemId], references: [id])
-  requestedBy User                  @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
-  reviewedBy  User?                 @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
-  fulfillment InventoryTransaction?
+  // S7 — which Plant this request is for, purpose ISSUED_PRODUCTION only.
+  // Optional: a request can predate Plant identities existing, or simply
+  // not need one.
+  plantId String?
+
+  item         InventoryItem          @relation(fields: [itemId], references: [id])
+  requestedBy  User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy   User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
+  plant        Plant?                 @relation(fields: [plantId], references: [id])
+  // One request can now be issued against more than once (partial
+  // fulfillment) — issuedQty/remainingQty are derived by summing these,
+  // never stored, same "never let a number drift out of sync" rule as
+  // Pre-Inventory's shortQty.
+  fulfillments InventoryTransaction[]
   // Traceability only — Production turning this raw material into a
   // finished shipment isn't tracked anywhere in this system, so this
   // isn't derived or enforced, just a manual tag Store can set when
   // logging the eventual FG transfer. Many transfers can point back to
   // one request (a batch can ship in parts), so it's not @unique.
-  fgTransfers DispatchTransfer[]
+  fgTransfers  DispatchTransfer[]
 
   @@index([status])
   @@map("inventory_requests")
@@ -692,9 +838,10 @@ model InventoryTransaction {
   createdAt   DateTime         @default(now())
 
   // Set only when this ISSUED_* row is Store fulfilling an approved
-  // InventoryRequest, not a direct entry — @unique because one approved
-  // request is fulfilled by exactly one issue transaction.
-  fulfillsRequestId String?           @unique
+  // InventoryRequest, not a direct entry — not unique any more, since a
+  // request can be issued against more than once as stock arrives in
+  // parts (partial fulfillment, tracked via InventoryRequestStatus).
+  fulfillsRequestId String?
   fulfillsRequest   InventoryRequest? @relation(fields: [fulfillsRequestId], references: [id])
 
   // Inward QC — set on create for RECEIVED rows only (PENDING_QC),
@@ -706,14 +853,53 @@ model InventoryTransaction {
   acceptedById  String?
   acceptedAt    DateTime?
 
+  // Partial QC rejection — set on an APPROVE (not the terminal REJECT
+  // action) when only part of a delivery failed inspection, e.g. 5 of
+  // 50 Kg damaged. Null/0 means nothing was rejected out of this row.
+  // A full reject still uses receiptStatus = QC_REJECTED as before and
+  // leaves this null — it's already 100% excluded from stock, no need
+  // for a redundant number. Only meaningful once receiptStatus is
+  // QC_APPROVED/ACCEPTED; the amount that actually counts toward
+  // stock-on-hand is quantity - rejectedQty (see stock.ts).
+  rejectedQty Float?
+
+  // One-time go-live migration path — Warehouse's existing physical
+  // stock, entered once so day-to-day tracking has a real starting
+  // point. RECEIVED rows only. Skips the inward QC gate entirely
+  // (receiptStatus goes straight to ACCEPTED at creation, no vendor
+  // actually delivered anything today to inspect) — kept as its own
+  // flag rather than a new InventoryTxnType so it still counts toward
+  // stock-on-hand the same way a normal accepted receipt does, just
+  // visibly tagged everywhere it's shown so it's never mistaken for a
+  // real vendor delivery later.
+  isOpeningStock Boolean @default(false)
+
+  // S6/S7 — which Day Store received an ISSUED_DAY_STORE row, and which
+  // Plant received an ISSUED_PRODUCTION row (denormalized off the
+  // fulfilled request, same reasoning as unit/size being per-entry
+  // rather than looked up). Both optional — a traceability tag, not a
+  // second stock ledger; stock-on-hand math never reads these.
+  dayStoreId String?
+  plantId    String?
+
   item        InventoryItem @relation(fields: [itemId], references: [id])
   createdBy   User          @relation(fields: [createdById], references: [id])
   qcCheckedBy User?         @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
   acceptedBy  User?         @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
+  dayStore    DayStore?     @relation(fields: [dayStoreId], references: [id])
+  plant       Plant?        @relation(fields: [plantId], references: [id])
 
   @@index([itemId])
   @@index([type, date])
   @@index([receiptStatus])
+  @@index([dayStoreId])
+  @@index([plantId])
+  // Covers getOnHandByItemId's three groupBy calls (itemId in-filter +
+  // type [+ receiptStatus for RECEIVED]) directly, instead of falling back
+  // to the single-column itemId index and filtering the rest in a scan —
+  // this is the query every stock read (Pre-Inventory list, /stock, the
+  // "now available" check) runs, so it's the one worth a dedicated index.
+  @@index([itemId, type, receiptStatus])
   @@map("inventory_transactions")
 }
 
@@ -762,14 +948,35 @@ model DispatchTransfer {
   // request's material can ship across several transfers.
   sourceRequestId String?
 
+  // S8 — which Plant this FG shipment came from. FG rows only, optional.
+  plantId String?
+
+  // S9 — Dispatch confirms the shipment has actually gone out and hands
+  // invoicing details to Finance. FG rows only, only meaningful once
+  // qcStatus is QC_APPROVED. Separate from qcStatus because clearing QC
+  // and physically dispatching aren't the same moment — a QC-approved
+  // shipment can still be sitting in the yard.
+  dispatchedById String?
+  dispatchedAt   DateTime?
+  dispatchNote   String? // e.g. transporter / LR / docket number
+
+  // Finance (Accounts) closes the loop once the invoice is raised.
+  invoiceNumber String?
+  invoicedById  String?
+  invoicedAt    DateTime?
+
   customer      Customer          @relation(fields: [customerId], references: [id])
   createdBy     User              @relation(fields: [createdById], references: [id])
   qcCheckedBy   User?             @relation("DispatchTransferQcCheckedBy", fields: [qcCheckedById], references: [id])
   sourceRequest InventoryRequest? @relation(fields: [sourceRequestId], references: [id])
+  plant         Plant?            @relation(fields: [plantId], references: [id])
+  dispatchedBy  User?             @relation("DispatchTransferDispatchedBy", fields: [dispatchedById], references: [id])
+  invoicedBy    User?             @relation("DispatchTransferInvoicedBy", fields: [invoicedById], references: [id])
 
   @@index([customerId])
   @@index([type, date])
   @@index([qcStatus])
   @@index([sourceRequestId])
+  @@index([plantId])
   @@map("dispatch_transfers")
 }

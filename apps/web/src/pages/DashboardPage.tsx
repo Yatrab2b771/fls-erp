@@ -1,10 +1,11 @@
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, ArrowRight, Beaker, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useBatches, useBomPlans, useInventoryStock, usePurchaseOrders, useRmPlans } from "../lib/hooks";
+import { useBatches, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePurchaseOrders, useRmPlans } from "../lib/hooks";
 import { BATCH_STAGE_ROLE } from "../lib/batchStage";
 import { StatTile } from "../components/StatTile";
-import { DelayBadge, StageBadge } from "../components/Badges";
+import { DelayBadge, RequestStatusBadge, StageBadge } from "../components/Badges";
 import type { BatchStageId } from "../lib/types";
 
 // The pipeline's 10 stages, grouped into 5 visual phases so the stepper
@@ -55,12 +56,64 @@ export function DashboardPage() {
   const orgWide = hasRole("ADMIN", "BD", "PPIC");
 
   const allBatches = batches ?? [];
-  // Batches actionable by this department right now (not yet dispatched,
-  // sitting at a stage this role owns).
-  const myQueueBatches = allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN" && hasRole(BATCH_STAGE_ROLE[b.currentStageId]));
+  // Batches actionable by this department right now, sitting at a stage
+  // this role owns. DISPATCH_PLAN is terminal (nothing comes after it)
+  // but still actionable — Dispatch keeps filling in shipment details
+  // there rather than advancing past it, so it's excluded from every
+  // *other* department's queue (nothing left for them to do) but not
+  // Dispatch's own, and only counts as "done" once a customer
+  // confirmation has actually been recorded.
+  const myQueueBatches = allBatches.filter((b) => {
+    if (!hasRole(BATCH_STAGE_ROLE[b.currentStageId])) return false;
+    if (b.currentStageId === "DISPATCH_PLAN" && (!hasRole("DISPATCH") || b.customerConfirmation === "Received")) return false;
+    return true;
+  });
+
+  // Inventory has its own queue of department-owned work that isn't a
+  // Batch stage at all — QA/QC's inward/outward QC checks, and Store's
+  // request review / issue / accept steps. Without this, those roles'
+  // "Your Queue" only ever showed Batch work, even though Inventory had
+  // real items waiting on them.
+  const canQc = !orgWide && hasRole("QA_QC");
+  const canReviewInventory = !orgWide && hasRole("STORE");
+  const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canQc });
+  const { data: pendingDispatchQc } = useDispatchTransfers({ type: "FG", qcStatus: "PENDING_QC" }, { enabled: canQc });
+  const { data: pendingMaterialRequests } = useInventoryRequests("PENDING", { enabled: canReviewInventory });
+  const { data: approvedMaterialRequests } = useInventoryRequests("APPROVED", { enabled: canReviewInventory });
+  const { data: qcApprovedReceipts } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "QC_APPROVED" }, { enabled: canReviewInventory });
+
+  interface QueueRow {
+    key: string;
+    to: string;
+    title: string;
+    subtitle: string;
+    badge: ReactNode;
+  }
+
+  const batchRows: QueueRow[] = myQueueBatches.map((b) => ({
+    key: `batch-${b.id}`,
+    to: `/batches/${b.id}`,
+    title: b.batchNo ?? b.id.slice(0, 8),
+    subtitle: b.purchaseOrderItem.productName,
+    badge: <StageBadge stage={b.currentStageId} />,
+  }));
+
+  const pendingQcPill = <span className="pill border-amber-200 bg-amber-50 text-amber-700">Pending QC</span>;
+  const inventoryRows: QueueRow[] = [
+    ...(pendingReceiptQc ?? []).map((t) => ({ key: `rqc-${t.id}`, to: "/inventory", title: t.item.name, subtitle: `Inward QC · ${t.quantity} ${t.unit}`, badge: pendingQcPill })),
+    ...(pendingDispatchQc ?? []).map((d) => ({ key: `dqc-${d.id}`, to: "/inventory", title: d.productName, subtitle: `Outward QC · ${d.customer.companyName}`, badge: pendingQcPill })),
+    ...(pendingMaterialRequests ?? []).map((r) => ({ key: `req-${r.id}`, to: "/inventory", title: r.item.name, subtitle: `Review request · ${r.requestedQty}`, badge: <RequestStatusBadge status={r.status} /> })),
+    ...(approvedMaterialRequests ?? []).map((r) => ({ key: `iss-${r.id}`, to: "/inventory", title: r.item.name, subtitle: `Issue stock · ${r.requestedQty}`, badge: <RequestStatusBadge status={r.status} /> })),
+    ...(qcApprovedReceipts ?? []).map((t) => ({ key: `acc-${t.id}`, to: "/inventory", title: t.item.name, subtitle: `Accept into stock · ${t.quantity} ${t.unit}`, badge: <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">QC Approved</span> })),
+  ];
+
+  const myQueueRows = [...batchRows, ...inventoryRows];
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
-  const activeBatches = allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN").length;
+  // A batch at DISPATCH_PLAN isn't done just for having reached that
+  // stage — it's still active until a customer confirmation is actually
+  // recorded (same completion definition as myQueueBatches above).
+  const activeBatches = allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN" || b.customerConfirmation !== "Received").length;
   const orgDelayed = allBatches.filter((b) => b.delay.isDelayed);
   const myDelayed = myQueueBatches.filter((b) => b.delay.isDelayed);
   const negativeStock = stock?.filter((s) => s.onHand < 0).length ?? 0;
@@ -79,26 +132,24 @@ export function DashboardPage() {
     <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-[312px_1fr] xl:grid-cols-[340px_1fr]">
       {/* Main column */}
       <div className="min-w-0 space-y-5 lg:order-2">
-        {/* Light "premium" hero — a white card carrying a low-opacity brand
-            gradient mesh + soft glow blobs, rather than a solid dark panel.
-            Plain hex-stop inline gradients (not Tailwind's CSS-custom-
-            property gradient utilities) — some browser color/theme
-            extensions reset --tw-gradient-* custom properties and wash a
-            Tailwind gradient out, which a literal `background` value isn't
-            subject to. */}
-        <div className="relative overflow-hidden rounded-2xl border border-slate-200/70 bg-white p-6 shadow-lift sm:p-8">
-          <div
-            className="pointer-events-none absolute inset-0 opacity-[0.07]"
-            style={{ backgroundImage: "linear-gradient(135deg, #4338ca 0%, #7c3aed 50%, #4338ca 100%)" }}
-          />
-          <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full blur-3xl" style={{ backgroundColor: "rgba(99,102,241,0.16)" }} />
-          <div className="pointer-events-none absolute -bottom-24 left-1/4 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.12)" }} />
+        {/* Plain hex-stop inline gradient (not Tailwind's CSS-custom-property
+            gradient utilities) — some browser color/theme extensions reset
+            --tw-gradient-* custom properties and wash this card out to
+            near-white, which a literal `background` value isn't subject to. */}
+        <div
+          className="hero-grid relative overflow-hidden rounded-2xl p-6 shadow-lift sm:p-8"
+          style={{ backgroundColor: "#312e81", backgroundImage: "linear-gradient(135deg, #4338ca 0%, #3730a3 55%, #0f172a 100%)" }}
+        >
+          <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(129,140,248,0.25)" }} />
+          <div className="pointer-events-none absolute -bottom-20 left-1/3 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.15)" }} />
           <div className="relative">
-            <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.15em] text-brand-600">
+            <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-[0.15em]" style={{ color: "#c7d2fe" }}>
               <Sparkles className="h-3.5 w-3.5" /> {greeting()}, {displayName.split(" ")[0] || "there"}
             </p>
-            <h1 className="mt-1.5 text-2xl font-black tracking-tight text-slate-900 sm:text-3xl">{orgWide ? "Command Center" : "My Dashboard"}</h1>
-            <p className="mt-1.5 max-w-xl text-sm text-slate-500">
+            <h1 className="mt-1.5 text-2xl font-black tracking-tight sm:text-3xl" style={{ color: "#ffffff" }}>
+              {orgWide ? "Command Center" : "My Dashboard"}
+            </h1>
+            <p className="mt-1.5 max-w-xl text-sm" style={{ color: "#e0e7ff" }}>
               {orgWide
                 ? "Order Tracking is one real pipeline — PO Release through Dispatch Plan, every department's status visible at a glance."
                 : "What's actually on your department's plate right now — not the whole company's order book."}
@@ -117,7 +168,7 @@ export function DashboardPage() {
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <StatTile icon={ClipboardList} label="Awaiting You" value={myQueueBatches.length} accent="blue" />
+            <StatTile icon={ClipboardList} label="Awaiting You" value={myQueueRows.length} accent="blue" />
             <StatTile icon={AlarmClock} label="Delayed (Yours)" value={myDelayed.length} accent="rose" />
           </div>
         )}
@@ -180,17 +231,17 @@ export function DashboardPage() {
                 ))}
               </div>
             )
-          ) : myQueueBatches.length === 0 ? (
+          ) : myQueueRows.length === 0 ? (
             <p className="p-6 text-center text-xs text-slate-400">Nothing waiting on your department right now.</p>
           ) : (
             <div className="divide-y divide-slate-100">
-              {myQueueBatches.slice(0, 6).map((b) => (
-                <Link key={b.id} to={`/batches/${b.id}`} className="flex items-center justify-between px-4 py-3 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.brand.500)]">
-                  <div>
-                    <p className="font-bold text-slate-700">{b.batchNo ?? b.id.slice(0, 8)}</p>
-                    <p className="text-slate-400">{b.purchaseOrderItem.productName}</p>
+              {myQueueRows.slice(0, 6).map((row) => (
+                <Link key={row.key} to={row.to} className="flex items-center justify-between px-4 py-3 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.brand.500)]">
+                  <div className="min-w-0">
+                    <p className="truncate font-bold text-slate-700">{row.title}</p>
+                    <p className="truncate text-slate-400">{row.subtitle}</p>
                   </div>
-                  <StageBadge stage={b.currentStageId} />
+                  <div className="shrink-0">{row.badge}</div>
                 </Link>
               ))}
             </div>

@@ -1,6 +1,6 @@
 import { useState, type ChangeEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Box, Calculator, FileSpreadsheet, Link2, Package, Plus, Sparkles, Upload, X } from "lucide-react";
+import { Box, Calculator, ClipboardList, FileSpreadsheet, Link2, Package, Plus, Sparkles, Upload, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { downloadFile } from "../lib/api";
 import { parseCatalogWorkbook } from "../lib/catalogImport";
@@ -16,6 +16,7 @@ import {
   useCreateBomPlan,
   useImportCatalog,
   useRemoveBomPlanItem,
+  useSendBomPlanToPreInventory,
   useSkus,
 } from "../lib/hooks";
 
@@ -29,6 +30,7 @@ const CATEGORY_COLOR: Record<string, string> = {
 export function PackagingBomPage() {
   const { hasRole } = useAuth();
   const canImport = hasRole("PPIC", "PURCHASE");
+  const canSendToPreInventory = hasRole("PPIC");
 
   const { data: plans } = useBomPlans();
   const [planSearch, setPlanSearch] = useState("");
@@ -45,6 +47,7 @@ export function PackagingBomPage() {
   const createPlan = useCreateBomPlan();
   const calculate = useCalculateBomPlan(selectedPlanId ?? "");
   const removeItem = useRemoveBomPlanItem(selectedPlanId ?? "");
+  const sendToPreInventory = useSendBomPlanToPreInventory(selectedPlanId ?? "");
 
   const { data: brands } = useBrands();
   const [brandId, setBrandId] = useState("");
@@ -58,6 +61,16 @@ export function PackagingBomPage() {
 
   const [newPlanName, setNewPlanName] = useState("");
   const [showNewPlan, setShowNewPlan] = useState(false);
+
+  async function handleSendToPreInventory(planName: string) {
+    if (!window.confirm(`Send this plan's packaging quantities to Pre-Inventory as new requirements?`)) return;
+    try {
+      const result = await sendToPreInventory.mutateAsync();
+      toast.success(`Sent ${result.requirementsCreated} requirement(s) to Pre-Inventory${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""} — from "${planName}".`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not send to Pre-Inventory");
+    }
+  }
 
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -252,6 +265,16 @@ export function PackagingBomPage() {
                       <Sparkles className="h-3.5 w-3.5 text-emerald-500" /> Consolidated Master Procurement
                     </h3>
                     <div className="flex gap-2">
+                      {canSendToPreInventory && (
+                        <button
+                          className="btn-primary btn-sm"
+                          disabled={sendToPreInventory.isPending}
+                          onClick={() => handleSendToPreInventory(plan.name)}
+                          title="Create a Pre-Inventory requirement for each packaging line above"
+                        >
+                          <ClipboardList className="h-3 w-3" strokeWidth={2.5} /> {sendToPreInventory.isPending ? "Sending…" : "Send to Pre-Inventory"}
+                        </button>
+                      )}
                       <button
                         className="btn-ghost btn-sm"
                         onClick={() => downloadFile(`/api/bom/plans/${plan.id}/export.xlsx`, `FLS_Master_BOM_${plan.id}.xlsx`)}

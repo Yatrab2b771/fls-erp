@@ -7,6 +7,7 @@ import { parsePagination, setPaginationHeaders } from "../../common/lib/paginati
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { deleteUploadedFile, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
+import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { buildPurchaseOrderPdf } from "./po-pdf";
 import {
   createPurchaseOrderSchema,
@@ -163,6 +164,23 @@ purchaseOrdersRouter.patch("/:id/review", requireRole("BD"), validateBody(review
     });
 
     await recordAudit({ actorId: req.user!.id, action: status === "APPROVED" ? "purchase_order.approved" : "purchase_order.rejected", entityType: "PurchaseOrder", entityId: updated.id });
+
+    // Notification failures are logged, not fatal — the review itself
+    // already succeeded and that response shouldn't 500 over a notice.
+    const notifyFailed = (label: string) => (err: unknown) => req.log?.error({ err }, `notify failed: ${label}`);
+    const poLabel = updated.poNumber ?? `PO ${updated.id.slice(0, 8)}`;
+    if (status === "APPROVED") {
+      await Promise.all([
+        notifyUser(updated.createdById, { title: `${poLabel} approved`, body: "Forwarded to PPIC/RM for planning.", link: `/purchase-orders/${updated.id}` }).catch(notifyFailed("po.approved.creator")),
+        // The whole reason approval matters — PPIC can't release a batch
+        // off this PO until it happens, so tell them the moment it does.
+        notifyRoles(["PPIC"], { title: `${poLabel} approved`, body: `${updated.customer.companyName} — ready to plan batches.`, link: `/purchase-orders/${updated.id}` }, req.user!.id).catch(
+          notifyFailed("po.approved.ppic"),
+        ),
+      ]);
+    } else {
+      await notifyUser(updated.createdById, { title: `${poLabel} rejected`, body: rejectionReason, link: `/purchase-orders/${updated.id}` }).catch(notifyFailed("po.rejected.creator"));
+    }
 
     res.json(updated);
   } catch (err) {

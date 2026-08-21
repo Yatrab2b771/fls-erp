@@ -26,6 +26,11 @@ export const createInventoryTransactionSchema = z.object({
   quantity: z.coerce.number().positive(),
   size: z.string().max(120).optional(), // Optional, per the tool — e.g. Inch / ft / Kg / Ltr sizing note
   vendorName: z.string().max(200).optional(),
+  // S6 — which Day Store received this, ISSUED_DAY_STORE rows only.
+  dayStoreId: z.string().uuid().optional(),
+  // One-time go-live migration flag — RECEIVED rows only. Skips inward
+  // QC entirely (see schema.prisma comment on InventoryTransaction).
+  isOpeningStock: z.boolean().optional(),
 });
 
 // One "FG transfer to Dispatch" / "Bill transfer to Dispatch from Accounts"
@@ -39,6 +44,18 @@ export const createDispatchTransferSchema = z.object({
   productName: z.string().min(1).max(200),
   quantity: z.coerce.number().positive(),
   sourceRequestId: z.string().uuid().optional(),
+  // S8 — which Plant this FG shipment came from, FG rows only.
+  plantId: z.string().uuid().optional(),
+});
+
+// S9 — Dispatch confirms the shipment has actually gone out.
+export const dispatchConfirmSchema = z.object({
+  dispatchNote: z.string().max(300).optional(),
+});
+
+// S9 — Finance (Accounts) closes the loop once the invoice is raised.
+export const invoiceSchema = z.object({
+  invoiceNumber: z.string().min(1).max(100),
 });
 
 // Bulk upload of the same "Material Received/Issued" row shape — one
@@ -47,6 +64,10 @@ export const createDispatchTransferSchema = z.object({
 // item option.
 export const importInventoryTransactionsSchema = z.object({
   type: z.enum(TXN_TYPES),
+  // One-time go-live migration flag — applies to the whole sheet, not
+  // per row (a single upload is either Sanjay's opening-stock snapshot
+  // or it isn't). RECEIVED only, enforced at the route.
+  isOpeningStock: z.boolean().optional(),
   rows: z
     .array(
       z.object({
@@ -95,6 +116,8 @@ export const createInventoryRequestSchema = z.object({
   purpose: z.enum(REQUEST_PURPOSES),
   neededBy: z.coerce.date().optional(),
   note: z.string().max(500).optional(),
+  // S7 — which Plant this is for, purpose ISSUED_PRODUCTION only.
+  plantId: z.string().uuid().optional(),
 });
 
 // Bulk upload of Material Requests — same resolve-or-create-item pattern
@@ -132,6 +155,9 @@ export const issueInventoryRequestSchema = z.object({
   unit: z.string().min(1).max(40),
   quantity: z.coerce.number().positive(),
   size: z.string().max(120).optional(),
+  // S7 — which Day Store is fulfilling this request, if it's coming via
+  // one rather than straight off central stock.
+  dayStoreId: z.string().uuid().optional(),
 });
 
 // --- Quality Check gates — QA/QC checks, Store/Dispatch acts on the
@@ -145,6 +171,20 @@ export const qcReviewSchema = z
   })
   .refine((v) => v.action !== "REJECT" || !!v.note, { message: "A note is required when rejecting QC", path: ["note"] });
 
+// Inward QC only — an Approve can carry an optional partial-rejection
+// quantity, e.g. 5 of 50 Kg damaged: the delivery as a whole clears QC,
+// but part of it doesn't count toward stock. Outward QC (FG dispatch
+// transfers) has no such split — a shipment either clears or it
+// doesn't — so that route keeps using the plain qcReviewSchema above.
+export const inwardQcReviewSchema = z
+  .object({
+    action: z.enum(["APPROVE", "REJECT"]),
+    note: z.string().max(500).optional(),
+    rejectedQty: z.coerce.number().min(0).optional(),
+  })
+  .refine((v) => v.action !== "REJECT" || !!v.note, { message: "A note is required when rejecting QC", path: ["note"] })
+  .refine((v) => !(v.action === "APPROVE" && v.rejectedQty && !v.note), { message: "A note is required when partially rejecting quality", path: ["note"] });
+
 export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>;
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;
 export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTransactionSchema>;
@@ -156,3 +196,6 @@ export type ImportInventoryRequestsInput = z.infer<typeof importInventoryRequest
 export type ReviewInventoryRequestInput = z.infer<typeof reviewInventoryRequestSchema>;
 export type IssueInventoryRequestInput = z.infer<typeof issueInventoryRequestSchema>;
 export type QcReviewInput = z.infer<typeof qcReviewSchema>;
+export type InwardQcReviewInput = z.infer<typeof inwardQcReviewSchema>;
+export type DispatchConfirmInput = z.infer<typeof dispatchConfirmSchema>;
+export type InvoiceInput = z.infer<typeof invoiceSchema>;

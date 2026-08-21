@@ -94,6 +94,13 @@ export interface BatchDelay {
   daysLate: number | null;
 }
 
+// Derived, never entered directly — wastageQty = inputQty - outputQty.
+// Null until both are recorded. See computeWastage in batch.engine.ts.
+export interface BatchWastage {
+  wastageQty: number | null;
+  wastagePct: number | null;
+}
+
 export interface BatchStageEvent {
   id: string;
   fromStageId: BatchStageId;
@@ -132,9 +139,14 @@ export interface Batch {
   manufacturingStatus: string | null;
   manufacturingEndDate: string | null;
   manufacturingRemarks: string | null;
+  // Wastage — Production's entry (mechanical/process loss).
+  inputQty: number | null;
+  outputQty: number | null;
   mfgQaStatus: string | null;
   mfgQcStatus: string | null;
   mfgRemarks: string | null;
+  // Quality rejection — QC's entry, independent of wastage above.
+  mfgRejectedQty: number | null;
   packagingStartDate: string | null;
   packagingStatus: string | null;
   packagingEndDate: string | null;
@@ -159,6 +171,7 @@ export interface Batch {
   };
   stageEvents: BatchStageEvent[];
   delay: BatchDelay;
+  wastage: BatchWastage;
 }
 
 // --- Packaging BOM module ---
@@ -345,6 +358,20 @@ export interface InventoryItem {
   createdAt: string;
 }
 
+// Named, growable identities (not a fixed count) — Store/Admin can add
+// more any time. See DayStore/Plant in schema.prisma.
+export interface DayStore {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
+export interface Plant {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+
 export interface InventoryTransaction {
   id: string;
   itemId: string;
@@ -363,11 +390,28 @@ export interface InventoryTransaction {
   qcNote: string | null;
   acceptedBy: PersonRef | null;
   acceptedAt: string | null;
+  // S6/S7 — which Day Store received an ISSUED_DAY_STORE row, which
+  // Plant received an ISSUED_PRODUCTION row. Both optional tags.
+  dayStoreId: string | null;
+  plantId: string | null;
+  dayStore: DayStore | null;
+  plant: Plant | null;
+  // One-time go-live migration flag — see schema.prisma. RECEIVED rows
+  // only; skips inward QC (receiptStatus goes straight to ACCEPTED).
+  isOpeningStock: boolean;
+  // Partial QC rejection — set on an APPROVE when only part of the
+  // delivery failed inspection. Null/0 means nothing was rejected. A
+  // full REJECT leaves this null (receiptStatus = QC_REJECTED already
+  // says 100%).
+  rejectedQty: number | null;
 }
 
 export interface InventoryStockLine {
   item: InventoryItem;
   receivedQty: number;
+  // Sum of every partial QC rejection against this item — already
+  // excluded from receivedQty, shown separately for visibility.
+  rejectedQty: number;
   issuedDayStoreQty: number;
   issuedProductionQty: number;
   issuedQty: number;
@@ -395,12 +439,28 @@ export interface DispatchTransfer {
   // from the Material Requests tab for those.
   sourceRequestId: string | null;
   sourceRequest: (Pick<InventoryRequest, "id" | "category" | "requestedQty" | "purpose" | "status"> & { item: InventoryItem }) | null;
+  // S8 — which Plant this FG shipment came from, FG rows only.
+  plantId: string | null;
+  plant: Plant | null;
+  // S9 — Dispatch confirms the shipment went out; Finance then invoices.
+  // Both FG-only, both null until their step happens.
+  dispatchedById: string | null;
+  dispatchedAt: string | null;
+  dispatchNote: string | null;
+  dispatchedBy: PersonRef | null;
+  invoiceNumber: string | null;
+  invoicedById: string | null;
+  invoicedAt: string | null;
+  invoicedBy: PersonRef | null;
 }
 
 // --- Material Requests (indents) — the department-wise gate: PPIC
 // requests, Store approves/rejects/issues. See inventory.routes.ts. ---
 
-export type InventoryRequestStatus = "PENDING" | "APPROVED" | "REJECTED" | "ISSUED";
+// PARTIALLY_ISSUED sits between APPROVED and ISSUED — Store doesn't
+// need the full requestedQty on hand to issue something; the request
+// only reaches ISSUED once every issue together covers requestedQty.
+export type InventoryRequestStatus = "PENDING" | "APPROVED" | "PARTIALLY_ISSUED" | "REJECTED" | "ISSUED";
 // A request's purpose is never RECEIVED — see inventory.schemas.ts.
 export type InventoryRequestPurpose = Exclude<InventoryTxnType, "RECEIVED">;
 
@@ -419,7 +479,56 @@ export interface InventoryRequest {
   item: InventoryItem;
   requestedBy: PersonRef;
   reviewedBy: PersonRef | null;
-  fulfillment: InventoryTransaction | null;
+  // A request can be issued against more than once now (partial
+  // fulfillment) — issuedQty/remainingQty are derived server-side from
+  // this list, never stored, so they can't drift.
+  fulfillments: InventoryTransaction[];
+  issuedQty: number;
+  remainingQty: number;
+  // S7 — which Plant this request is for, purpose ISSUED_PRODUCTION only.
+  plantId: string | null;
+  plant: Plant | null;
+}
+
+// --- Pre-Inventory — S1-S4: PPIC states a requirement, Warehouse says
+// what's available, Purchase logs a PO for the shortfall, Finance reads
+// the resulting vendor list. See PreInventoryRequirement in schema.prisma. ---
+
+export interface PreInventoryRequirement {
+  id: string;
+  date: string;
+  category: InventoryCategory;
+  itemId: string;
+  unit: string;
+  requiredQty: number;
+  size: string | null;
+  note: string | null;
+  createdAt: string;
+  item: InventoryItem;
+  requestedBy: PersonRef;
+  // S2 — no manual Warehouse step any more: live off the real stock
+  // ledger, computed fresh on every fetch, never stored.
+  currentStock: number;
+  shortQty: number;
+  // S3 — Purchase, meaningful once shortQty > 0
+  poNumber: string | null;
+  vendorName: string | null;
+  eta: string | null;
+  purchaseById: string | null;
+  purchaseAt: string | null;
+  purchaseBy: PersonRef | null;
+}
+
+// --- Notifications ---
+
+export interface AppNotification {
+  id: string;
+  recipientId: string;
+  title: string;
+  body: string | null;
+  link: string | null;
+  readAt: string | null;
+  createdAt: string;
 }
 
 // --- User management (admin only) ---

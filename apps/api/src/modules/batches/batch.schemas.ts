@@ -51,12 +51,19 @@ export const productionExecutionFieldsSchema = z.object({
   manufacturingStatus: z.string().max(120).optional(),
   manufacturingEndDate: dateField,
   manufacturingRemarks: z.string().max(1000).optional(),
+  // Wastage — Production's own entry (mechanical/process loss, e.g.
+  // sieving). wastageQty is derived from these two, never entered
+  // directly — see computeWastage in batch.engine.ts.
+  inputQty: z.coerce.number().nonnegative().optional(),
+  outputQty: z.coerce.number().nonnegative().optional(),
 });
 
 export const qaGateMfgFieldsSchema = z.object({
   mfgQaStatus: z.enum(MFG_APPROVAL_STATUSES).optional(),
   mfgQcStatus: z.enum(MFG_APPROVAL_STATUSES).optional(),
   mfgRemarks: z.string().max(1000).optional(),
+  // Quality rejection — QC's own entry, independent of wastage above.
+  mfgRejectedQty: z.coerce.number().nonnegative().optional(),
 });
 
 export const packagingFieldsSchema = z.object({

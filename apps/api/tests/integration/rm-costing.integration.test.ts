@@ -73,6 +73,35 @@ describe("full RM plan lifecycle", () => {
     expect(reGet.body.result.batches).toHaveLength(1);
   });
 
+  it("PPIC can send a calculated plan's procurement rollup straight into Pre-Inventory as RM requirements", async () => {
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
+    const recipeId = (await request(app).get("/api/rm-costing/recipes").set(authHeader(ppicToken))).body[0].id;
+
+    const plan = await request(app).post("/api/rm-costing/plans").set(authHeader(ppicToken)).send({ name: "Send Test RM Plan" });
+    const planId = plan.body.id;
+
+    const tooEarly = await request(app).post(`/api/rm-costing/plans/${planId}/send-to-pre-inventory`).set(authHeader(ppicToken));
+    expect(tooEarly.status).toBe(400); // not calculated yet
+
+    await request(app).post(`/api/rm-costing/plans/${planId}/items`).set(authHeader(ppicToken)).send({ recipeId, batchSizeKg: 100 });
+    const calc = await request(app).post(`/api/rm-costing/plans/${planId}/calculate`).set(authHeader(ppicToken));
+    const procurementCount = calc.body.result.procurement.length;
+    expect(procurementCount).toBe(2); // the two ingredients in RECIPE_IMPORT_BODY
+
+    const { token: plainToken } = await createUser([]);
+    const denied = await request(app).post(`/api/rm-costing/plans/${planId}/send-to-pre-inventory`).set(authHeader(plainToken));
+    expect(denied.status).toBe(403);
+
+    const sent = await request(app).post(`/api/rm-costing/plans/${planId}/send-to-pre-inventory`).set(authHeader(ppicToken));
+    expect(sent.status).toBe(201);
+    expect(sent.body.requirementsCreated).toBe(procurementCount);
+
+    const requirements = await request(app).get("/api/inventory/requirements").set(authHeader(ppicToken));
+    expect(requirements.body.length).toBe(procurementCount);
+    expect(requirements.body.every((r: { category: string; unit: string; note: string }) => r.category === "RM" && r.unit === "Kg" && r.note?.includes("Send Test RM Plan"))).toBe(true);
+  });
+
   it("invalidates a calculated result — and blocks export again — after removing the batch that was queued when it was calculated", async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);

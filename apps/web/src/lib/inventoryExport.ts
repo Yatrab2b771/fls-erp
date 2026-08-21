@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { formatEmployeeId } from "./format";
-import type { DispatchTransfer, InventoryRequest, InventoryStockLine, InventoryTransaction, PersonRef } from "./types";
+import type { DispatchTransfer, InventoryRequest, InventoryStockLine, InventoryTransaction, PersonRef, PreInventoryRequirement } from "./types";
 
 // Builds and downloads a single-sheet workbook straight from whatever the
 // page already has loaded — no round trip to the server. Each report is
@@ -46,6 +46,7 @@ export function exportStockReport(rows: InventoryStockLine[]) {
       Category: CATEGORY_LABEL[r.item.category] ?? r.item.category,
       Unit: r.item.unit ?? "",
       Received: r.receivedQty,
+      Rejected: r.rejectedQty,
       "Issued (Day Store)": r.issuedDayStoreQty,
       "Issued (Production)": r.issuedProductionQty,
       "On Hand": r.onHand,
@@ -71,7 +72,9 @@ export function exportTransactionReport(rows: InventoryTransaction[], sheetName:
       // Inward QC trail — only meaningful for Material Received.
       ...(isReceived
         ? {
+            "Opening Stock": r.isOpeningStock ? "Yes" : "No",
             Status: r.receiptStatus ?? "",
+            "Rejected Qty": r.rejectedQty ?? "",
             "QC By": formatPerson(r.qcCheckedBy),
             "QC At": formatTimestamp(r.qcCheckedAt),
             "QC Note": r.qcNote ?? "",
@@ -132,6 +135,31 @@ export function exportDispatchReport(rows: DispatchTransfer[], sheetName: string
   );
 }
 
+// S4 — Finance's "download list of vendors to do their financial
+// planning": every requirement that has a PO logged against it, so
+// Accounts can see exactly what's been committed and when it's due.
+export function exportRequirementsReport(rows: PreInventoryRequirement[]) {
+  download(
+    "Pre-Inventory",
+    rows.map((r) => ({
+      Date: new Date(r.date).toLocaleDateString(),
+      Item: r.item.name,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      "Required Qty": r.requiredQty,
+      Unit: r.unit,
+      "Requested By": formatPerson(r.requestedBy),
+      "Current Stock": r.currentStock,
+      "Short Qty": r.shortQty,
+      "PO Number": r.poNumber ?? "",
+      "Vendor Name": r.vendorName ?? "",
+      ETA: r.eta ? new Date(r.eta).toLocaleDateString() : "",
+      "Ordered By": formatPerson(r.purchaseBy),
+      "Ordered At": formatTimestamp(r.purchaseAt),
+    })),
+    `FLS_PreInventory_Vendor_List_${todayStamp()}.xlsx`,
+  );
+}
+
 // --- Bulk-import sample template — the exact column headers
 // inventoryImport.ts looks for, plus one worked example, so a real sheet
 // built from this always parses cleanly on upload. ---
@@ -156,6 +184,17 @@ export function downloadInventoryRequestImportTemplate() {
       { Item: "", Category: "", "Requested Qty": "", Purpose: "", "Needed By": "", Note: "" },
     ],
     "FLS_Inventory_Request_Template.xlsx",
+  );
+}
+
+export function downloadRequirementImportTemplate() {
+  download(
+    "Requirements",
+    [
+      { Date: "21-08-2026", Item: "Whey Protein Concentrate", Category: "RM", Unit: "Kg", "Required Qty": 200, Size: "", Note: "For next month's production run" },
+      { Date: "", Item: "", Category: "", Unit: "", "Required Qty": "", Size: "", Note: "" },
+    ],
+    "FLS_PreInventory_Requirement_Template.xlsx",
   );
 }
 

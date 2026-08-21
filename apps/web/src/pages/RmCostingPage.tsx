@@ -1,6 +1,6 @@
 import { useEffect, useState, type ChangeEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Beaker, Calculator, FileSpreadsheet, FlaskConical, Link2, Plus, Upload, X } from "lucide-react";
+import { Beaker, Calculator, ClipboardList, FileSpreadsheet, FlaskConical, Link2, Plus, Upload, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { downloadFile } from "../lib/api";
 import { parseRecipeWorkbook } from "../lib/recipeImport";
@@ -16,6 +16,7 @@ import {
   useRemoveRmPlanItem,
   useRmPlan,
   useRmPlans,
+  useSendRmPlanToPreInventory,
   useUpdateRmCosting,
 } from "../lib/hooks";
 import type { CostingParams } from "../lib/types";
@@ -53,6 +54,7 @@ export function RmCostingPage() {
   const calculate = useCalculateRmPlan(selectedPlanId ?? "");
   const removeItem = useRemoveRmPlanItem(selectedPlanId ?? "");
   const updateCosting = useUpdateRmCosting(selectedPlanId ?? "");
+  const sendToPreInventory = useSendRmPlanToPreInventory(selectedPlanId ?? "");
 
   const { data: recipes } = useRecipes();
   const [recipeId, setRecipeId] = useState("");
@@ -70,6 +72,16 @@ export function RmCostingPage() {
   useEffect(() => {
     if (plan) setCostingDraft(Object.fromEntries(Object.entries(plan.costingParams).map(([k, v]) => [k, String(v)])));
   }, [plan?.id, plan?.costingParams]);
+
+  async function handleSendToPreInventory(planName: string) {
+    if (!window.confirm(`Send this plan's RM procurement quantities to Pre-Inventory as new requirements?`)) return;
+    try {
+      const result = await sendToPreInventory.mutateAsync();
+      toast.success(`Sent ${result.requirementsCreated} requirement(s) to Pre-Inventory${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""} — from "${planName}".`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not send to Pre-Inventory");
+    }
+  }
 
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -304,6 +316,16 @@ export function RmCostingPage() {
                     <div className="flex items-center justify-between border-b border-slate-100 bg-gradient-to-r from-amber-50/60 to-white px-5 py-4">
                       <h3 className="text-sm font-bold uppercase tracking-wide text-slate-700">Consolidated Master Procurement</h3>
                       <div className="flex gap-2">
+                        {canImport && (
+                          <button
+                            className="btn-primary btn-sm"
+                            disabled={sendToPreInventory.isPending}
+                            onClick={() => handleSendToPreInventory(plan.name)}
+                            title="Create a Pre-Inventory requirement for each ingredient above"
+                          >
+                            <ClipboardList className="h-3 w-3" strokeWidth={2.5} /> {sendToPreInventory.isPending ? "Sending…" : "Send to Pre-Inventory"}
+                          </button>
+                        )}
                         <button className="btn-ghost btn-sm" onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/export.xlsx`, `FLS_RM_Costing_${plan.id}.xlsx`)}>
                           <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Excel
                         </button>

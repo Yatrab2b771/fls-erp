@@ -3,8 +3,9 @@ import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
-import { computeDelay } from "./batch.engine";
-import { actorCanActOnStage, getForwardTarget, getRejectTarget } from "./batch-stage";
+import { computeDelay, computeWastage } from "./batch.engine";
+import { actorCanActOnStage, BATCH_STAGE_LABEL, BATCH_STAGE_ROLE, getForwardTarget, getRejectTarget } from "./batch-stage";
+import { notifyRoles } from "../../common/lib/notify";
 import { BATCH_STAGE_FIELD_SCHEMA, createBatchSchema, transitionEnvelopeSchema, type CreateBatchInput } from "./batch.schemas";
 import { buildBatchReportPdf } from "./batch-report-pdf";
 import type { Batch, Prisma } from "@prisma/client";
@@ -55,6 +56,7 @@ export function serializeBatch(batch: BatchWithRelations) {
   return {
     ...batch,
     delay: computeDelay(batch),
+    wastage: computeWastage(batch),
     stageEvents: batch.stageEvents.map((e) => ({
       id: e.id,
       fromStageId: e.fromStageId,
@@ -169,6 +171,14 @@ batchesRouter.patch("/:id/stage", async (req: AuthedRequest<{ id: string }>, res
         entityId: batch.id,
         metadata: { from: currentStage, to: targetStageId },
       });
+      if (targetStageId !== currentStage) {
+        const label = updated.batchNo ?? `Batch ${updated.id.slice(0, 8)}`;
+        await notifyRoles(
+          [BATCH_STAGE_ROLE[targetStageId]],
+          { title: `${label} moved to ${BATCH_STAGE_LABEL[targetStageId]}`, body: `${updated.purchaseOrderItem.productName} — moved by an admin.`, link: `/batches/${updated.id}` },
+          req.user!.id,
+        ).catch((err) => req.log?.error({ err }, "notify failed: batch.stage_jumped"));
+      }
       return res.json(serializeBatch(updated));
     }
 
@@ -212,6 +222,23 @@ batchesRouter.patch("/:id/stage", async (req: AuthedRequest<{ id: string }>, res
       entityId: batch.id,
       metadata: { from: currentStage, to: target },
     });
+
+    // Only a real stage change is worth a notice — DISPATCH_PLAN forwards
+    // to itself (terminal, "completes in place"), so repeated saves there
+    // would otherwise re-notify Dispatch on every edit.
+    if (target !== currentStage) {
+      const label = updated.batchNo ?? `Batch ${updated.id.slice(0, 8)}`;
+      const productName = updated.purchaseOrderItem.productName;
+      await notifyRoles(
+        [BATCH_STAGE_ROLE[target]],
+        {
+          title: `${label} is now at ${BATCH_STAGE_LABEL[target]}`,
+          body: `${productName}${action === "REJECT" ? ` — sent back: ${note}` : ""}`,
+          link: `/batches/${updated.id}`,
+        },
+        req.user!.id,
+      ).catch((err) => req.log?.error({ err }, "notify failed: batch.stage_changed"));
+    }
 
     res.json(serializeBatch(updated));
   } catch (err) {

@@ -16,6 +16,9 @@ import { bomPlanRouter } from "./modules/packaging-bom/bom-plan.routes";
 import { recipeCatalogRouter } from "./modules/rm-costing/recipe-catalog.routes";
 import { rmPlanRouter } from "./modules/rm-costing/rm-plan.routes";
 import { inventoryRouter } from "./modules/inventory/inventory.routes";
+import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
+import { dayStoresRouter, plantsRouter } from "./modules/inventory/locations.routes";
+import { notificationsRouter } from "./modules/notifications/notifications.routes";
 
 export function createApp() {
   const app = express();
@@ -62,6 +65,10 @@ export function createApp() {
   app.use("/api/rm-costing", recipeCatalogRouter);
   app.use("/api/rm-costing", rmPlanRouter);
   app.use("/api/inventory", inventoryRouter);
+  app.use("/api/inventory/requirements", preInventoryRouter);
+  app.use("/api/inventory/day-stores", dayStoresRouter);
+  app.use("/api/inventory/plants", plantsRouter);
+  app.use("/api/notifications", notificationsRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

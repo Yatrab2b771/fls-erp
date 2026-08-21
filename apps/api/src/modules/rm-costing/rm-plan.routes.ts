@@ -2,12 +2,13 @@ import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
-import { requireAuth, type AuthedRequest } from "../../common/middleware/auth";
+import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { addRmPlanItemSchema, costingParamsSchema, createRmPlanSchema, updateCostingParamsSchema } from "./rm-plan.schemas";
-import { calculateMasterRMBOM, type CostingParams, type RmBatchLineInput } from "./rm-costing-engine";
+import { calculateMasterRMBOM, type CostingParams, type RmBatchLineInput, type RmMasterResult } from "./rm-costing-engine";
 import { buildRmMasterWorkbook } from "./rm-export";
 import { buildBatchDispensingPdf, buildMasterProcurementPdf } from "./rm-pdf";
+import { bulkCreateRequirements, type RequirementSourceRow } from "../inventory/pre-inventory.routes";
 import { Prisma } from "@prisma/client";
 
 export const rmPlanRouter = Router();
@@ -257,6 +258,41 @@ rmPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: string
     });
 
     res.json({ plan: serializePlan(updated), result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Turns a calculated RM plan's procurement rollup into Pre-Inventory
+// requirements (S1) in one click — one RM requirement per ingredient,
+// summed across every batch queued in this plan. PPIC-only, matching
+// who's allowed to raise a Pre-Inventory requirement by hand. Every
+// procurement line here is already in Kg.
+rmPlanRouter.post("/plans/:id/send-to-pre-inventory", requireRole("PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const plan = await prisma.rmPlan.findUnique({ where: { id: req.params.id } });
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+    if (!plan.resultSnapshot) return res.status(400).json({ error: "Plan has not been calculated yet — POST /plans/:id/calculate first" });
+
+    const result = plan.resultSnapshot as unknown as RmMasterResult;
+    const rows: RequirementSourceRow[] = result.procurement
+      .filter((line) => line.totalKg > 0)
+      .map((line) => ({
+        date: new Date(),
+        category: "RM",
+        itemName: line.name,
+        unit: "Kg",
+        requiredQty: line.totalKg,
+        note: `From RM Plan "${plan.name}"`,
+      }));
+
+    if (rows.length === 0) return res.status(400).json({ error: "This plan's calculated result has nothing to send" });
+
+    const outcome = await bulkCreateRequirements(rows, req.user!.id, req);
+
+    await recordAudit({ actorId: req.user!.id, action: "rm_plan.sent_to_pre_inventory", entityType: "RmPlan", entityId: plan.id, metadata: outcome });
+
+    res.status(201).json(outcome);
   } catch (err) {
     next(err);
   }

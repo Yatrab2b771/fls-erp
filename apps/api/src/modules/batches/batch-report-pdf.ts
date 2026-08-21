@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import { drawTable } from "../../common/lib/pdf-table";
+import { computeWastage } from "./batch.engine";
 import { BATCH_STAGE_LABEL, type BatchStageId } from "./batch-stage";
 import type { BatchWithRelations } from "./batches.routes";
 
@@ -56,6 +57,8 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
       { key: "manufacturingStatus", label: "Manufacturing Status" },
       { key: "manufacturingEndDate", label: "Manufacturing End" },
       { key: "manufacturingRemarks", label: "Manufacturing Remarks" },
+      { key: "inputQty", label: "Input Qty" },
+      { key: "outputQty", label: "Output Qty" },
     ],
   },
   {
@@ -64,6 +67,7 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
       { key: "mfgQaStatus", label: "QA Status" },
       { key: "mfgQcStatus", label: "QC Status" },
       { key: "mfgRemarks", label: "Remarks" },
+      { key: "mfgRejectedQty", label: "Rejected Qty (quality)" },
     ],
   },
   {
@@ -122,6 +126,13 @@ export function buildBatchReportPdf(batch: BatchWithRelations): PDFKit.PDFDocume
     // closing record, not a progress view, so a blank field is itself
     // information (nobody recorded it).
     const rows = section.fields.map((f) => [f.label, formatValue((batch as unknown as Record<string, unknown>)[f.key])]);
+
+    // Wastage is derived (inputQty - outputQty), never a raw field —
+    // append it as its own row right after the two numbers it comes from.
+    if (section.stage === "PRODUCTION_EXECUTION") {
+      const { wastageQty, wastagePct } = computeWastage(batch);
+      rows.push(["Wastage", wastageQty === null ? "—" : `${wastageQty} (${wastagePct}%)`]);
+    }
 
     if (doc.y + 40 > doc.page.height - doc.page.margins.bottom) doc.addPage();
     doc

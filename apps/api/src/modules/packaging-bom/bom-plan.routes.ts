@@ -2,12 +2,13 @@ import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
-import { requireAuth, type AuthedRequest } from "../../common/middleware/auth";
+import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { addPlanItemSchema, createPlanSchema } from "./bom-plan.schemas";
-import { calculateMasterBOM, type BomPlanLineInput } from "./bom-engine";
+import { calculateMasterBOM, type BomPlanLineInput, type BomResult } from "./bom-engine";
 import { buildMasterBomWorkbook } from "./bom-export";
 import { buildMasterBomPdf } from "./bom-pdf";
+import { bulkCreateRequirements, type RequirementSourceRow } from "../inventory/pre-inventory.routes";
 import { Prisma } from "@prisma/client";
 
 export const bomPlanRouter = Router();
@@ -209,6 +210,42 @@ bomPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: strin
     });
 
     res.json({ plan: serializePlan(updated), result });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Turns a calculated BOM into Pre-Inventory requirements (S1) in one
+// click — one PM requirement per component/spec line, quantity already
+// including the wastage buffer. PPIC-only, matching who's allowed to
+// raise a Pre-Inventory requirement by hand. Every packaging component
+// here is a countable unit (jars, stickers, boxes...), never weighed,
+// so unit is always "Count".
+bomPlanRouter.post("/plans/:id/send-to-pre-inventory", requireRole("PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const plan = await prisma.bomPlan.findUnique({ where: { id: req.params.id } });
+    if (!plan) return res.status(404).json({ error: "Plan not found" });
+    if (!plan.resultSnapshot) return res.status(400).json({ error: "Plan has not been calculated yet — POST /plans/:id/calculate first" });
+
+    const result = plan.resultSnapshot as unknown as BomResult;
+    const rows: RequirementSourceRow[] = result.lines
+      .filter((line) => line.totalQty > 0)
+      .map((line) => ({
+        date: new Date(),
+        category: "PM",
+        itemName: `${line.component} — ${line.spec}`,
+        unit: "Count",
+        requiredQty: line.totalQty,
+        note: `From BOM Plan "${plan.name}"`,
+      }));
+
+    if (rows.length === 0) return res.status(400).json({ error: "This plan's calculated result has nothing to send" });
+
+    const outcome = await bulkCreateRequirements(rows, req.user!.id, req);
+
+    await recordAudit({ actorId: req.user!.id, action: "bom_plan.sent_to_pre_inventory", entityType: "BomPlan", entityId: plan.id, metadata: outcome });
+
+    res.status(201).json(outcome);
   } catch (err) {
     next(err);
   }

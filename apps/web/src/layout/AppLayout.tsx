@@ -1,9 +1,21 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { NavLink, useLocation } from "react-router-dom";
-import { ChevronDown, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Bell, ChevronDown, ClipboardList, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { formatEmployeeId } from "../lib/format";
-import type { RoleName } from "../lib/types";
+import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications } from "../lib/hooks";
+import type { AppNotification, RoleName } from "../lib/types";
+
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
+}
 
 // Order Tracking is the whole pipeline now (PO intake through Dispatch,
 // one flow per batch — see BatchDetailPage), so it stays visible to
@@ -23,7 +35,8 @@ import type { RoleName } from "../lib/types";
 const TABS: { to: string; label: string; icon: typeof Truck; roles?: RoleName[]; end?: boolean }[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/purchase-orders", label: "Order Tracking", icon: Truck },
-  { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC"] },
+  { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
+  { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "DISPATCH", "ACCOUNTS"] },
   { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["PPIC", "PURCHASE"] },
   { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["PPIC", "BD"] },
   { to: "/users", label: "Users", icon: ShieldCheck, roles: ["ADMIN"] },
@@ -38,16 +51,26 @@ function initials(name: string) {
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout, hasRole } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const visibleTabs = TABS.filter((tab) => !tab.roles || hasRole(...tab.roles));
   const displayName = user?.fullName ?? user?.email ?? "";
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
+  const notifRef = useRef<HTMLDivElement>(null);
+
+  const { data: notifData } = useNotifications();
+  const notifications = notifData?.notifications ?? [];
+  const unreadCount = notifData?.unreadCount ?? 0;
+  const markRead = useMarkNotificationRead();
+  const markAllRead = useMarkAllNotificationsRead();
 
   useEffect(() => {
     setMobileOpen(false);
     setProfileOpen(false);
+    setNotifOpen(false);
   }, [location.pathname]);
 
   useEffect(() => {
@@ -58,6 +81,21 @@ export function AppLayout({ children }: { children: ReactNode }) {
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
   }, [profileOpen]);
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    function onClick(e: MouseEvent) {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [notifOpen]);
+
+  function handleNotifClick(n: AppNotification) {
+    if (!n.readAt) markRead.mutate(n.id);
+    setNotifOpen(false);
+    if (n.link) navigate(n.link);
+  }
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -105,6 +143,60 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
 
           <div className="ml-auto flex items-center gap-2 md:ml-0">
+            {/* Notification bell */}
+            <div className="relative" ref={notifRef}>
+              <button
+                onClick={() => setNotifOpen((o) => !o)}
+                className="btn-icon relative"
+                title="Notifications"
+              >
+                <Bell className="h-4.5 w-4.5" strokeWidth={2.25} />
+                {unreadCount > 0 && (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-black text-white shadow-sm">
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {notifOpen && (
+                <div className="animate-scale-in absolute right-0 top-full z-50 mt-2 w-80 origin-top-right rounded-2xl border border-slate-200/80 bg-white shadow-lift">
+                  <div className="flex items-center justify-between border-b border-slate-100 px-3.5 py-2.5">
+                    <p className="text-xs font-black text-slate-800">Notifications</p>
+                    {unreadCount > 0 && (
+                      <button
+                        onClick={() => markAllRead.mutate()}
+                        className="text-[10px] font-bold uppercase tracking-wide text-brand-600 hover:text-brand-800"
+                      >
+                        Mark all read
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-96 overflow-y-auto">
+                    {notifications.length === 0 ? (
+                      <p className="px-3.5 py-6 text-center text-xs font-medium text-slate-400">You're all caught up.</p>
+                    ) : (
+                      notifications.map((n) => (
+                        <button
+                          key={n.id}
+                          onClick={() => handleNotifClick(n)}
+                          className={`flex w-full flex-col gap-0.5 border-b border-slate-50 px-3.5 py-2.5 text-left transition-colors last:border-b-0 hover:bg-slate-50 ${
+                            n.readAt ? "" : "bg-brand-50/50"
+                          }`}
+                        >
+                          <div className="flex items-start gap-2">
+                            {!n.readAt && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-500" />}
+                            <p className={`flex-1 text-xs leading-snug ${n.readAt ? "font-medium text-slate-600" : "font-bold text-slate-800"}`}>{n.title}</p>
+                          </div>
+                          {n.body && <p className="pl-3.5 text-[11px] leading-snug text-slate-500">{n.body}</p>}
+                          <p className="pl-3.5 text-[10px] font-semibold text-slate-400">{timeAgo(n.createdAt)}</p>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Profile dropdown — desktop */}
             <div className="relative hidden md:block" ref={profileRef}>
               <button

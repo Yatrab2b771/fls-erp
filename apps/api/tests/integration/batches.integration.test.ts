@@ -138,6 +138,50 @@ describe("PATCH /api/batches/:id/stage — full forward walk", () => {
   });
 });
 
+describe("Wastage & quality rejection — Production Execution / QA Gate Mfg", () => {
+  it("Production logs input/output at Production Execution; the batch response carries the derived wastage", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const itemId = await createApprovedPoItem(bdToken);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
+    const { token: adminToken } = await createUser(["ADMIN"]);
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
+    await request(app).patch(`/api/batches/${batch.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "PRODUCTION_EXECUTION" });
+
+    // Before input/output are recorded, wastage is null, not zero.
+    const beforeRes = await request(app).get(`/api/batches/${batch.body.id}`).set(authHeader(productionToken));
+    expect(beforeRes.body.wastage).toEqual({ wastageQty: null, wastagePct: null });
+
+    const logged = await request(app)
+      .patch(`/api/batches/${batch.body.id}/stage`)
+      .set(authHeader(productionToken))
+      .send({ action: "FORWARD", manufacturingStartDate: "2026-08-03", manufacturingEndDate: "2026-08-05", inputQty: 100, outputQty: 99.9 });
+    expect(logged.status).toBe(200);
+    expect(logged.body.inputQty).toBe(100);
+    expect(logged.body.outputQty).toBe(99.9);
+    expect(logged.body.wastage).toEqual({ wastageQty: 0.1, wastagePct: 0.1 });
+  });
+
+  it("QC logs a quality rejection at QA Gate Mfg, independent of wastage", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const itemId = await createApprovedPoItem(bdToken);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
+    const { token: adminToken } = await createUser(["ADMIN"]);
+    const { token: qaToken } = await createUser(["QA_QC"]);
+    await request(app).patch(`/api/batches/${batch.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "QA_GATE_MFG" });
+
+    const reviewed = await request(app)
+      .patch(`/api/batches/${batch.body.id}/stage`)
+      .set(authHeader(qaToken))
+      .send({ action: "FORWARD", mfgQaStatus: "Approved", mfgQcStatus: "Approved", mfgRejectedQty: 0.5 });
+    expect(reviewed.status).toBe(200);
+    expect(reviewed.body.mfgRejectedQty).toBe(0.5);
+    // Rejection is its own number — this stage never touches input/output/wastage.
+    expect(reviewed.body.wastage).toEqual({ wastageQty: null, wastagePct: null });
+  });
+});
+
 describe("PATCH /api/batches/:id/stage — send back", () => {
   it("requires a note, is gated to the current stage's department, and returns the batch to the previous stage", async () => {
     const { token: bdToken } = await createUser(["BD"]);

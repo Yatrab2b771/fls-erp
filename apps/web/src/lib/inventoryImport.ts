@@ -185,6 +185,68 @@ export function parseInventoryRequestWorkbook(buffer: ArrayBuffer, defaultCatego
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
 }
 
+// --- Pre-Inventory requirement bulk import (S1) — one row per RM/PM
+// requirement, same resolve-or-create-item pattern as the transaction
+// log's import. Required Qty is a distinct column from the transaction
+// log's "Count" (a requirement isn't a delivery), but the header names
+// people actually type overlap, so it's matched loosely too. ---
+
+const REQUIRED_QTY_COLUMNS = ["Required Qty", "Requirement", "Qty", "Quantity", "Count"];
+
+export interface ImportRequirementRow {
+  date: string;
+  category: "RM" | "PM";
+  itemName: string;
+  unit: string;
+  requiredQty: number;
+  size?: string;
+  note?: string;
+}
+
+export interface ParsedRequirementImport {
+  rows: ImportRequirementRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parseRequirementWorkbook(buffer: ArrayBuffer, defaultCategory: "RM" | "PM"): ParsedRequirementImport {
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+  const rows: ImportRequirementRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const itemName = asText(row, ITEM_COLUMNS);
+      const dateRaw = firstNonEmpty(row, DATE_COLUMNS);
+      const unit = asText(row, UNIT_COLUMNS);
+      const quantityRaw = firstNonEmpty(row, REQUIRED_QTY_COLUMNS);
+      const date = parseDate(dateRaw);
+      const requiredQty = quantityRaw === undefined ? NaN : Number(quantityRaw);
+
+      if (!itemName || !date || !unit || !Number.isFinite(requiredQty) || requiredQty <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      const categoryText = asText(row, CATEGORY_COLUMNS)?.toUpperCase();
+      const category: "RM" | "PM" = categoryText === "RM" || categoryText === "PM" ? categoryText : defaultCategory;
+
+      rows.push({ date, category, itemName, unit, requiredQty, size: asText(row, SIZE_COLUMNS), note: asText(row, NOTE_COLUMNS) });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
+
+// Pre-Inventory's S2 ("what's already available") is no longer a
+// manual Warehouse entry — it's read live off the real stock ledger
+// (see pre-inventory.routes.ts) — so there's no availability import to
+// parse any more.
+
 // --- Dispatch Transfers (FG / Bill) bulk import — customers are
 // matched by exact name against the existing directory, never created
 // (customer creation is BD-only, enforced server-side); a row whose

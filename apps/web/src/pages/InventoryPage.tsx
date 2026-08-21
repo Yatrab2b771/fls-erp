@@ -24,11 +24,15 @@ import {
 import { useAuth } from "../lib/auth";
 import {
   useAcceptTransaction,
+  useConfirmDispatch,
+  useCreateDayStore,
   useCreateDispatchTransfer,
   useCreateInventoryItem,
   useCreateInventoryRequest,
   useCreateInventoryTransaction,
+  useCreatePlant,
   useCustomers,
+  useDayStores,
   useDeleteDispatchTransfer,
   useDeleteInventoryRequest,
   useDeleteInventoryTransaction,
@@ -41,12 +45,15 @@ import {
   useInventoryStock,
   useInventoryTransactions,
   useInventoryVendors,
+  useInvoiceDispatchTransfer,
   useIssueInventoryRequest,
+  usePlants,
   useQcReviewDispatchTransfer,
   useQcReviewTransaction,
   useReviewInventoryRequest,
 } from "../lib/hooks";
 import type { DispatchTransfer, DispatchTransferType, InventoryCategory, InventoryRequest, InventoryRequestPurpose, InventoryTransaction, InventoryTxnType } from "../lib/types";
+import { PickerWithAdd } from "../components/PickerWithAdd";
 import { parseDispatchTransferWorkbook, parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
 import {
   downloadDispatchImportTemplate,
@@ -134,6 +141,8 @@ export function InventoryPage() {
   const canWrite = hasRole("STORE"); // Store or Admin — owns the full ledger + dispatch log + request review/issue/accept
   const canRequest = hasRole("PPIC"); // PPIC or Admin — can raise a Material Request
   const canQc = hasRole("QA_QC"); // QA/QC or Admin — inward QC on Received, outward QC on FG transfers
+  const canDispatch = hasRole("DISPATCH"); // S9 — confirms an FG transfer actually went out
+  const canInvoice = hasRole("ACCOUNTS"); // S9 — Finance raises the invoice once Dispatch confirms
 
   // Per-tab visibility — each department only gets the slice of this
   // module its role actually has API access to (see inventory.routes.ts).
@@ -143,7 +152,7 @@ export function InventoryPage() {
     ISSUED_DAY_STORE: canWrite,
     ISSUED_PRODUCTION: canWrite,
     requests: canWrite || canRequest,
-    FG: canWrite || canQc,
+    FG: canWrite || canQc || canDispatch || canInvoice,
     BILL: canWrite,
   };
   const visibleMaterialTabs = MATERIAL_TABS.filter((t) => tabVisible[t.key]);
@@ -162,6 +171,10 @@ export function InventoryPage() {
   const [tab, setTab] = useState<ViewTab>(() => [...visibleMaterialTabs, ...visibleDispatchTabs][0]?.key ?? "stock");
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
+  // Bulk-import counterpart of LogEntryForm's Opening Stock checkbox —
+  // Received tab only. A toolbar-level toggle since the import button
+  // has no per-row form of its own.
+  const [importOpeningStock, setImportOpeningStock] = useState(false);
 
   const dispatchTab = isDispatchTab(tab);
   const isRequestsTab = tab === "requests";
@@ -173,11 +186,12 @@ export function InventoryPage() {
     enabled: materialTab && (tab === "RECEIVED" ? canWrite || canQc : canWrite),
   });
   const { data: dispatchTransfers, isLoading: dispatchLoading } = useDispatchTransfers(dispatchTab ? { type: tab } : undefined, {
-    enabled: dispatchTab && (tab === "FG" ? canWrite || canQc : canWrite),
+    enabled: dispatchTab && (tab === "FG" ? canWrite || canQc || canDispatch || canInvoice : canWrite),
   });
   const { data: dispatchTotal } = useDispatchTransfers(undefined, { enabled: canWrite });
   const { data: pendingRequests } = useInventoryRequests("PENDING", { enabled: tabVisible.stock });
   const { data: approvedRequests } = useInventoryRequests("APPROVED", { enabled: canRequest && !canWrite });
+  const { data: partiallyIssuedRequests } = useInventoryRequests("PARTIALLY_ISSUED", { enabled: canRequest && !canWrite });
   const { data: allRequests, isLoading: requestsLoading } = useInventoryRequests(undefined, { enabled: isRequestsTab });
   const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canQc });
   const { data: pendingDispatchQc } = useDispatchTransfers({ type: "FG", qcStatus: "PENDING_QC" }, { enabled: canQc });
@@ -235,9 +249,12 @@ export function InventoryPage() {
         );
       }
 
-      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows });
+      const openingStock = tab === "RECEIVED" && importOpeningStock;
+      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, isOpeningStock: openingStock || undefined });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
-      toast.success(`Imported ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
+      toast.success(
+        `${openingStock ? "Loaded" : "Imported"} ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}${openingStock ? " — counted immediately, no QC needed." : ""}`,
+      );
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
     }
@@ -324,6 +341,12 @@ export function InventoryPage() {
                 <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
               </button>
               <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
+              {tab === "RECEIVED" && (
+                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-600" title="Existing warehouse stock, not a new delivery — skips QC and counts immediately.">
+                  <input type="checkbox" className="h-3 w-3" checked={importOpeningStock} onChange={(e) => setImportOpeningStock(e.target.checked)} />
+                  Opening Stock
+                </label>
+              )}
             </>
           )}
           {isRequestsTab && canRequest && (
@@ -376,7 +399,12 @@ export function InventoryPage() {
             {canWrite ? (
               <StatTile icon={Truck} label="Dispatch Transfers" value={dispatchTotal?.length ?? 0} accent="emerald" />
             ) : (
-              <StatTile icon={CheckCircle2} label="Approved, Ready to Issue" value={approvedRequests?.length ?? 0} accent={approvedRequests?.length ? "emerald" : "slate"} />
+              <StatTile
+                icon={CheckCircle2}
+                label="Approved / Awaiting Issue"
+                value={(approvedRequests?.length ?? 0) + (partiallyIssuedRequests?.length ?? 0)}
+                accent={approvedRequests?.length || partiallyIssuedRequests?.length ? "emerald" : "slate"}
+              />
             )}
           </>
         ) : (
@@ -427,7 +455,7 @@ export function InventoryPage() {
       ) : tab === "RECEIVED" ? (
         <ReceivedList loading={txnLoading} rows={filteredTxns} empty={!transactions?.length} canQc={canQc} canWrite={canWrite} />
       ) : tab === "FG" ? (
-        <FgTransferList loading={dispatchLoading} rows={filteredDispatch} empty={!dispatchTransfers?.length} canQc={canQc} canWrite={canWrite} />
+        <FgTransferList loading={dispatchLoading} rows={filteredDispatch} empty={!dispatchTransfers?.length} canQc={canQc} canWrite={canWrite} canDispatch={canDispatch} canInvoice={canInvoice} />
       ) : dispatchTab ? (
         <DispatchTable loading={dispatchLoading} rows={filteredDispatch} empty={!dispatchTransfers?.length} type={tab} canWrite={canWrite} />
       ) : isRequestsTab ? (
@@ -440,7 +468,7 @@ export function InventoryPage() {
 }
 
 function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnType<typeof useInventoryStock>["data"]; empty: boolean }) {
-  if (loading) return <SkeletonRows rows={5} cols={7} />;
+  if (loading) return <SkeletonRows rows={5} cols={8} />;
   if (empty) return <EmptyState icon={Warehouse} title="No inventory items yet" hint="Log a received or issued entry to add the first item." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
@@ -454,6 +482,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
               <th>Category</th>
               <th>Unit</th>
               <th className="text-right">Received</th>
+              <th className="text-right">Rejected</th>
               <th className="text-right">Issued (Day Store)</th>
               <th className="text-right">Issued (Production)</th>
               <th className="text-right">On Hand</th>
@@ -466,6 +495,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
                 <td className="text-right font-mono text-emerald-600">{s.receivedQty}</td>
+                <td className="text-right font-mono text-slate-400">{s.rejectedQty || "—"}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
@@ -528,6 +558,8 @@ function TransactionTable({
               <th>Unit</th>
               <th>Size</th>
               <th>Vendor / Note</th>
+              {type === "ISSUED_DAY_STORE" && <th>Day Store</th>}
+              {type === "ISSUED_PRODUCTION" && <th>Plant</th>}
               {canWrite && <th />}
             </tr>
           </thead>
@@ -541,6 +573,8 @@ function TransactionTable({
                 <td className="text-slate-500">{t.unit}</td>
                 <td className="text-slate-500">{t.size ?? "—"}</td>
                 <td className="text-slate-500">{t.vendorName ?? "—"}</td>
+                {type === "ISSUED_DAY_STORE" && <td className="text-slate-500">{t.dayStore?.name ?? "—"}</td>}
+                {type === "ISSUED_PRODUCTION" && <td className="text-slate-500">{t.plant?.name ?? "—"}</td>}
                 {canWrite && (
                   <td className="text-right">
                     <button onClick={() => handleDelete(t.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
@@ -636,8 +670,10 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [category, setCategory] = useState<InventoryCategory>("RM");
   const { data: items } = useInventoryItems(category);
   const { data: vendors } = useInventoryVendors();
+  const { data: dayStores } = useDayStores();
   const createItem = useCreateInventoryItem();
   const createTxn = useCreateInventoryTransaction();
+  const createDayStore = useCreateDayStore();
 
   const [itemId, setItemId] = useState("");
   const [showNewItem, setShowNewItem] = useState(false);
@@ -648,6 +684,8 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [quantity, setQuantity] = useState("");
   const [size, setSize] = useState("");
   const [vendorName, setVendorName] = useState("");
+  const [dayStoreId, setDayStoreId] = useState("");
+  const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -685,8 +723,10 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         quantity: Number(quantity),
         size: size.trim() || undefined,
         vendorName: vendorName.trim() || undefined,
+        dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
+        isOpeningStock: type === "RECEIVED" && isOpeningStock ? true : undefined,
       });
-      toast.success(type === "RECEIVED" ? "Entry logged — awaiting inward QC." : `${TXN_TYPE_LABEL[type]} entry logged.`);
+      toast.success(type === "RECEIVED" ? (isOpeningStock ? "Opening stock logged — counted immediately, no QC needed." : "Entry logged — awaiting inward QC.") : `${TXN_TYPE_LABEL[type]} entry logged.`);
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not log entry");
@@ -714,9 +754,21 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
       </div>
 
       {type === "RECEIVED" && (
-        <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
-        </p>
+        <div className="space-y-2">
+          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
+            <input type="checkbox" className="h-3.5 w-3.5" checked={isOpeningStock} onChange={(e) => setIsOpeningStock(e.target.checked)} />
+            Opening Stock — existing warehouse stock, not a new delivery
+          </label>
+          {isOpeningStock ? (
+            <p className="flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-xs font-bold text-brand-700">
+              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Counted as stock immediately — no QC step, since nothing is actually being delivered today.
+            </p>
+          ) : (
+            <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+              <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
+            </p>
+          )}
+        </div>
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -783,6 +835,16 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
             ))}
           </datalist>
         </div>
+        {type === "ISSUED_DAY_STORE" && (
+          <PickerWithAdd
+            label="Day Store (optional)"
+            placeholder="— Which day store —"
+            options={dayStores ?? []}
+            value={dayStoreId}
+            onChange={setDayStoreId}
+            onCreate={(name) => createDayStore.mutateAsync(name)}
+          />
+        )}
       </div>
 
       {error && (
@@ -812,13 +874,16 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
   // to. Fetched regardless of `type` so switching to FG doesn't need a
   // fresh round trip.
   const { data: issuedRequests } = useInventoryRequests("ISSUED");
+  const { data: plants } = usePlants();
   const createTransfer = useCreateDispatchTransfer();
+  const createPlant = useCreatePlant();
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [productName, setProductName] = useState("");
   const [quantity, setQuantity] = useState("");
   const [sourceRequestId, setSourceRequestId] = useState("");
+  const [plantId, setPlantId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -845,6 +910,7 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
         productName: productName.trim(),
         quantity: Number(quantity),
         sourceRequestId: type === "FG" && sourceRequestId ? sourceRequestId : undefined,
+        plantId: type === "FG" && plantId ? plantId : undefined,
       });
       toast.success(type === "FG" ? "FG transfer logged — awaiting outward QC." : `${DISPATCH_TYPE_LABEL[type]} entry logged.`);
       onDone();
@@ -910,12 +976,22 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
               <option value="">— Not linked —</option>
               {issuedRequests?.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.item.name} · {r.requestedQty} · issued {r.fulfillment ? new Date(r.fulfillment.date).toLocaleDateString() : ""}
+                  {r.item.name} · {r.requestedQty} · issued {r.fulfillments.length ? new Date(r.fulfillments[r.fulfillments.length - 1]!.date).toLocaleDateString() : ""}
                 </option>
               ))}
             </select>
             <p className="mt-1 text-[11px] text-slate-400">A manual tag, not a calculation — pick the request this shipment's material came from, if you know it.</p>
           </div>
+        )}
+        {type === "FG" && (
+          <PickerWithAdd
+            label="Plant (optional)"
+            placeholder="— Which plant is this from —"
+            options={plants ?? []}
+            value={plantId}
+            onChange={setPlantId}
+            onCreate={(name) => createPlant.mutateAsync(name)}
+          />
         )}
       </div>
 
@@ -983,6 +1059,9 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
 
   const [showReject, setShowReject] = useState(false);
   const [note, setNote] = useState("");
+  const [showPartial, setShowPartial] = useState(false);
+  const [partialQty, setPartialQty] = useState("");
+  const [partialNote, setPartialNote] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function handleApprove() {
@@ -1002,6 +1081,21 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
       setShowReject(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not reject QC");
+    }
+  }
+
+  async function handlePartialReject() {
+    setError(null);
+    const qty = Number(partialQty);
+    if (!partialQty || qty <= 0) return setError("Enter how much of this delivery failed inspection.");
+    if (qty >= txn.quantity) return setError("That's the whole delivery — use Reject instead.");
+    if (!partialNote.trim()) return setError("A note is required when rejecting part of a delivery.");
+    try {
+      await qcReview.mutateAsync({ id: txn.id, action: "APPROVE", rejectedQty: qty, note: partialNote.trim() });
+      toast.success(`Approved — ${txn.quantity - qty} ${txn.unit} accepted, ${qty} ${txn.unit} rejected.`);
+      setShowPartial(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save");
     }
   }
 
@@ -1029,7 +1123,13 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <p className="font-bold text-slate-800">{txn.item.name}</p>
-            {txn.receiptStatus && <QcStatusBadge status={txn.receiptStatus} />}
+            {txn.isOpeningStock ? (
+              <span className="pill border-slate-300 bg-slate-100 text-slate-600" title="Existing warehouse stock loaded at go-live, not a vendor delivery">
+                Opening Stock
+              </span>
+            ) : (
+              txn.receiptStatus && <QcStatusBadge status={txn.receiptStatus} />
+            )}
           </div>
           <p className="mt-1 text-xs text-slate-500">
             {CATEGORY_LABEL[txn.item.category]} · <span className="font-mono font-bold text-slate-700">{txn.quantity}</span> {txn.unit}
@@ -1042,13 +1142,22 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
             {txn.acceptedBy && <> · accepted by {txn.acceptedBy.fullName}</>}
           </p>
           {txn.receiptStatus === "QC_REJECTED" && txn.qcNote && <p className="mt-1.5 text-xs font-bold text-rose-600">Reason: {txn.qcNote}</p>}
+          {!!txn.rejectedQty && (
+            <p className="mt-1.5 text-xs font-bold text-amber-600">
+              {txn.quantity - txn.rejectedQty} {txn.unit} accepted, {txn.rejectedQty} {txn.unit} rejected
+              {txn.qcNote && <> — {txn.qcNote}</>}
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {canQc && txn.receiptStatus === "PENDING_QC" && !showReject && (
+          {canQc && txn.receiptStatus === "PENDING_QC" && !showReject && !showPartial && (
             <>
               <button type="button" className="btn-ghost btn-sm" onClick={() => setShowReject(true)}>
                 <X className="h-3 w-3" strokeWidth={2.5} /> Reject
+              </button>
+              <button type="button" className="btn-ghost btn-sm" onClick={() => setShowPartial(true)}>
+                Partial Reject
               </button>
               <button type="button" className="btn-primary btn-sm" disabled={qcReview.isPending} onClick={handleApprove}>
                 <Check className="h-3 w-3" strokeWidth={2.5} /> {qcReview.isPending ? "Approving…" : "Approve QC"}
@@ -1060,7 +1169,7 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
               <PackageCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> {accept.isPending ? "Accepting…" : "Accept into Stock"}
             </button>
           )}
-          {canWrite && !showReject && (
+          {canWrite && !showReject && !showPartial && (
             <button type="button" className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry" onClick={handleDelete}>
               <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
             </button>
@@ -1089,6 +1198,38 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
           </div>
         </div>
       )}
+
+      {showPartial && (
+        <div className="animate-fade-in space-y-2 rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+          <p className="text-[11px] font-bold text-amber-700">Part of this delivery failed inspection — the rest still clears QC and counts toward stock.</p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="label">Rejected Qty ({txn.unit}, out of {txn.quantity})</label>
+              <input className="field font-mono" type="number" min="0" step="any" value={partialQty} onChange={(e) => setPartialQty(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Reason</label>
+              <input className="field" placeholder="e.g. Damaged packaging" value={partialNote} onChange={(e) => setPartialNote(e.target.value)} />
+            </div>
+          </div>
+          {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              onClick={() => {
+                setShowPartial(false);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn-primary btn-sm" disabled={qcReview.isPending} onClick={handlePartialReject}>
+              {qcReview.isPending ? "Saving…" : "Confirm Partial Reject"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1103,12 +1244,16 @@ function FgTransferList({
   empty,
   canQc,
   canWrite,
+  canDispatch,
+  canInvoice,
 }: {
   loading: boolean;
   rows: DispatchTransfer[] | undefined;
   empty: boolean;
   canQc: boolean;
   canWrite: boolean;
+  canDispatch: boolean;
+  canInvoice: boolean;
 }) {
   if (loading) return <SkeletonRows rows={4} cols={1} />;
   if (empty) return <EmptyState icon={Truck} title="No FG transfer entries yet" hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."} accent="brand" />;
@@ -1117,19 +1262,37 @@ function FgTransferList({
   return (
     <div className="space-y-3">
       {rows.map((d) => (
-        <FgTransferCard key={d.id} transfer={d} canQc={canQc} canWrite={canWrite} />
+        <FgTransferCard key={d.id} transfer={d} canQc={canQc} canWrite={canWrite} canDispatch={canDispatch} canInvoice={canInvoice} />
       ))}
     </div>
   );
 }
 
-function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTransfer; canQc: boolean; canWrite: boolean }) {
+function FgTransferCard({
+  transfer,
+  canQc,
+  canWrite,
+  canDispatch,
+  canInvoice,
+}: {
+  transfer: DispatchTransfer;
+  canQc: boolean;
+  canWrite: boolean;
+  canDispatch: boolean;
+  canInvoice: boolean;
+}) {
   const toast = useToast();
   const qcReview = useQcReviewDispatchTransfer();
   const deleteTransfer = useDeleteDispatchTransfer();
+  const confirmDispatch = useConfirmDispatch();
+  const invoiceTransfer = useInvoiceDispatchTransfer();
 
   const [showReject, setShowReject] = useState(false);
   const [note, setNote] = useState("");
+  const [showDispatch, setShowDispatch] = useState(false);
+  const [dispatchNote, setDispatchNote] = useState("");
+  const [showInvoice, setShowInvoice] = useState(false);
+  const [invoiceNumber, setInvoiceNumber] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function handleApprove() {
@@ -1161,6 +1324,27 @@ function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTrans
     }
   }
 
+  async function handleConfirmDispatch() {
+    try {
+      await confirmDispatch.mutateAsync({ id: transfer.id, dispatchNote: dispatchNote.trim() || undefined });
+      toast.success("Dispatch confirmed — Finance notified to invoice.");
+      setShowDispatch(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not confirm dispatch");
+    }
+  }
+
+  async function handleInvoice() {
+    if (!invoiceNumber.trim()) return setError("Enter the invoice number.");
+    try {
+      await invoiceTransfer.mutateAsync({ id: transfer.id, invoiceNumber: invoiceNumber.trim() });
+      toast.success("Invoice logged.");
+      setShowInvoice(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not log the invoice");
+    }
+  }
+
   return (
     <div className="card space-y-3 p-4 sm:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1171,15 +1355,29 @@ function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTrans
           </div>
           <p className="mt-1 text-xs text-slate-500">
             {transfer.customer.companyName} · <span className="font-mono font-bold text-slate-700">{transfer.quantity}</span> · {new Date(transfer.date).toLocaleDateString()}
+            {transfer.plant && <> · from {transfer.plant.name}</>}
           </p>
           <p className="mt-0.5 text-[11px] text-slate-400">
             Logged by {transfer.createdBy.fullName}
             {transfer.qcCheckedBy && <> · QC by {transfer.qcCheckedBy.fullName}</>}
+            {transfer.dispatchedBy && <> · dispatched by {transfer.dispatchedBy.fullName}</>}
+            {transfer.invoicedBy && <> · invoiced by {transfer.invoicedBy.fullName}</>}
           </p>
           {transfer.qcStatus === "QC_REJECTED" && transfer.qcNote && <p className="mt-1.5 text-xs font-bold text-rose-600">Reason: {transfer.qcNote}</p>}
           {transfer.sourceRequest && (
             <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-brand-700">
               <ClipboardList className="h-3.5 w-3.5" strokeWidth={2.5} /> Traces to request: {transfer.sourceRequest.item.name} · {transfer.sourceRequest.requestedQty}
+            </p>
+          )}
+          {transfer.dispatchedAt && (
+            <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-violet-700">
+              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Dispatched {new Date(transfer.dispatchedAt).toLocaleDateString()}
+              {transfer.dispatchNote && <> — {transfer.dispatchNote}</>}
+            </p>
+          )}
+          {transfer.invoiceNumber && (
+            <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-emerald-700">
+              <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.5} /> Invoiced {transfer.invoiceNumber}
             </p>
           )}
         </div>
@@ -1194,6 +1392,16 @@ function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTrans
                 <Check className="h-3 w-3" strokeWidth={2.5} /> {qcReview.isPending ? "Approving…" : "Approve QC"}
               </button>
             </>
+          )}
+          {canDispatch && transfer.qcStatus === "QC_APPROVED" && !transfer.dispatchedAt && !showDispatch && (
+            <button type="button" className="btn-primary btn-sm" onClick={() => setShowDispatch(true)}>
+              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Confirm Dispatch
+            </button>
+          )}
+          {canInvoice && transfer.dispatchedAt && !transfer.invoiceNumber && !showInvoice && (
+            <button type="button" className="btn-primary btn-sm" onClick={() => setShowInvoice(true)}>
+              <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.5} /> Log Invoice
+            </button>
           )}
           {canWrite && !showReject && (
             <button type="button" className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry" onClick={handleDelete}>
@@ -1224,6 +1432,52 @@ function FgTransferCard({ transfer, canQc, canWrite }: { transfer: DispatchTrans
           </div>
         </div>
       )}
+
+      {showDispatch && (
+        <div className="animate-fade-in rounded-xl border border-violet-200 bg-violet-50/60 p-3">
+          <label className="label">Dispatch Note (optional)</label>
+          <input className="field" placeholder="e.g. Transporter, LR / docket number" value={dispatchNote} onChange={(e) => setDispatchNote(e.target.value)} />
+          {error && <p className="mt-1.5 text-xs font-bold text-rose-600">{error}</p>}
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              onClick={() => {
+                setShowDispatch(false);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn-primary btn-sm" disabled={confirmDispatch.isPending} onClick={handleConfirmDispatch}>
+              {confirmDispatch.isPending ? "Confirming…" : "Confirm Dispatch"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showInvoice && (
+        <div className="animate-fade-in rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+          <label className="label">Invoice Number</label>
+          <input className="field" placeholder="Invoice number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} />
+          {error && <p className="mt-1.5 text-xs font-bold text-rose-600">{error}</p>}
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              onClick={() => {
+                setShowInvoice(false);
+                setError(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn-primary btn-sm" disabled={invoiceTransfer.isPending} onClick={handleInvoice}>
+              {invoiceTransfer.isPending ? "Saving…" : "Save Invoice"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1237,13 +1491,16 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
   const toast = useToast();
   const [category, setCategory] = useState<InventoryCategory>("RM");
   const { data: items } = useInventoryItems(category);
+  const { data: plants } = usePlants();
   const createRequest = useCreateInventoryRequest();
+  const createPlant = useCreatePlant();
 
   const [itemId, setItemId] = useState("");
   const [purpose, setPurpose] = useState<InventoryRequestPurpose>("ISSUED_PRODUCTION");
   const [requestedQty, setRequestedQty] = useState("");
   const [neededBy, setNeededBy] = useState("");
   const [note, setNote] = useState("");
+  const [plantId, setPlantId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1268,6 +1525,7 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
         requestedQty: Number(requestedQty),
         neededBy: neededBy || undefined,
         note: note.trim() || undefined,
+        plantId: purpose === "ISSUED_PRODUCTION" && plantId ? plantId : undefined,
       });
       toast.success("Request sent to Store for approval.");
       onDone();
@@ -1323,6 +1581,9 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
           <label className="label">Note (optional)</label>
           <input className="field" placeholder="e.g. Batch GB-BCAA-0098, urgent" value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
+        {purpose === "ISSUED_PRODUCTION" && (
+          <PickerWithAdd label="Plant (optional)" placeholder="— Which plant is this for —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+        )}
       </div>
 
       {error && (
@@ -1382,14 +1643,17 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
   const review = useReviewInventoryRequest();
   const issue = useIssueInventoryRequest();
   const deleteRequest = useDeleteInventoryRequest();
+  const { data: dayStores } = useDayStores();
+  const createDayStore = useCreateDayStore();
 
   const [showReject, setShowReject] = useState(false);
   const [rejectionReason, setRejectionReason] = useState("");
   const [showIssue, setShowIssue] = useState(false);
   const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [issueUnit, setIssueUnit] = useState(UNIT_OPTIONS[0]!);
-  const [issueQty, setIssueQty] = useState(String(request.requestedQty));
+  const [issueQty, setIssueQty] = useState(String(request.remainingQty));
   const [issueSize, setIssueSize] = useState("");
+  const [issueDayStoreId, setIssueDayStoreId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   async function handleApprove() {
@@ -1415,9 +1679,11 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
   async function handleIssue() {
     setError(null);
     if (!issueQty || Number(issueQty) <= 0) return setError("Enter a quantity greater than zero.");
+    if (Number(issueQty) > request.remainingQty) return setError(`Only ${request.remainingQty} remaining on this request.`);
     try {
-      await issue.mutateAsync({ id: request.id, date: issueDate, unit: issueUnit, quantity: Number(issueQty), size: issueSize.trim() || undefined });
-      toast.success("Stock issued — added to the ledger.");
+      const qty = Number(issueQty);
+      await issue.mutateAsync({ id: request.id, date: issueDate, unit: issueUnit, quantity: qty, size: issueSize.trim() || undefined, dayStoreId: issueDayStoreId || undefined });
+      toast.success(qty >= request.remainingQty ? "Stock issued — request complete." : `${qty} issued — ${request.remainingQty - qty} still remaining on this request.`);
       setShowIssue(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not issue stock");
@@ -1445,6 +1711,19 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
           </div>
           <p className="mt-1 text-xs text-slate-500">
             {CATEGORY_LABEL[request.category]} · {REQUEST_PURPOSE_LABEL[request.purpose]} · <span className="font-mono font-bold text-slate-700">{request.requestedQty}</span> requested
+            {(request.status === "PARTIALLY_ISSUED" || request.status === "ISSUED") && (
+              <>
+                {" "}
+                · <span className="font-mono font-bold text-brand-700">{request.issuedQty}</span> issued so far
+                {request.remainingQty > 0 && (
+                  <>
+                    {" "}
+                    · <span className="font-mono font-bold text-amber-600">{request.remainingQty}</span> remaining
+                  </>
+                )}
+              </>
+            )}
+            {request.plant && <> · for {request.plant.name}</>}
             {request.neededBy && <> · needed by {new Date(request.neededBy).toLocaleDateString()}</>}
           </p>
           <p className="mt-0.5 text-[11px] text-slate-400">
@@ -1453,10 +1732,15 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
           </p>
           {request.note && <p className="mt-1.5 text-xs text-slate-600">"{request.note}"</p>}
           {request.status === "REJECTED" && request.rejectionReason && <p className="mt-1.5 text-xs font-bold text-rose-600">Reason: {request.rejectionReason}</p>}
-          {request.status === "ISSUED" && request.fulfillment && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-brand-700">
-              <PackageCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> Issued {request.fulfillment.quantity} {request.fulfillment.unit} on {new Date(request.fulfillment.date).toLocaleDateString()}
-            </p>
+          {request.fulfillments.length > 0 && (
+            <div className="mt-1.5 space-y-1">
+              {request.fulfillments.map((f) => (
+                <p key={f.id} className="flex items-center gap-1 text-xs font-bold text-brand-700">
+                  <PackageCheck className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Issued {f.quantity} {f.unit} on {new Date(f.date).toLocaleDateString()}
+                  {f.dayStore && <> · {f.dayStore.name}</>}
+                </p>
+              ))}
+            </div>
           )}
         </div>
 
@@ -1471,9 +1755,16 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
               </button>
             </>
           )}
-          {canReview && request.status === "APPROVED" && !showIssue && (
-            <button type="button" className="btn-primary btn-sm" onClick={() => setShowIssue(true)}>
-              <PackageCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> Issue Stock
+          {canReview && (request.status === "APPROVED" || request.status === "PARTIALLY_ISSUED") && !showIssue && (
+            <button
+              type="button"
+              className="btn-primary btn-sm"
+              onClick={() => {
+                setIssueQty(String(request.remainingQty));
+                setShowIssue(true);
+              }}
+            >
+              <PackageCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> {request.status === "PARTIALLY_ISSUED" ? "Issue Remaining" : "Issue Stock"}
             </button>
           )}
           {canWithdraw && !showReject && (
@@ -1529,14 +1820,22 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
               </select>
             </div>
             <div>
-              <label className="label">Qty Issued</label>
-              <input className="field font-mono" type="number" min="0" step="any" value={issueQty} onChange={(e) => setIssueQty(e.target.value)} />
+              <label className="label">Qty Issued (of {request.remainingQty} remaining)</label>
+              <input className="field font-mono" type="number" min="0" max={request.remainingQty} step="any" value={issueQty} onChange={(e) => setIssueQty(e.target.value)} />
             </div>
             <div>
               <label className="label">Size (optional)</label>
               <input className="field" placeholder="e.g. 25 Kg bag" value={issueSize} onChange={(e) => setIssueSize(e.target.value)} />
             </div>
           </div>
+          <PickerWithAdd
+            label="Day Store fulfilling this (optional)"
+            placeholder="— Not via a Day Store —"
+            options={dayStores ?? []}
+            value={issueDayStoreId}
+            onChange={setIssueDayStoreId}
+            onCreate={(name) => createDayStore.mutateAsync(name)}
+          />
           {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
           <div className="flex justify-end gap-2">
             <button

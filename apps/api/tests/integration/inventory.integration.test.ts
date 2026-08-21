@@ -202,6 +202,55 @@ describe("Inventory module", () => {
       expect(doubleIssue.status).toBe(409);
     });
 
+    it("supports issuing a request in parts — stays open with a remaining balance until fully covered", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      const created = await request(app)
+        .post("/api/inventory/requests")
+        .set(authHeader(ppicToken))
+        .send({ itemId: item.body.id, category: "RM", requestedQty: 300, purpose: "ISSUED_PRODUCTION" });
+      expect(created.body.issuedQty).toBe(0);
+      expect(created.body.remainingQty).toBe(300);
+      await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+
+      // Can't issue more than what's actually left.
+      const tooMuch = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 301 });
+      expect(tooMuch.status).toBe(400);
+
+      const firstIssue = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 150 });
+      expect(firstIssue.status).toBe(201);
+
+      const afterFirst = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
+      const row = afterFirst.body.find((r: { id: string }) => r.id === created.body.id);
+      expect(row.status).toBe("PARTIALLY_ISSUED");
+      expect(row.issuedQty).toBe(150);
+      expect(row.remainingQty).toBe(150);
+      expect(row.fulfillments).toHaveLength(1);
+
+      // Still can't exceed the new remaining balance.
+      const stillTooMuch = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-05", unit: "Kg", quantity: 151 });
+      expect(stillTooMuch.status).toBe(400);
+
+      // Withdrawing a partially-issued request is blocked — real ledger transactions exist against it.
+      const deniedDelete = await request(app).delete(`/api/inventory/requests/${created.body.id}`).set(authHeader(ppicToken));
+      expect(deniedDelete.status).toBe(409);
+
+      const secondIssue = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-05", unit: "Kg", quantity: 150 });
+      expect(secondIssue.status).toBe(201);
+
+      const afterSecond = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
+      const finalRow = afterSecond.body.find((r: { id: string }) => r.id === created.body.id);
+      expect(finalRow.status).toBe("ISSUED");
+      expect(finalRow.issuedQty).toBe(300);
+      expect(finalRow.remainingQty).toBe(0);
+      expect(finalRow.fulfillments).toHaveLength(2);
+
+      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stock.body[0].issuedProductionQty).toBe(300);
+    });
+
     it("rejecting a request requires a reason, and a rejected request can't be issued", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
       const { token: ppicToken } = await createUser(["PPIC"]);
@@ -240,6 +289,36 @@ describe("Inventory module", () => {
 
       const asStore = await request(app).get("/api/inventory/requests").set(authHeader(storeToken));
       expect(asStore.body.length).toBe(2);
+    });
+
+    it("paginates — page/pageSize query params slice the list and X-Total-Count reports the full count", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: ppicToken } = await createUser(["PPIC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      for (let i = 0; i < 5; i++) {
+        await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: i + 1, purpose: "ISSUED_PRODUCTION" });
+      }
+
+      const defaultPage = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
+      expect(defaultPage.body.length).toBe(5);
+      expect(defaultPage.headers["x-total-count"]).toBe("5");
+      expect(defaultPage.headers["x-page"]).toBe("1");
+      expect(defaultPage.headers["x-page-size"]).toBe("50");
+
+      const firstPage = await request(app).get("/api/inventory/requests?page=1&pageSize=2").set(authHeader(ppicToken));
+      expect(firstPage.body.length).toBe(2);
+      expect(firstPage.headers["x-total-count"]).toBe("5");
+
+      const secondPage = await request(app).get("/api/inventory/requests?page=2&pageSize=2").set(authHeader(ppicToken));
+      expect(secondPage.body.length).toBe(2);
+
+      const thirdPage = await request(app).get("/api/inventory/requests?page=3&pageSize=2").set(authHeader(ppicToken));
+      expect(thirdPage.body.length).toBe(1);
+
+      // No overlap between pages.
+      const seenIds = new Set([...firstPage.body, ...secondPage.body, ...thirdPage.body].map((r: { id: string }) => r.id));
+      expect(seenIds.size).toBe(5);
     });
   });
 
@@ -306,6 +385,117 @@ describe("Inventory module", () => {
 
       const accept = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
       expect(accept.status).toBe(409);
+    });
+
+    it("supports partial rejection — part of a delivery fails inspection, the rest still counts toward stock", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50 });
+
+      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE", rejectedQty: 5 });
+      expect(missingNote.status).toBe(400);
+
+      const wholeQty = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE", rejectedQty: 50, note: "All damaged" });
+      expect(wholeQty.status).toBe(400);
+
+      const approved = await request(app)
+        .patch(`/api/inventory/transactions/${created.body.id}/qc`)
+        .set(authHeader(qaToken))
+        .send({ action: "APPROVE", rejectedQty: 5, note: "5 Kg damaged packaging" });
+      expect(approved.status).toBe(200);
+      expect(approved.body.receiptStatus).toBe("QC_APPROVED");
+      expect(approved.body.rejectedQty).toBe(5);
+
+      await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
+
+      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stock.body[0]).toEqual(expect.objectContaining({ receivedQty: 45, rejectedQty: 5, onHand: 45 }));
+    });
+
+    it("a plain approve (no rejectedQty) behaves exactly as before — 0 rejected, full quantity counts", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+      const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50 });
+
+      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      expect(approved.body.rejectedQty).toBe(0);
+      await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
+
+      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stock.body[0]).toEqual(expect.objectContaining({ receivedQty: 50, rejectedQty: 0, onHand: 50 }));
+    });
+  });
+
+  describe("Opening Stock — one-time go-live migration, skips the inward QC gate", () => {
+    it("a single entry counts toward stock immediately, already ACCEPTED, no QC step needed", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      const created = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(storeToken))
+        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 250, isOpeningStock: true });
+      expect(created.status).toBe(201);
+      expect(created.body.isOpeningStock).toBe(true);
+      expect(created.body.receiptStatus).toBe("ACCEPTED");
+      expect(created.body.acceptedBy.id).toBeTruthy();
+
+      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stock.body[0]).toEqual(expect.objectContaining({ receivedQty: 250, onHand: 250 }));
+
+      // A normal (non-opening-stock) entry still goes through PENDING_QC as usual.
+      const normal = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(storeToken))
+        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 10 });
+      expect(normal.body.isOpeningStock).toBe(false);
+      expect(normal.body.receiptStatus).toBe("PENDING_QC");
+    });
+
+    it("is rejected for any non-RECEIVED type", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+
+      const res = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(storeToken))
+        .send({ itemId: item.body.id, type: "ISSUED_DAY_STORE", date: "2026-08-21", unit: "Kg", quantity: 10, isOpeningStock: true });
+      expect(res.status).toBe(400);
+    });
+
+    it("bulk import loads every row as ACCEPTED, counts toward stock immediately, and never notifies QA_QC", async () => {
+      const { token: storeToken } = await createUser(["STORE"]);
+      const { token: qaToken } = await createUser(["QA_QC"]);
+
+      const imported = await request(app)
+        .post("/api/inventory/transactions/import")
+        .set(authHeader(storeToken))
+        .send({
+          type: "RECEIVED",
+          isOpeningStock: true,
+          rows: [
+            { category: "RM", itemName: "Whey Protein", date: "2026-08-21", unit: "Kg", quantity: 300 },
+            { category: "PM", itemName: "1kg Jar", date: "2026-08-21", unit: "Count", quantity: 1000 },
+          ],
+        });
+      expect(imported.status).toBe(201);
+      expect(imported.body).toEqual({ transactionsCreated: 2, itemsCreated: 2 });
+
+      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(stock.body).toEqual(
+        expect.arrayContaining([expect.objectContaining({ receivedQty: 300, onHand: 300 }), expect.objectContaining({ receivedQty: 1000, onHand: 1000 })]),
+      );
+
+      const qaInbox = await request(app).get("/api/notifications").set(authHeader(qaToken));
+      expect(qaInbox.body.unreadCount).toBe(0);
+
+      const rejected = await request(app)
+        .post("/api/inventory/transactions/import")
+        .set(authHeader(storeToken))
+        .send({ type: "ISSUED_DAY_STORE", isOpeningStock: true, rows: [{ category: "RM", itemName: "Whey Protein", date: "2026-08-21", unit: "Kg", quantity: 10 }] });
+      expect(rejected.status).toBe(400);
     });
   });
 

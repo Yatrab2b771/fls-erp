@@ -91,11 +91,17 @@ export const BATCH_STAGE_FIELDS: Partial<Record<BatchStageId, FieldDef[]>> = {
     { name: "manufacturingStatus", label: "Manufacturing Status", type: "combo", options: MANUFACTURING_STATUSES },
     { name: "manufacturingEndDate", label: "End Date", type: "date" },
     { name: "manufacturingRemarks", label: "Remarks", type: "text" },
+    // Wastage — inputQty/outputQty in, wastageQty/wastagePct derived
+    // (see computeWastage in batch.engine.ts, mirrored client-side).
+    { name: "inputQty", label: "Input Qty", type: "number" },
+    { name: "outputQty", label: "Output Qty", type: "number" },
   ],
   QA_GATE_MFG: [
     { name: "mfgQaStatus", label: "QA Status", type: "select", options: MFG_APPROVAL_STATUSES },
     { name: "mfgQcStatus", label: "QC Status", type: "select", options: MFG_APPROVAL_STATUSES },
     { name: "mfgRemarks", label: "Remarks", type: "text" },
+    // Quality rejection — independent of Production's wastage above.
+    { name: "mfgRejectedQty", label: "Rejected Qty (quality)", type: "number" },
   ],
   PACKAGING: [
     { name: "packagingStartDate", label: "Start Date", type: "date" },

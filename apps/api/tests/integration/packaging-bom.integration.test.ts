@@ -76,6 +76,34 @@ describe("full BOM plan lifecycle", () => {
     expect(reGet.body.result.totalYield).toBe(1000);
   });
 
+  it("PPIC can send a calculated plan straight into Pre-Inventory as PM requirements", async () => {
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
+    const skuId = (await request(app).get("/api/catalog/skus").set(authHeader(ppicToken))).body[0].id;
+
+    const plan = await request(app).post("/api/bom/plans").set(authHeader(ppicToken)).send({ name: "Send Test Plan" });
+    const planId = plan.body.id;
+
+    const tooEarly = await request(app).post(`/api/bom/plans/${planId}/send-to-pre-inventory`).set(authHeader(ppicToken));
+    expect(tooEarly.status).toBe(400); // not calculated yet
+
+    await request(app).post(`/api/bom/plans/${planId}/items`).set(authHeader(ppicToken)).send({ skuId, targetYield: 1000 });
+    const calc = await request(app).post(`/api/bom/plans/${planId}/calculate`).set(authHeader(ppicToken));
+    const lineCount = calc.body.result.lines.length;
+
+    const { token: plainToken } = await createUser([]);
+    const denied = await request(app).post(`/api/bom/plans/${planId}/send-to-pre-inventory`).set(authHeader(plainToken));
+    expect(denied.status).toBe(403);
+
+    const sent = await request(app).post(`/api/bom/plans/${planId}/send-to-pre-inventory`).set(authHeader(ppicToken));
+    expect(sent.status).toBe(201);
+    expect(sent.body.requirementsCreated).toBe(lineCount);
+
+    const requirements = await request(app).get("/api/inventory/requirements").set(authHeader(ppicToken));
+    expect(requirements.body.length).toBe(lineCount);
+    expect(requirements.body.every((r: { category: string; note: string }) => r.category === "PM" && r.note?.includes("Send Test Plan"))).toBe(true);
+  });
+
   it("rejects export before the plan has been calculated", async () => {
     const { token } = await createUser([]);
     const plan = await request(app).post("/api/bom/plans").set(authHeader(token)).send({ name: "Uncalculated Plan" });

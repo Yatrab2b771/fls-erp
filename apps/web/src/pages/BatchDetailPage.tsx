@@ -5,7 +5,7 @@ import { useAuth } from "../lib/auth";
 import { useBatch, useTransitionBatchStage } from "../lib/hooks";
 import { BATCH_STAGE_FIELDS, BATCH_STAGE_LABEL, BATCH_STAGE_ORDER, BATCH_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/batchStage";
 import { FieldGrid } from "../components/FieldGrid";
-import { DelayBadge } from "../components/Badges";
+import { DelayBadge, WastageBadge } from "../components/Badges";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ApiError, downloadFile } from "../lib/api";
@@ -52,6 +52,7 @@ export function BatchDetailPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl font-black tracking-tight text-slate-900">{batch.batchNo ?? batch.id.slice(0, 8)}</h1>
                 <DelayBadge delay={batch.delay} />
+                <WastageBadge wastage={batch.wastage} />
               </div>
               <p className="text-sm text-slate-500">
                 {batch.purchaseOrderItem.productName} · {po.customer.companyName}
