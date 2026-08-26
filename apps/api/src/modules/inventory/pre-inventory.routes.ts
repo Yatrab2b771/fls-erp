@@ -8,9 +8,11 @@ import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { getOnHandByItemId } from "./stock";
 import {
   createRequirementSchema,
+  importPurchaseLogSchema,
   importRequirementsSchema,
   setPurchaseSchema,
   type CreateRequirementInput,
+  type ImportPurchaseLogInput,
   type ImportRequirementsInput,
   type SetPurchaseInput,
 } from "./pre-inventory.schemas";
@@ -215,6 +217,79 @@ preInventoryRouter.post("/import", requireRole("PPIC"), validateBody(importRequi
   }
 });
 
+// Bulk PO logging — each row is matched to an existing, still-short,
+// not-yet-ordered requirement by item name + category (oldest first),
+// same eligibility rule as the single-item route below. A PO can't be
+// logged against something PPIC never asked for, so unmatched rows are
+// skipped and reported back rather than creating anything.
+preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBody(importPurchaseLogSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { rows } = req.body as ImportPurchaseLogInput;
+
+    const openRequirements = await prisma.preInventoryRequirement.findMany({
+      where: { purchaseAt: null },
+      include: { item: true },
+      orderBy: { createdAt: "asc" },
+    });
+    const onHand = await getOnHandByItemId([...new Set(openRequirements.map((r) => r.itemId))]);
+
+    const claimed = new Set<string>();
+    const matches: { requirement: (typeof openRequirements)[number]; poNumber: string; vendorName: string; eta: Date }[] = [];
+    const unmatched: string[] = [];
+
+    for (const row of rows) {
+      const candidate = openRequirements.find((r) => {
+        if (claimed.has(r.id) || r.category !== row.category || r.item.name !== row.itemName) return false;
+        const currentStock = onHand.get(r.itemId) ?? 0;
+        return currentStock < r.requiredQty; // still genuinely short, same gate as the single-item route
+      });
+      if (!candidate) {
+        unmatched.push(`${row.itemName} (${row.category})`);
+        continue;
+      }
+      claimed.add(candidate.id);
+      matches.push({ requirement: candidate, poNumber: row.poNumber, vendorName: row.vendorName, eta: row.eta });
+    }
+
+    if (matches.length > 0) {
+      await prisma.$transaction(
+        matches.map(({ requirement, poNumber, vendorName, eta }) =>
+          prisma.preInventoryRequirement.update({
+            where: { id: requirement.id },
+            data: { poNumber, vendorName, eta, purchaseById: req.user!.id, purchaseAt: new Date() },
+          }),
+        ),
+      );
+
+      await recordAudit({
+        actorId: req.user!.id,
+        action: "pre_inventory.purchase_logged_bulk",
+        entityType: "PreInventoryRequirement",
+        metadata: { posLogged: matches.length, unmatchedCount: unmatched.length },
+      });
+
+      await Promise.all([
+        ...matches.map(({ requirement, poNumber, vendorName, eta }) =>
+          notifyUser(requirement.requestedById, {
+            title: `PO logged for ${requirement.item.name}`,
+            body: `${poNumber} — ${vendorName}, ETA ${eta.toLocaleDateString()}`,
+            link: "/pre-inventory",
+          }).catch(notifyFailed(req, `pre_inventory.purchase_logged_bulk.requester.${requirement.id}`)),
+        ),
+        notifyRoles(
+          ["ACCOUNTS"],
+          { title: `${matches.length} new PO${matches.length === 1 ? "" : "s"} logged from a bulk import`, body: "Check Pre-Inventory for the vendor list.", link: "/pre-inventory" },
+          req.user!.id,
+        ).catch(notifyFailed(req, "pre_inventory.purchase_logged_bulk.accounts")),
+      ]);
+    }
+
+    res.status(201).json({ posLogged: matches.length, unmatched });
+  } catch (err) {
+    next(err);
+  }
+});
+
 preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(setPurchaseSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id }, include: { item: true } });
@@ -225,6 +300,13 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
     if (currentStock >= existing.requiredQty) return res.status(409).json({ error: "This requirement is already fully covered by current stock — nothing to order" });
 
     const { poNumber, vendorName, eta } = req.body as SetPurchaseInput;
+    // A PO can already be logged here — Purchase correcting a typo'd PO
+    // number, or re-quoting a different vendor, is a real workflow this
+    // route allows (unlike deleting the requirement, which is blocked
+    // once purchaseAt is set). Without recording what it looked like
+    // before, an overwrite would be indistinguishable from a first-time
+    // log in the audit trail — the old vendor/PO/ETA is just gone.
+    const isCorrection = !!existing.purchaseAt;
     const updated = await prisma.preInventoryRequirement.update({
       where: { id: req.params.id },
       data: { poNumber, vendorName, eta, purchaseById: req.user!.id, purchaseAt: new Date() },
@@ -233,10 +315,12 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
 
     await recordAudit({
       actorId: req.user!.id,
-      action: "pre_inventory.purchase_logged",
+      action: isCorrection ? "pre_inventory.purchase_corrected" : "pre_inventory.purchase_logged",
       entityType: "PreInventoryRequirement",
       entityId: updated.id,
-      metadata: { poNumber, vendorName, eta },
+      metadata: isCorrection
+        ? { poNumber, vendorName, eta, from: { poNumber: existing.poNumber, vendorName: existing.vendorName, eta: existing.eta } }
+        : { poNumber, vendorName, eta },
     });
 
     await Promise.all([

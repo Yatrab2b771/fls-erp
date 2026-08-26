@@ -23,5 +23,12 @@ export const loginRateLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: loginKey,
+  // Only failed logins should burn down the bucket — this is brute-force
+  // protection, not a cap on how often someone can legitimately sign in.
+  // Without this, switching between department accounts to test (or just
+  // a flaky connection making you log in a few times) eats the same
+  // 10-attempt budget as someone guessing a password, and locks out a
+  // real user for no security reason.
+  skipSuccessfulRequests: true,
   message: { error: "Too many login attempts — try again later." },
 });

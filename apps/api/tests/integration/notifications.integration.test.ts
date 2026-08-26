@@ -167,6 +167,10 @@ describe("Notification wiring — Inventory", () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+    await request(app)
+      .post("/api/inventory/transactions")
+      .set(authHeader(storeToken))
+      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
 
     const created = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
     const storeInbox = await notifsFor(storeToken);
@@ -177,7 +181,10 @@ describe("Notification wiring — Inventory", () => {
     expect(ppicInboxAfterReview.notifications.some((n) => n.title.toLowerCase().includes("approved"))).toBe(true);
     await request(app).post("/api/notifications/read-all").set(authHeader(ppicToken));
 
-    await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
+    await request(app)
+      .post(`/api/inventory/requests/${created.body.id}/issue`)
+      .set(authHeader(storeToken))
+      .send({ date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: null });
     const ppicInboxAfterIssue = await notifsFor(ppicToken);
     expect(ppicInboxAfterIssue.notifications.some((n) => n.title.includes("Issued"))).toBe(true);
   });

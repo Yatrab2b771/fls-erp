@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { AlarmClock, ArrowRight, Beaker, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
+import { AlarmClock, ArrowRight, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useBatches, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePurchaseOrders, useRmPlans } from "../lib/hooks";
+import { useBatches, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePoReadiness, usePurchaseOrders, useRmPlans } from "../lib/hooks";
 import { BATCH_STAGE_ROLE } from "../lib/batchStage";
 import { StatTile } from "../components/StatTile";
 import { DelayBadge, RequestStatusBadge, StageBadge } from "../components/Badges";
@@ -46,6 +46,11 @@ export function DashboardPage() {
   const { data: bomPlans } = useBomPlans();
   const { data: rmPlans } = useRmPlans();
   const { data: stock } = useInventoryStock();
+  // PO Readiness is PPIC-gated on the API (ADMIN bypasses) — BD is
+  // org-wide too but isn't PPIC, so this has to opt out for them
+  // specifically rather than reusing the broader orgWide flag.
+  const canSeePoReadiness = hasRole("PPIC");
+  const { data: poReadinessRows } = usePoReadiness(false, { enabled: canSeePoReadiness });
 
   // ADMIN, BD and PPIC run the whole order book (BD creates orders, PPIC
   // plans every batch off of them) — everyone else's job is a specific
@@ -117,6 +122,7 @@ export function DashboardPage() {
   const orgDelayed = allBatches.filter((b) => b.delay.isDelayed);
   const myDelayed = myQueueBatches.filter((b) => b.delay.isDelayed);
   const negativeStock = stock?.filter((s) => s.onHand < 0).length ?? 0;
+  const readyPoCount = poReadinessRows?.filter((r) => r.isReady).length ?? 0;
 
   const stageCounts = FLOW_STAGES.map((group) => ({
     ...group,
@@ -165,6 +171,11 @@ export function DashboardPage() {
             <StatTile icon={AlarmClock} label="Delayed" value={orgDelayed.length} accent="rose" />
             <StatTile icon={Package} label="BOM + RM Plans" value={(bomPlans?.length ?? 0) + (rmPlans?.length ?? 0)} accent="emerald" />
             <StatTile icon={Warehouse} label="Negative Stock" value={negativeStock} accent={negativeStock ? "rose" : "slate"} />
+            {canSeePoReadiness && (
+              <Link to="/po-readiness" className="block">
+                <StatTile icon={CheckCircle2} label="POs Ready to Execute" value={readyPoCount} accent={readyPoCount ? "emerald" : "slate"} />
+              </Link>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">

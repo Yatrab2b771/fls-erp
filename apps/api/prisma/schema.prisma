@@ -69,10 +69,14 @@ model User {
   notifications             Notification[]
   dayStoresCreated          DayStore[]                @relation("DayStoreCreatedBy")
   plantsCreated             Plant[]                   @relation("PlantCreatedBy")
+  batchConsumptionsLogged   BatchMaterialConsumption[]
   preInventoryRequested     PreInventoryRequirement[] @relation("PreInventoryRequirementRequestedBy")
   preInventoryPurchased     PreInventoryRequirement[] @relation("PreInventoryRequirementPurchaseBy")
   dispatchTransfersSent     DispatchTransfer[]        @relation("DispatchTransferDispatchedBy")
   dispatchTransfersInvoiced DispatchTransfer[]        @relation("DispatchTransferInvoicedBy")
+  dayStoreAssignments       DayStoreAssignment[]       @relation("DayStoreAssignmentUser")
+  dayStoreAssignmentsGranted DayStoreAssignment[]      @relation("DayStoreAssignmentAssignedBy")
+  poMaterialRequirementsAdded PoMaterialRequirement[]
 
   @@map("users")
 }
@@ -204,8 +208,45 @@ model PurchaseOrder {
   reviewedBy User?                   @relation("PurchaseOrderReviewedBy", fields: [reviewedById], references: [id])
   items      PurchaseOrderItem[]
   documents  PurchaseOrderDocument[]
+  materialRequirements PoMaterialRequirement[]
 
   @@map("purchase_orders")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10 — PO Material Readiness, from the PPIC requirement conversation
+// (2026-08-25): PPIC's team bulk-uploads, per PO, exactly which RM/PM items
+// and quantities that PO needs (a full CDMO plant can list 20-40 per PO,
+// hundreds of POs at once) — this is deliberately separate from
+// PreInventoryRequirement, which is an aggregate "we need this much of item
+// X across everything," with no PO attached. This table is the other shape:
+// "PO #123 specifically needs these N items," so readiness can be computed
+// per PO, not just per item. A PO is "ready" once every one of its rows has
+// enough live stock — computed on read (po-readiness.routes.ts), never
+// stored, same "never let a derived number drift out of sync" rule as
+// everywhere else in this schema.
+model PoMaterialRequirement {
+  id              String            @id @default(uuid())
+  purchaseOrderId String
+  itemId          String
+  category        InventoryCategory
+  requiredQty     Float
+  unit            String
+  createdById     String
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  item          InventoryItem @relation(fields: [itemId], references: [id])
+  createdBy     User          @relation(fields: [createdById], references: [id])
+
+  // One row per (PO, item) — re-uploading the same PO+item pair updates the
+  // quantity in place (a corrected sheet) instead of creating a duplicate
+  // line PPIC would have to notice and clean up themselves.
+  @@unique([purchaseOrderId, itemId])
+  @@index([purchaseOrderId])
+  @@index([itemId])
+  @@map("po_material_requirements")
 }
 
 // The uploaded PO as actually received — a photo or a PDF — kept
@@ -301,6 +342,14 @@ model Batch {
   batchNo             String?
   currentStageId      BatchStageId @default(PO_RELEASE)
 
+  // Which physical production Plant this batch runs at — set by PPIC,
+  // usually at creation. Optional (existing batches predate this field),
+  // but required before Dispensing can log real RM/PM consumption
+  // against it (see BatchMaterialConsumption below and
+  // stock.ts getOnHandByPlantAndItem) — a consumption line has to
+  // reduce *some* plant's balance, and there's no sane default.
+  plantId String?
+
   // PPIC — Indent Issue + Production Plan stages
   prodIndentSlipSign String?
   productionPlanDate DateTime?
@@ -369,10 +418,39 @@ model Batch {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+  purchaseOrderItem PurchaseOrderItem          @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
   stageEvents       BatchStageEvent[]
+  plant             Plant?                     @relation(fields: [plantId], references: [id])
+  consumptions      BatchMaterialConsumption[]
 
+  @@index([plantId])
   @@map("batches")
+}
+
+// One line per RM/PM item actually dispensed to a batch — logged by
+// Store at the Dispensing stage (see batches.routes.ts PATCH
+// /:id/stage). This is the "outflow" half of a real-time per-Plant
+// balance: getOnHandByPlantAndItem nets ISSUED_PRODUCTION quantity
+// arriving at a Plant (Inventory's existing tag, unchanged) against
+// these rows' quantity actually consumed there. Never edited/deleted —
+// same "it's a ledger entry, not a form field" reasoning as
+// InventoryTransaction.
+model BatchMaterialConsumption {
+  id          String   @id @default(uuid())
+  batchId     String
+  itemId      String
+  quantity    Float
+  unit        String
+  createdById String
+  createdAt   DateTime @default(now())
+
+  batch     Batch         @relation(fields: [batchId], references: [id])
+  item      InventoryItem @relation(fields: [itemId], references: [id])
+  createdBy User          @relation(fields: [createdById], references: [id])
+
+  @@index([batchId])
+  @@index([itemId])
+  @@map("batch_material_consumptions")
 }
 
 enum BatchStageAction {
@@ -668,6 +746,8 @@ model InventoryItem {
   transactions             InventoryTransaction[]
   requests                 InventoryRequest[]
   preInventoryRequirements PreInventoryRequirement[]
+  batchConsumptions        BatchMaterialConsumption[]
+  poMaterialRequirements   PoMaterialRequirement[]
 
   @@unique([category, name])
   @@map("inventory_items")
@@ -706,8 +786,32 @@ model DayStore {
 
   createdBy    User                   @relation("DayStoreCreatedBy", fields: [createdById], references: [id])
   transactions InventoryTransaction[]
+  assignments  DayStoreAssignment[]
 
   @@map("day_stores")
+}
+
+// Restricts which specific Day Store(s) a STORE-department user can
+// manage (issue to/from it, rename it) and view the stock of — PPIC and
+// ADMIN stay unrestricted regardless (see inventory/day-store-access.ts).
+// No rows for a user = unrestricted, same access as before this table
+// existed — a user only becomes scoped to specific stores once someone
+// explicitly assigns them, so every existing/seeded STORE user keeps
+// full access until an Admin or another Store member narrows it.
+// Many-to-many on purpose: one supervisor can reasonably run more than
+// one store.
+model DayStoreAssignment {
+  userId       String
+  dayStoreId   String
+  assignedAt   DateTime @default(now())
+  assignedById String?
+
+  user       User     @relation("DayStoreAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  dayStore   DayStore @relation(fields: [dayStoreId], references: [id], onDelete: Cascade)
+  assignedBy User?    @relation("DayStoreAssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@id([userId, dayStoreId])
+  @@map("day_store_assignments")
 }
 
 model Plant {
@@ -720,6 +824,7 @@ model Plant {
   transactions      InventoryTransaction[]
   requests          InventoryRequest[]
   dispatchTransfers DispatchTransfer[]
+  batches           Batch[]
 
   @@map("plants")
 }
@@ -881,6 +986,17 @@ model InventoryTransaction {
   // second stock ledger; stock-on-hand math never reads these.
   dayStoreId String?
   plantId    String?
+
+  // Traceability fields off Sanjay's physical stock sheets — batch/GRN
+  // identify *which* delivery or lot this row is, mfg/expiry track shelf
+  // life. All optional and free-standing (no expiry-driven logic anywhere
+  // yet — just captured so it's on record and doesn't need re-entry
+  // later). remark is a free-text note distinct from qcNote (QC's own).
+  batchNo    String?
+  grnNo      String?
+  mfgDate    DateTime?
+  expiryDate DateTime?
+  remark     String?
 
   item        InventoryItem @relation(fields: [itemId], references: [id])
   createdBy   User          @relation(fields: [createdById], references: [id])

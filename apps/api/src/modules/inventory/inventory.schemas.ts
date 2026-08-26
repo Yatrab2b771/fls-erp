@@ -31,6 +31,14 @@ export const createInventoryTransactionSchema = z.object({
   // One-time go-live migration flag — RECEIVED rows only. Skips inward
   // QC entirely (see schema.prisma comment on InventoryTransaction).
   isOpeningStock: z.boolean().optional(),
+  // Traceability off the physical stock sheet — batch/GRN/mfg/expiry —
+  // all optional, any transaction type (a batch can matter on an issue
+  // too, not just on receipt).
+  batchNo: z.string().max(100).optional(),
+  grnNo: z.string().max(100).optional(),
+  mfgDate: z.coerce.date().optional(),
+  expiryDate: z.coerce.date().optional(),
+  remark: z.string().max(500).optional(),
 });
 
 // One "FG transfer to Dispatch" / "Bill transfer to Dispatch from Accounts"
@@ -68,6 +76,12 @@ export const importInventoryTransactionsSchema = z.object({
   // per row (a single upload is either Sanjay's opening-stock snapshot
   // or it isn't). RECEIVED only, enforced at the route.
   isOpeningStock: z.boolean().optional(),
+  // Which Day Store this sheet's stock belongs to when the sheet doesn't
+  // carry its own per-row Day Store column — a default for the batch,
+  // same as picking it once on the manual Log Entry form's dropdown.
+  // Any row with its own dayStoreName overrides this. ISSUED_DAY_STORE
+  // only, enforced at the route.
+  dayStoreId: z.string().uuid().optional(),
   rows: z
     .array(
       z.object({
@@ -78,6 +92,20 @@ export const importInventoryTransactionsSchema = z.object({
         quantity: z.coerce.number().positive(),
         size: z.string().max(120).optional(),
         vendorName: z.string().max(200).optional(),
+        // Per-row Day Store, by name — lets one sheet mix rows for
+        // several stores (e.g. the app's own downloaded report shape,
+        // which has a Day Store column per row). Resolved/created by
+        // name server-side, same pattern as itemName. Falls back to the
+        // batch-level dayStoreId above when a row omits it.
+        dayStoreName: z.string().max(200).optional(),
+        // Same per-row traceability fields as a single manual entry —
+        // a real sheet mixes items with different batches/expiries, so
+        // these live per row, not once for the whole upload.
+        batchNo: z.string().max(100).optional(),
+        grnNo: z.string().max(100).optional(),
+        mfgDate: z.coerce.date().optional(),
+        expiryDate: z.coerce.date().optional(),
+        remark: z.string().max(500).optional(),
       }),
     )
     .min(1)
@@ -155,9 +183,14 @@ export const issueInventoryRequestSchema = z.object({
   unit: z.string().min(1).max(40),
   quantity: z.coerce.number().positive(),
   size: z.string().max(120).optional(),
-  // S7 — which Day Store is fulfilling this request, if it's coming via
-  // one rather than straight off central stock.
-  dayStoreId: z.string().uuid().optional(),
+  // Which Day Store this is coming out of — required (not optional) so
+  // real-time per-store balance (stock.ts getOnHandByDayStore) stays
+  // trustworthy. An omitted field used to silently mean "came from
+  // central stock," indistinguishable from Store simply forgetting to
+  // tag it. Now the choice must be explicit: null means central/
+  // Warehouse stock on purpose, a uuid means a specific Day Store — the
+  // key itself is required either way.
+  dayStoreId: z.string().uuid().nullable(),
 });
 
 // --- Quality Check gates — QA/QC checks, Store/Dispatch acts on the

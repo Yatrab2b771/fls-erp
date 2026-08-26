@@ -161,6 +161,61 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     expect(deleted.status).toBe(204);
   });
 
+  it("bulk-logs POs (S3), matching rows to open requirements by item + category, oldest first, skipping what's already covered or unmatched", async () => {
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: storeToken } = await createUser(["STORE"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const { token: accountsToken } = await createUser(["ACCOUNTS"]);
+
+    const denied = await request(app)
+      .post("/api/inventory/requirements/purchase/import")
+      .set(authHeader(ppicToken))
+      .send({ rows: [{ itemName: "Whey Protein", category: "RM", poNumber: "PO-1", vendorName: "Acme", eta: "2026-09-01" }] });
+    expect(denied.status).toBe(403);
+
+    // Two separate open requirements for the same item — the import
+    // should claim them in FIFO order, not double-book the first one.
+    const whey = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+    const req1 = await request(app).post("/api/inventory/requirements").set(authHeader(ppicToken)).send({ date: "2026-08-21", category: "RM", itemId: whey.body.id, unit: "Kg", requiredQty: 100 });
+    const req2 = await request(app).post("/api/inventory/requirements").set(authHeader(ppicToken)).send({ date: "2026-08-21", category: "RM", itemId: whey.body.id, unit: "Kg", requiredQty: 50 });
+
+    // A fully-covered requirement — the import should treat it like the
+    // single-item route does (409 there) and just skip it as unmatched.
+    const jar = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "PM", name: "Jar 1Kg" });
+    await request(app)
+      .post("/api/inventory/transactions")
+      .set(authHeader(storeToken))
+      .send({ itemId: jar.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Count", quantity: 500, isOpeningStock: true });
+    await request(app).post("/api/inventory/requirements").set(authHeader(ppicToken)).send({ date: "2026-08-21", category: "PM", itemId: jar.body.id, unit: "Count", requiredQty: 200 });
+
+    const imported = await request(app)
+      .post("/api/inventory/requirements/purchase/import")
+      .set(authHeader(purchaseToken))
+      .send({
+        rows: [
+          { itemName: "Whey Protein", category: "RM", poNumber: "PO-1", vendorName: "Acme", eta: "2026-09-01" },
+          { itemName: "Whey Protein", category: "RM", poNumber: "PO-2", vendorName: "Acme", eta: "2026-09-05" },
+          { itemName: "Jar 1Kg", category: "PM", poNumber: "PO-3", vendorName: "PackCo", eta: "2026-09-01" },
+          { itemName: "Nonexistent Item", category: "RM", poNumber: "PO-4", vendorName: "Nobody", eta: "2026-09-01" },
+        ],
+      });
+    expect(imported.status).toBe(201);
+    expect(imported.body.posLogged).toBe(2);
+    expect(imported.body.unmatched).toEqual(["Jar 1Kg (PM)", "Nonexistent Item (RM)"]);
+
+    const reqs = await request(app).get("/api/inventory/requirements?category=RM").set(authHeader(ppicToken));
+    const row1 = reqs.body.find((r: { id: string }) => r.id === req1.body.id);
+    const row2 = reqs.body.find((r: { id: string }) => r.id === req2.body.id);
+    expect(row1.poNumber).toBe("PO-1"); // older requirement got the first row
+    expect(row2.poNumber).toBe("PO-2");
+
+    const ppicInbox = await request(app).get("/api/notifications").set(authHeader(ppicToken));
+    expect(ppicInbox.body.notifications.filter((n: { title: string }) => n.title === "PO logged for Whey Protein")).toHaveLength(2);
+
+    const accountsInbox = await request(app).get("/api/notifications").set(authHeader(accountsToken));
+    expect(accountsInbox.body.notifications.some((n: { title: string }) => n.title.includes("2 new POs logged from a bulk import"))).toBe(true);
+  });
+
   it('"Stock Now Available" fires only on the 0→positive crossing, only when a requirement is actually waiting on it', async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: storeToken } = await createUser(["STORE"]);
@@ -257,7 +312,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
 
     const asPurchase = await request(app).get("/api/inventory/vendors").set(authHeader(purchaseToken));
     expect(asPurchase.status).toBe(200);
-    expect(asPurchase.body).toEqual(["PureCreatine Traders", "Sunrise Ingredients"]);
+    expect(asPurchase.body).toEqual({ vendors: ["PureCreatine Traders", "Sunrise Ingredients"], suggested: null });
   });
 
   it("paginates — both the plain list and the short=true derived-filter view slice correctly with a matching X-Total-Count", async () => {

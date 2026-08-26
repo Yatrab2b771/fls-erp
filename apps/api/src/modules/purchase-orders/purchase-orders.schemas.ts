@@ -45,7 +45,40 @@ export const reviewPurchaseOrderSchema = z
     path: ["rejectionReason"],
   });
 
+// Bulk upload — BD's own PO system export, one row per (PO, product)
+// pair, same shape the rest of the app's bulk imports use. Unlike the
+// manual form, poNumber and customerName are both required here:
+// poNumber is the only thing that groups several rows into one PO (a
+// real sheet lists every product line separately), and customerName is
+// resolved-or-created by name — BD already has standalone authority to
+// create customers by hand, so doing it inline here on a name match
+// isn't a new permission, just the same one exercised through a
+// different door.
+export const importPurchaseOrdersSchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        poNumber: z.string().min(1).max(120),
+        customerName: z.string().min(1).max(200),
+        brandName: z.string().max(200).optional(),
+        orderDate: dateField,
+        regulatoryBody: z.enum(REGULATORY_BODIES).optional(),
+        regulatoryStatus: z.enum(REGULATORY_STATUSES).optional(),
+        productName: z.string().min(1).max(200),
+        dosageForm: z.string().max(120).optional(),
+        quantity: z.coerce.number().positive(),
+        unit: z.string().min(1).max(40),
+        volume: z.coerce.number().positive().optional(),
+        packSize: z.string().max(120).optional(),
+        packType: z.string().max(120).optional(),
+      }),
+    )
+    .min(1)
+    .max(2000),
+});
+
 export type PurchaseOrderItemInput = z.infer<typeof purchaseOrderItemSchema>;
+export type ImportPurchaseOrdersInput = z.infer<typeof importPurchaseOrdersSchema>;
 export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>;
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;
 export type UpdatePurchaseOrderItemInput = z.infer<typeof updatePurchaseOrderItemSchema>;

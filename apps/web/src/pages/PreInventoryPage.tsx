@@ -1,10 +1,10 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { CheckCircle2, ClipboardList, Download, FileSpreadsheet, Package, Plus, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
+import { CheckCircle2, Clock, ClipboardList, Download, FileSpreadsheet, Package, Plus, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCreateInventoryItem, useCreateRequirement, useDeleteRequirement, useImportRequirements, useInventoryItems, useInventoryVendors, usePreInventoryRequirements, useSetRequirementPurchase } from "../lib/hooks";
+import { useCreateInventoryItem, useCreateRequirement, useDeleteRequirement, useImportPurchaseLog, useImportRequirements, useInventoryItems, useInventoryVendors, usePreInventoryRequirements, useSetRequirementPurchase } from "../lib/hooks";
 import type { InventoryCategory, PreInventoryRequirement } from "../lib/types";
-import { parseRequirementWorkbook } from "../lib/inventoryImport";
-import { downloadRequirementImportTemplate, exportRequirementsReport } from "../lib/inventoryExport";
+import { parsePurchaseLogWorkbook, parseRequirementWorkbook } from "../lib/inventoryImport";
+import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportPurchaseAgingReport, exportRequirementsReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -61,9 +61,11 @@ export function PreInventoryPage() {
 
   const { data: requirements, isLoading } = usePreInventoryRequirements(category ? { category } : undefined);
   const importRequirements = useImportRequirements();
+  const importPurchaseLog = useImportPurchaseLog();
   const toast = useToast();
 
   const importFileRef = useRef<HTMLInputElement>(null);
+  const importPurchaseFileRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => {
     if (!requirements) return requirements;
@@ -86,6 +88,15 @@ export function PreInventoryPage() {
     if (!filtered?.length) return toast.error("Nothing to export — no requirements match.");
     exportRequirementsReport(filtered);
     toast.success("Report downloaded.");
+  }
+
+  // Report #7 — PO logged with a vendor & ETA, material still short.
+  function handleExportPoAging() {
+    if (!filtered?.length) return toast.error("Nothing to export — no requirements match.");
+    const pending = filtered.filter((r) => !!r.poNumber && r.shortQty > 0);
+    if (!pending.length) return toast.error("Nothing pending — every logged PO has fully arrived.");
+    exportPurchaseAgingReport(filtered);
+    toast.success(`PO aging report downloaded — ${pending.length} still-short PO(s).`);
   }
 
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
@@ -112,6 +123,32 @@ export function PreInventoryPage() {
     }
   }
 
+  async function handleImportPurchaseFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !canPurchase) return;
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped, sheetNames, detectedHeaders } = parsePurchaseLogWorkbook(buffer, "RM");
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Pre-Inventory PO log import] No usable rows.", { fileName: file.name, fileSize: file.size, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Item + PO Number + Vendor Name + ETA together.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}) — is this the right file?`,
+        );
+      }
+      const result = await importPurchaseLog.mutateAsync({ rows });
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped)` : "";
+      const unmatchedNote = result.unmatched.length ? ` — no open requirement found for: ${result.unmatched.join(", ")}` : "";
+      if (result.posLogged > 0) toast.success(`Logged ${result.posLogged} PO${result.posLogged === 1 ? "" : "s"}${skippedNote}${unmatchedNote}.`);
+      else toast.error(`No matching open requirements found${unmatchedNote}.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -122,6 +159,9 @@ export function PreInventoryPage() {
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={handleExport} title="Download the vendor / requirement list as an Excel report">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
+          </button>
+          <button className="btn-ghost" onClick={handleExportPoAging} title="Requirements with a PO already logged, sorted by how long the material has been overdue">
+            <Clock className="h-3.5 w-3.5" strokeWidth={2.5} /> PO Aging
           </button>
           {canRequest && (
             <>
@@ -135,6 +175,17 @@ export function PreInventoryPage() {
               <button className="btn-primary" onClick={() => setShowNew((v) => !v)}>
                 <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> New Requirement
               </button>
+            </>
+          )}
+          {canPurchase && (
+            <>
+              <button className="btn-ghost" onClick={downloadPurchaseLogImportTemplate} title="Download a blank PO log template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download PO Sample
+              </button>
+              <button className="btn-ghost" disabled={importPurchaseLog.isPending} onClick={() => importPurchaseFileRef.current?.click()} title="Bulk-log POs against existing open requirements, matched by item + category">
+                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importPurchaseLog.isPending ? "Importing…" : "Import PO Log"}
+              </button>
+              <input ref={importPurchaseFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportPurchaseFile} />
             </>
           )}
         </div>
@@ -417,7 +468,7 @@ function RequirementCard({ requirement, canPurchase, isOwner }: { requirement: P
             <label className="label">Vendor Name</label>
             <input className="field" list={`po-vendor-options-${requirement.id}`} placeholder="Pick a known vendor or type a new one" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
             <datalist id={`po-vendor-options-${requirement.id}`}>
-              {vendors?.map((v) => (
+              {vendors?.vendors.map((v) => (
                 <option key={v} value={v} />
               ))}
             </datalist>

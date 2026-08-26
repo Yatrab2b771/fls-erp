@@ -1,11 +1,14 @@
-import { useState } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
-import { Download, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
+import { AlertTriangle, Clock, Download, FileSpreadsheet, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCreateCustomer, useCreatePurchaseOrder, useCustomers, usePurchaseOrders } from "../lib/hooks";
+import { useCreateCustomer, useCreatePurchaseOrder, useCustomers, useImportPurchaseOrders, usePurchaseOrders } from "../lib/hooks";
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
 import { ApiError, downloadFile } from "../lib/api";
+import type { PoWastageRejectionRow } from "../lib/types";
+import { exportPendingPoAgingReport, exportPurchaseOrdersReport, exportWastageRejectionReport } from "../lib/purchaseOrdersExport";
+import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -33,9 +36,13 @@ export function PurchaseOrdersPage() {
   const { hasRole } = useAuth();
   const { data: orders, isLoading } = usePurchaseOrders();
   const canCreate = hasRole("BD");
+  const toast = useToast();
 
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
+  const [wastageLoading, setWastageLoading] = useState(false);
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const importOrders = useImportPurchaseOrders();
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
   const totalBatches = orders?.reduce((sum, po) => sum + po.items.reduce((s, i) => s + (i._count?.batches ?? 0), 0), 0) ?? 0;
@@ -45,6 +52,71 @@ export function PurchaseOrdersPage() {
     (po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q) || (po.brandName ?? "").toLowerCase().includes(q),
   );
 
+  function handleExport() {
+    if (!filteredOrders?.length) return toast.error("Nothing to export — no purchase orders match.");
+    exportPurchaseOrdersReport(filteredOrders);
+    toast.success("Report downloaded — includes completion date and days taken for finished POs.");
+  }
+
+  // Report #1 — customer-wise pending PO list, with aging. Computed off
+  // the same full order list already loaded here, not a separate fetch.
+  function handleExportPendingAging() {
+    if (!orders?.length) return toast.error("Nothing to export — no purchase orders yet.");
+    exportPendingPoAgingReport(orders);
+    toast.success("Pending PO aging report downloaded, oldest first.");
+  }
+
+  // Report #6 — customer-wise, PO-wise wastage & rejection. This one
+  // does need its own fetch (Batch-level wastage/rejection figures
+  // aren't part of the list already loaded on this page).
+  async function handleExportWastage() {
+    setWastageLoading(true);
+    try {
+      const rows = await api<PoWastageRejectionRow[]>("/api/purchase-orders/reports/wastage-rejection");
+      if (!rows.length) return toast.error("Nothing to export — no batch has recorded wastage or rejection yet.");
+      exportWastageRejectionReport(rows);
+      toast.success(`Wastage & rejection report downloaded — ${rows.length} batch(es).`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not load the wastage & rejection report");
+    } finally {
+      setWastageLoading(false);
+    }
+  }
+
+  // Bulk PO creation — BD's own PO system export, straight to created
+  // (Draft) POs instead of retyping each one into the manual form.
+  // Rows sharing a PO Number become one PO with several product lines.
+  async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped, sheetNames, detectedHeaders } = parsePurchaseOrderWorkbook(buffer);
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Purchase Order import] No usable rows.", { fileName: file.name, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid PO Number + Customer + Product + Quantity + Unit together.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}).`,
+        );
+      }
+
+      const result = await importOrders.mutateAsync(rows);
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      const existingNote = result.skippedExisting.length
+        ? ` — ${result.skippedExisting.length} PO number${result.skippedExisting.length === 1 ? "" : "s"} already existed and ${result.skippedExisting.length === 1 ? "was" : "were"} skipped: ${result.skippedExisting.slice(0, 5).join(", ")}${result.skippedExisting.length > 5 ? ", …" : ""}`
+        : "";
+      toast.success(
+        `Created ${result.posCreated} purchase order(s), ${result.itemsCreated} product line(s)${result.customersCreated ? `, ${result.customersCreated} new customer(s) added` : ""}${skippedNote}.${existingNote} All landed as Draft — review and approve each one.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Import failed — check the file and try again.");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -52,17 +124,37 @@ export function PurchaseOrdersPage() {
           <h1 className="text-2xl font-black tracking-tight text-slate-900">Order Tracking</h1>
           <p className="text-sm text-slate-500">One PO can list several products — each becomes its own production tracker.</p>
         </div>
-        {canCreate && (
-          <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
-            {showForm ? (
-              <X className="h-4 w-4" strokeWidth={2.5} />
-            ) : (
-              <>
-                <Plus className="h-4 w-4" strokeWidth={2.5} /> New Purchase Order
-              </>
-            )}
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn-ghost" onClick={handleExport} title="Download the current list as an Excel report, including days-to-complete for finished POs">
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
           </button>
-        )}
+          <button className="btn-ghost" onClick={handleExportPendingAging} title="Customer-wise list of every PO still in progress, sorted oldest first">
+            <Clock className="h-3.5 w-3.5" strokeWidth={2.5} /> Pending PO Aging
+          </button>
+          <button className="btn-ghost" onClick={handleExportWastage} disabled={wastageLoading} title="Customer-wise, PO-wise production wastage and QC rejection">
+            <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} /> {wastageLoading ? "Loading…" : "Wastage & Rejection"}
+          </button>
+          {canCreate && (
+            <>
+              <button className="btn-ghost" onClick={downloadPurchaseOrderImportTemplate} title="Download a blank template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
+              </button>
+              <button className="btn-ghost" disabled={importOrders.isPending} onClick={() => importFileRef.current?.click()} title="Upload your own PO sheet — creates the PO(s) directly, no form to fill">
+                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importOrders.isPending ? "Importing…" : "Import Excel"}
+              </button>
+              <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
+              <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
+                {showForm ? (
+                  <X className="h-4 w-4" strokeWidth={2.5} />
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4" strokeWidth={2.5} /> New Purchase Order
+                  </>
+                )}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -95,6 +187,7 @@ export function PurchaseOrdersPage() {
                   <th className="text-center">Products</th>
                   <th>Order Date</th>
                   <th>Status</th>
+                  <th>Completion</th>
                   <th />
                 </tr>
               </thead>
@@ -112,6 +205,15 @@ export function PurchaseOrdersPage() {
                     <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
                     <td>
                       <PoStatusBadge status={po.status} />
+                    </td>
+                    <td>
+                      {po.completion.isCompleted ? (
+                        <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700" title={po.completion.completionDate ? `Shipped & confirmed ${new Date(po.completion.completionDate).toLocaleDateString()}` : undefined}>
+                          {po.completion.daysTaken !== null ? `Completed in ${po.completion.daysTaken}d` : "Completed"}
+                        </span>
+                      ) : (
+                        <span className="pill border-slate-200 bg-slate-50 text-slate-400">In progress</span>
+                      )}
                     </td>
                     <td className="text-right">
                       <button
@@ -153,6 +255,19 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // What's actually stopping submission right now, checked live as the
+  // user fills the form — not just after they click Create. Uploading
+  // the PO file is an attachment, not an auto-fill: it fills in nothing
+  // else on this form, which is exactly what caused the confusion this
+  // guards against (a file picked, everything else still blank, Create
+  // clicked expecting it to "just work").
+  const hasCustomer = showNewCustomer ? !!newCustomerName.trim() : !!customerId;
+  const hasProduct = items.some((item) => item.productName.trim() && item.quantity);
+  const missing: string[] = [];
+  if (!hasCustomer) missing.push("a customer");
+  if (!hasProduct) missing.push("at least one product with a name and quantity");
+  const canSubmit = missing.length === 0;
+
   function updateItem(index: number, patch: Partial<LineItemDraft>) {
     setItems((prev) => prev.map((item, i) => (i === index ? { ...item, ...patch } : item)));
   }
@@ -192,8 +307,16 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
     if (cleanItems.length === 0) return setError("Add at least one product with a name and quantity.");
 
     setSubmitting(true);
+
+    // Two separate steps against two separate failure points: creating the
+    // PO, then (only once that succeeded) attaching the file to it. Sharing
+    // one try/catch used to blame a failed upload on "could not create
+    // purchase order" — misleading, since the PO was already created by
+    // that point and sat there in the background, undetected, ready to be
+    // duplicated on a retry. Each step now reports its own outcome.
+    let order: Awaited<ReturnType<typeof createOrder.mutateAsync>>;
     try {
-      const order = await createOrder.mutateAsync({
+      order = await createOrder.mutateAsync({
         customerId: finalCustomerId,
         poNumber: poNumber.trim() || undefined,
         brandName: brandName.trim() || undefined,
@@ -202,29 +325,42 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
         regulatoryStatus: regulatoryStatus || undefined,
         items: cleanItems,
       });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not create purchase order");
+      setSubmitting(false);
+      return;
+    }
 
-      if (file) {
+    // The PO exists now no matter what happens below — always close the
+    // form and show it, rather than leaving the user staring at a form
+    // that looks unsubmitted while a PO has actually already been created.
+    if (file) {
+      try {
         // Upload after creation — the PO needs an id to attach the file to,
         // so this can't go through useUploadPoDocument's per-PO hook here.
         const form = new FormData();
         form.append("file", file);
         await api(`/api/purchase-orders/${order.id}/documents`, { method: "POST", body: form, isFormData: true });
+        toast.success(`Purchase order ${order.poNumber ?? order.id.slice(0, 8)} created with ${cleanItems.length} product(s) and the document attached.`);
+      } catch (err) {
+        const reason = err instanceof ApiError ? err.message : "the document could not be attached";
+        toast.error(`Purchase order ${order.poNumber ?? order.id.slice(0, 8)} was created, but ${reason}. Open it and attach the file from there.`);
       }
-
+    } else {
       toast.success(`Purchase order ${order.poNumber ?? order.id.slice(0, 8)} created with ${cleanItems.length} product(s).`);
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create purchase order");
-    } finally {
-      setSubmitting(false);
     }
+
+    setSubmitting(false);
+    onDone();
   }
 
   return (
     <div className="card animate-slide-up space-y-5 p-5 sm:p-6">
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
-          <label className="label">Customer</label>
+          <label className="label">
+            Customer <span className="text-rose-500">*</span>
+          </label>
           {!showNewCustomer ? (
             <div className="flex gap-2">
               <select className="field" value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
@@ -281,7 +417,9 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
 
       <div>
         <div className="mb-2 flex items-center justify-between">
-          <label className="label !mb-0">Products on this PO</label>
+          <label className="label !mb-0">
+            Products on this PO <span className="text-rose-500">*</span>
+          </label>
           <button type="button" className="btn-ghost btn-sm" onClick={() => setItems((prev) => [...prev, blankItem()])}>
             <Plus className="h-3 w-3" strokeWidth={2.5} /> Add More
           </button>
@@ -348,11 +486,23 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
+      {/* Attaching a file doesn't fill in Customer/Product — this says so
+          up front, before Create gets clicked and errors on it. */}
+      {!canSubmit && !error && (
+        <p className="text-xs font-semibold text-slate-400">Still needed to create this PO: {missing.join(" and ")}.</p>
+      )}
+
       <div className="flex justify-end gap-2">
         <button type="button" className="btn-ghost" onClick={onDone}>
           Cancel
         </button>
-        <button type="button" className="btn-primary" disabled={submitting} onClick={handleSubmit}>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={submitting || !canSubmit}
+          onClick={handleSubmit}
+          title={!canSubmit ? `Still needed: ${missing.join(" and ")}` : undefined}
+        >
           {submitting ? "Creating…" : "Create Purchase Order"}
         </button>
       </div>

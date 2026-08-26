@@ -11,6 +11,7 @@ import { PackagingBomPage } from "./pages/PackagingBomPage";
 import { RmCostingPage } from "./pages/RmCostingPage";
 import { InventoryPage } from "./pages/InventoryPage";
 import { PreInventoryPage } from "./pages/PreInventoryPage";
+import { PoReadinessPage } from "./pages/PoReadinessPage";
 import { UsersPage } from "./pages/UsersPage";
 
 export default function App() {
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/rm-costing" element={<RmCostingPage />} />
           <Route path="/inventory" element={<InventoryPage />} />
           <Route path="/pre-inventory" element={<PreInventoryPage />} />
+          <Route path="/po-readiness" element={<PoReadinessPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

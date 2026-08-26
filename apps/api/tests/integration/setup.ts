@@ -51,11 +51,18 @@ beforeEach(async () => {
     prisma.inventoryTransaction.deleteMany(),
     prisma.inventoryRequest.deleteMany(),
     prisma.preInventoryRequirement.deleteMany(),
+    // Both reference Batch (and consumption also references
+    // InventoryItem) — must go before batch/dayStore/plant/inventoryItem
+    // below, same RESTRICT-FK reasoning as everything else in this list.
+    prisma.batchMaterialConsumption.deleteMany(),
+    prisma.batchStageEvent.deleteMany(),
+    prisma.batch.deleteMany(),
+    // References both InventoryItem and PurchaseOrder — must go before
+    // both are cleared below, same RESTRICT-FK reasoning.
+    prisma.poMaterialRequirement.deleteMany(),
     prisma.dayStore.deleteMany(),
     prisma.plant.deleteMany(),
     prisma.inventoryItem.deleteMany(),
-    prisma.batchStageEvent.deleteMany(),
-    prisma.batch.deleteMany(),
     prisma.purchaseOrderDocument.deleteMany(),
     prisma.purchaseOrderItem.deleteMany(),
     prisma.purchaseOrder.deleteMany(),

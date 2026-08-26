@@ -27,6 +27,9 @@ describe("POST /api/auth/register + login", () => {
 
 describe("POST /api/auth/login rate limiting", () => {
   it("is keyed by IP + email together, not IP alone — exhausting one account's attempts doesn't lock out a different account from the same IP", async () => {
+    // Each iteration is a real bcrypt.compare at cost 12 (by design — not
+    // something to weaken for test speed), so 10+ of them sequentially
+    // routinely runs past vitest's 5s default.
     await request(app).post("/api/auth/register").send({ email: "victim@fls.test", password: "SuperSecret123", fullName: "Victim" });
     await request(app).post("/api/auth/register").send({ email: "bystander@fls.test", password: "SuperSecret123", fullName: "Bystander" });
 
@@ -46,7 +49,21 @@ describe("POST /api/auth/login rate limiting", () => {
     // source IP in this harness) is completely unaffected.
     const bystander = await request(app).post("/api/auth/login").send({ email: "bystander@fls.test", password: "SuperSecret123" });
     expect(bystander.status).toBe(200);
-  });
+  }, 15000);
+
+  it("doesn't count successful logins against the limit — only failed ones", async () => {
+    await request(app).post("/api/auth/register").send({ email: "repeat-login@fls.test", password: "SuperSecret123", fullName: "Repeat Login" });
+
+    // Logging in correctly more than 10 times in the window (e.g. testing
+    // multiple department accounts, or just re-logging in a lot) must
+    // never trip the limit — only actual failed attempts should.
+    let lastStatus = 0;
+    for (let i = 0; i < 15; i++) {
+      const res = await request(app).post("/api/auth/login").send({ email: "repeat-login@fls.test", password: "SuperSecret123" });
+      lastStatus = res.status;
+    }
+    expect(lastStatus).toBe(200);
+  }, 15000);
 });
 
 describe("GET /api/auth/me", () => {

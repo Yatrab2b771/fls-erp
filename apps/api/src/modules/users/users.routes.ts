@@ -45,11 +45,21 @@ usersRouter.post("/:userId/roles", requireRole("ADMIN"), validateBody(grantRoleS
     const roleRow = await prisma.role.findUnique({ where: { name: role } });
     if (!roleRow) return res.status(400).json({ error: `Unknown role: ${role}` });
 
-    await prisma.userRole.upsert({
-      where: { userId_roleId: { userId, roleId: roleRow.id } },
-      create: { userId, roleId: roleRow.id, grantedBy: req.user!.id },
-      update: {},
-    });
+    await prisma.$transaction([
+      prisma.userRole.upsert({
+        where: { userId_roleId: { userId, roleId: roleRow.id } },
+        create: { userId, roleId: roleRow.id, grantedBy: req.user!.id },
+        update: {},
+      }),
+      // requireAuth checks tokenVersion live against the DB, but the
+      // `roles` array itself comes straight from the JWT payload minted
+      // at login — never re-checked. Without this bump, a role granted
+      // here wouldn't actually work until the user's next login (their
+      // current token still carries the old, roleless roles array), the
+      // same "why doesn't my new permission work" gap password-reset/
+      // deactivate already close for those cases.
+      prisma.user.update({ where: { id: userId }, data: { tokenVersion: { increment: 1 } } }),
+    ]);
 
     await recordAudit({ actorId: req.user!.id, action: "user.role_granted", entityType: "User", entityId: userId, metadata: { role } });
 
@@ -128,7 +138,14 @@ usersRouter.delete("/:userId/roles/:role", requireRole("ADMIN"), async (req: Aut
     const roleRow = await prisma.role.findUnique({ where: { name: role as RoleName } });
     if (!roleRow) return res.status(400).json({ error: `Unknown role: ${role}` });
 
-    await prisma.userRole.deleteMany({ where: { userId, roleId: roleRow.id } });
+    // Same tokenVersion bump as granting a role, and for the same
+    // reason it matters more here: without it, a revoked role stays
+    // fully usable on the user's existing token — the `roles` array
+    // requireRole checks is never re-fetched, only tokenVersion/isActive
+    // are — so this is what actually makes a revocation take effect
+    // immediately instead of silently waiting out the token's natural
+    // expiry.
+    await prisma.$transaction([prisma.userRole.deleteMany({ where: { userId, roleId: roleRow.id } }), prisma.user.update({ where: { id: userId }, data: { tokenVersion: { increment: 1 } } })]);
 
     await recordAudit({ actorId: req.user!.id, action: "user.role_revoked", entityType: "User", entityId: userId, metadata: { role } });
 

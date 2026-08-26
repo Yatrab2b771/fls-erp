@@ -70,6 +70,79 @@ export interface PurchaseOrder {
   customer: { id: string; companyName: string };
   items: PurchaseOrderItem[];
   documents: PurchaseOrderDocument[];
+  // Computed on every read, never stored — see purchase-orders.routes.ts
+  // computeCompletion. "Completed" = every Batch on every line item has
+  // reached DISPATCH_PLAN with a recorded customer confirmation, same
+  // definition the Dashboard's own active-batch count already uses.
+  completion: { isCompleted: boolean; completionDate: string | null; daysTaken: number | null };
+}
+
+// Bulk PO import result (POST /api/purchase-orders/import) — every
+// created PO lands as DRAFT, same review step as the manual form.
+export interface ImportPurchaseOrdersResult {
+  posCreated: number;
+  itemsCreated: number;
+  customersCreated: number;
+  skippedExisting: string[]; // PO numbers that already existed — not touched
+}
+
+// --- PO Material Readiness — from the PPIC requirement conversation
+// (2026-08-25). See PoMaterialRequirement in schema.prisma for the full
+// business context: PPIC bulk-uploads, per PO, exactly which RM/PM
+// items and quantities that PO needs; this is the live, computed
+// readiness view built off that plus the existing stock ledger. ---
+
+export interface PoReadinessItem {
+  itemId: string;
+  itemName: string;
+  category: InventoryCategory;
+  requiredQty: number;
+  unit: string;
+  onHand: number;
+  covered: boolean;
+}
+
+export interface PoReadinessRow {
+  purchaseOrder: { id: string; poNumber: string | null; brandName: string | null; status: PurchaseOrderStatus; customer: { id: string; companyName: string } };
+  items: PoReadinessItem[];
+  totalItems: number;
+  readyItems: number;
+  isReady: boolean;
+}
+
+export interface ImportPoRequirementsResult {
+  rowsImported: number;
+  itemsCreated: number;
+  unmatchedPoNumbers: string[];
+}
+
+// Report — customer-wise, PO-wise wastage & rejection (GET
+// /api/purchase-orders/reports/wastage-rejection). One row per Batch
+// that's actually recorded a wastage or rejection figure; wastageQty is
+// recomputed server-side the same way Batch.wastage always is
+// (inputQty - outputQty), mfgRejectedQty is QC's own stored number.
+export interface PoWastageRejectionRow {
+  customerName: string;
+  poNumber: string;
+  productName: string;
+  batchNo: string | null;
+  unit: string | null;
+  inputQty: number | null;
+  outputQty: number | null;
+  wastageQty: number | null;
+  mfgRejectedQty: number | null;
+}
+
+// Report — one RM/PM item's stock split by location (GET
+// /api/inventory/items/:id/stock-by-location). Same balances stock.ts
+// already computes per-location, just gathered for a single item across
+// every Day Store and Plant in one response instead of one location
+// across every item.
+export interface ItemStockByLocation {
+  item: InventoryItem;
+  warehouse: number;
+  dayStores: { id: string; name: string; receivedFromWarehouse: number; issuedToProduction: number; onHand: number }[];
+  plants: { id: string; name: string; onHand: number }[];
 }
 
 // The Batch pipeline stages — the flow given directly by the business
@@ -172,6 +245,22 @@ export interface Batch {
   stageEvents: BatchStageEvent[];
   delay: BatchDelay;
   wastage: BatchWastage;
+  // Which physical Plant this batch runs at — set by PPIC, usually at
+  // creation. Needed before Dispensing can log real consumptions below.
+  plantId: string | null;
+  plant: { id: string; name: string } | null;
+  // Real RM/PM consumption logged at Dispensing — reduces the Plant's
+  // real-time balance (see stock.ts getOnHandByPlantAndItem on the API
+  // side). Never edited/deleted, same as InventoryTransaction.
+  consumptions: {
+    id: string;
+    itemId: string;
+    quantity: number;
+    unit: string;
+    createdAt: string;
+    item: InventoryItem;
+    createdBy: { fullName: string; email: string };
+  }[];
 }
 
 // --- Packaging BOM module ---
@@ -372,6 +461,27 @@ export interface Plant {
   createdAt: string;
 }
 
+// One row = one STORE user scoped to this Store — see DayStoreAssignment
+// in schema.prisma. No rows for a store's user means unrestricted, not
+// "assigned to nothing"; this list is only ever the *narrowing* rows.
+export interface DayStoreAssignment {
+  userId: string;
+  dayStoreId: string;
+  assignedAt: string;
+  user: PersonRef;
+  assignedBy: PersonRef | null;
+}
+
+// The assignable pool for a Store assignment picker — every user who
+// currently holds the STORE role, nothing more (not the full admin user
+// directory GET /api/users returns). See locations.routes.ts GET
+// /day-stores/store-users.
+export interface StoreUser {
+  id: string;
+  employeeId: number;
+  fullName: string;
+}
+
 export interface InventoryTransaction {
   id: string;
   itemId: string;
@@ -404,6 +514,12 @@ export interface InventoryTransaction {
   // full REJECT leaves this null (receiptStatus = QC_REJECTED already
   // says 100%).
   rejectedQty: number | null;
+  // Traceability off the physical stock sheet — all optional.
+  batchNo: string | null;
+  grnNo: string | null;
+  mfgDate: string | null;
+  expiryDate: string | null;
+  remark: string | null;
 }
 
 export interface InventoryStockLine {
@@ -415,6 +531,28 @@ export interface InventoryStockLine {
   issuedDayStoreQty: number;
   issuedProductionQty: number;
   issuedQty: number;
+  onHand: number;
+}
+
+// Real-time balance for one Day Store — see stock.ts
+// getOnHandByDayStoreAndItem. Two legs, not just their net: how much the
+// Warehouse has issued to this store, and how much this store has in
+// turn issued on to Production — a Day Store never receives directly
+// from a vendor, so there's no separate "received" figure the way the
+// Warehouse-wide InventoryStockLine has.
+export interface DayStoreStockLine {
+  item: InventoryItem;
+  receivedFromWarehouse: number;
+  issuedToProduction: number;
+  onHand: number;
+}
+
+// Real-time balance for one Plant — see stock.ts
+// getOnHandByPlantAndItem. Same shape as DayStoreStockLine; the outflow
+// side just comes from Batches (BatchMaterialConsumption) instead of
+// another Inventory transaction type.
+export interface PlantStockLine {
+  item: InventoryItem;
   onHand: number;
 }
 
@@ -452,6 +590,21 @@ export interface DispatchTransfer {
   invoicedById: string | null;
   invoicedAt: string | null;
   invoicedBy: PersonRef | null;
+}
+
+// Customer stock reconciliation (GET
+// /api/inventory/reports/customer-reconciliation) — one row per customer,
+// FG dispatches only. "Dispatched" = Dispatch has confirmed it actually
+// went out; "Invoiced" = Accounts has raised an invoice against it;
+// outstanding is the gap Finance is actually chasing.
+export interface CustomerReconciliationRow {
+  customerName: string;
+  dispatchedQty: number;
+  dispatchedCount: number;
+  invoicedQty: number;
+  invoicedCount: number;
+  outstandingQty: number;
+  outstandingCount: number;
 }
 
 // --- Material Requests (indents) — the department-wise gate: PPIC

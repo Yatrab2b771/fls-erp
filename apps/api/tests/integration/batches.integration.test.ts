@@ -138,6 +138,147 @@ describe("PATCH /api/batches/:id/stage — full forward walk", () => {
   });
 });
 
+describe("Batch Plant + real-time per-Plant balance", () => {
+  it("requires a Plant before Dispensing can log consumption; consumption reduces the Plant's balance against ISSUED_PRODUCTION inflow", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const { token: storeToken } = await createUser(["STORE"]);
+
+    const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+    await request(app)
+      .post("/api/inventory/transactions")
+      .set(authHeader(storeToken))
+      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+
+    // Batch created with NO plant — walk it up to Dispensing.
+    const itemId1 = await createApprovedPoItem(bdToken);
+    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId1 });
+    const batchId = batch.body.id;
+    expect(batch.body.plantId).toBeNull();
+
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(purchaseToken)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" });
+
+    const check = await request(app).get(`/api/batches/${batchId}`).set(authHeader(storeToken));
+    expect(check.body.currentStageId).toBe("DISPENSING");
+
+    // No plant assigned yet — logging consumption is blocked.
+    const blockedNoPlant = await request(app)
+      .patch(`/api/batches/${batchId}/stage`)
+      .set(authHeader(storeToken))
+      .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 5, unit: "Kg" }] });
+    expect(blockedNoPlant.status).toBe(400);
+
+    // Assign the plant (PPIC's call), then unknown-item consumption is rejected too.
+    const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant Alpha" });
+    const deniedPlantAssign = await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(storeToken)).send({ plantId: plant.body.id });
+    expect(deniedPlantAssign.status).toBe(403); // PPIC-only
+
+    const assigned = await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
+    expect(assigned.status).toBe(200);
+    expect(assigned.body.plant.name).toBe("Plant Alpha");
+
+    const badItem = await request(app)
+      .patch(`/api/batches/${batchId}/stage`)
+      .set(authHeader(storeToken))
+      .send({ action: "FORWARD", consumption: [{ itemId: "00000000-0000-0000-0000-000000000000", quantity: 5, unit: "Kg" }] });
+    expect(badItem.status).toBe(400);
+
+    // Give the plant some inflow first, via the normal Material Request -> issue flow.
+    const req1 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 50, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
+    await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+    await request(app).post(`/api/inventory/requests/${req1.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-22", unit: "Kg", quantity: 50, dayStoreId: null });
+
+    const beforeConsumption = await request(app).get(`/api/inventory/plants/${plant.body.id}/stock`).set(authHeader(storeToken));
+    expect(beforeConsumption.body.stock).toEqual([expect.objectContaining({ onHand: 50 })]);
+
+    // Now log real consumption at Dispensing — this is the actual point of the feature.
+    const dispensed = await request(app)
+      .patch(`/api/batches/${batchId}/stage`)
+      .set(authHeader(storeToken))
+      .send({ action: "FORWARD", rmDispensingDate: "2026-08-22", consumption: [{ itemId: item.body.id, quantity: 18, unit: "Kg" }] });
+    expect(dispensed.status).toBe(200);
+    expect(dispensed.body.currentStageId).toBe("PRODUCTION_EXECUTION");
+    expect(dispensed.body.consumptions).toHaveLength(1);
+    expect(dispensed.body.consumptions[0]).toMatchObject({ itemId: item.body.id, quantity: 18, unit: "Kg" });
+
+    const afterConsumption = await request(app).get(`/api/inventory/plants/${plant.body.id}/stock`).set(authHeader(storeToken));
+    expect(afterConsumption.body.stock).toEqual([expect.objectContaining({ onHand: 32 })]); // 50 - 18
+
+    // A second, unrelated Plant with no activity at all shows an empty stock list, not the whole catalog.
+    const otherPlant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant Beta" });
+    const otherStock = await request(app).get(`/api/inventory/plants/${otherPlant.body.id}/stock`).set(authHeader(storeToken));
+    expect(otherStock.body.stock).toEqual([]);
+  });
+
+  it("blocks logging more RM/PM consumption than the batch's Plant has actually received, even mid-pipeline", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const { token: storeToken } = await createUser(["STORE"]);
+
+    const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
+    await request(app)
+      .post("/api/inventory/transactions")
+      .set(authHeader(storeToken))
+      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+
+    const itemId1 = await createApprovedPoItem(bdToken);
+    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId1 });
+    const batchId = batch.body.id;
+
+    const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant Gamma" });
+    await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
+
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(purchaseToken)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" });
+
+    // Only 10 Kg ever makes it to this Plant.
+    const req1 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
+    await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+    await request(app).post(`/api/inventory/requests/${req1.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-22", unit: "Kg", quantity: 10, dayStoreId: null });
+
+    // Trying to log 20 Kg of consumption — more than the 10 this Plant actually has — is rejected.
+    const overConsume = await request(app)
+      .patch(`/api/batches/${batchId}/stage`)
+      .set(authHeader(storeToken))
+      .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 20, unit: "Kg" }] });
+    expect(overConsume.status).toBe(409);
+    expect(overConsume.body.error).toMatch(/Whey Protein/);
+
+    // Nothing moved — batch is still at DISPENSING, no consumption row was written, Plant balance is untouched.
+    const stillDispensing = await request(app).get(`/api/batches/${batchId}`).set(authHeader(storeToken));
+    expect(stillDispensing.body.currentStageId).toBe("DISPENSING");
+    expect(stillDispensing.body.consumptions).toHaveLength(0);
+    const plantStock = await request(app).get(`/api/inventory/plants/${plant.body.id}/stock`).set(authHeader(storeToken));
+    expect(plantStock.body.stock).toEqual([expect.objectContaining({ onHand: 10 })]);
+
+    // Exactly what's available goes through fine.
+    const okConsume = await request(app)
+      .patch(`/api/batches/${batchId}/stage`)
+      .set(authHeader(storeToken))
+      .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 10, unit: "Kg" }] });
+    expect(okConsume.status).toBe(200);
+    expect(okConsume.body.currentStageId).toBe("PRODUCTION_EXECUTION");
+
+    // Once real consumption is logged against this Plant, it's locked —
+    // reassigning (or clearing) it would silently rewrite which Plant's
+    // balance that consumption counts against.
+    const otherPlant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant Delta" });
+    const reassignBlocked = await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(ppicToken)).send({ plantId: otherPlant.body.id });
+    expect(reassignBlocked.status).toBe(409);
+    const clearBlocked = await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(ppicToken)).send({ plantId: null });
+    expect(clearBlocked.status).toBe(409);
+
+    // Re-confirming the *same* plant it's already on is a no-op, not a reassignment — that stays allowed.
+    const sameSuccess = await request(app).patch(`/api/batches/${batchId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
+    expect(sameSuccess.status).toBe(200);
+  });
+});
+
 describe("Wastage & quality rejection — Production Execution / QA Gate Mfg", () => {
   it("Production logs input/output at Production Execution; the batch response carries the derived wastage", async () => {
     const { token: bdToken } = await createUser(["BD"]);

@@ -10,7 +10,30 @@ const ITEM_COLUMNS = ["Item", "Item Name", "Material", "Material Name"];
 const UNIT_COLUMNS = ["Unit"];
 const QUANTITY_COLUMNS = ["Count", "Quantity", "Qty"];
 const SIZE_COLUMNS = ["Size"];
-const VENDOR_COLUMNS = ["Vendor Name", "Vendor", "Supplier"];
+// "Vendor / Note" is the literal header on the app's own downloaded
+// report (inventoryExport.ts exportTransactionReport) — recognized here
+// too so a report round-trips back in as an import.
+const VENDOR_COLUMNS = ["Vendor Name", "Vendor", "Supplier", "Vendor / Note"];
+const BATCH_COLUMNS = ["Batch No", "Batch No.", "Batch", "Batch Number"];
+const GRN_COLUMNS = ["GRN No", "GRN No.", "GRN", "GRN Number"];
+const MFG_DATE_COLUMNS = ["Mfg Date", "Mfg. Date", "Manufacturing Date", "MFD"];
+const EXPIRY_DATE_COLUMNS = ["Expiry Date", "Exp Date", "Exp. Date", "Expiry"];
+const REMARK_COLUMNS = ["Remark", "Remarks", "Note", "Notes"];
+// Which Day Store this row belongs to, by name — lets one sheet mix rows
+// for several stores (e.g. the app's own downloaded report, which has a
+// Day Store column per row) instead of requiring one sheet per store.
+const DAY_STORE_COLUMNS = ["Day Store", "Store", "Store Name"];
+
+// Accepts both the short codes the rest of the app uses (RM/PM) and the
+// full labels the app's own downloaded report prints (Raw Material /
+// Packaging Material) — so that report round-trips back in as an import
+// without the category silently falling back to defaultCategory.
+function normalizeCategory(text: string | undefined, fallback: "RM" | "PM"): "RM" | "PM" {
+  const t = text?.trim().toUpperCase();
+  if (t === "RM" || t === "RAW MATERIAL" || t === "RAW") return "RM";
+  if (t === "PM" || t === "PACKAGING MATERIAL" || t === "PACKING MATERIAL" || t === "PACKAGING" || t === "PACKING") return "PM";
+  return fallback;
+}
 
 function firstNonEmpty(row: Record<string, unknown>, keys: string[]): unknown {
   for (const k of keys) {
@@ -55,6 +78,16 @@ export interface ImportInventoryRow {
   quantity: number;
   size?: string;
   vendorName?: string;
+  batchNo?: string;
+  grnNo?: string;
+  mfgDate?: string;
+  expiryDate?: string;
+  remark?: string;
+  // Which Day Store this row is for, by name — set when the sheet has its
+  // own Day Store column (e.g. the app's downloaded report format).
+  // Falls back to whatever's picked in the toolbar dropdown when absent,
+  // so a single-store sheet (no Day Store column) still works as before.
+  dayStoreName?: string;
 }
 
 export interface ParsedInventoryImport {
@@ -96,8 +129,10 @@ export function parseInventoryTransactionWorkbook(buffer: ArrayBuffer, defaultCa
         continue;
       }
 
-      const categoryText = asText(row, CATEGORY_COLUMNS)?.toUpperCase();
-      const category: "RM" | "PM" = categoryText === "RM" || categoryText === "PM" ? categoryText : defaultCategory;
+      const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
+
+      const mfgDateRaw = firstNonEmpty(row, MFG_DATE_COLUMNS);
+      const expiryDateRaw = firstNonEmpty(row, EXPIRY_DATE_COLUMNS);
 
       rows.push({
         category,
@@ -107,6 +142,12 @@ export function parseInventoryTransactionWorkbook(buffer: ArrayBuffer, defaultCa
         quantity,
         size: asText(row, SIZE_COLUMNS),
         vendorName: asText(row, VENDOR_COLUMNS),
+        batchNo: asText(row, BATCH_COLUMNS),
+        grnNo: asText(row, GRN_COLUMNS),
+        mfgDate: mfgDateRaw !== undefined ? parseDate(mfgDateRaw) : undefined,
+        expiryDate: expiryDateRaw !== undefined ? parseDate(expiryDateRaw) : undefined,
+        remark: asText(row, REMARK_COLUMNS),
+        dayStoreName: asText(row, DAY_STORE_COLUMNS),
       });
     }
   }
@@ -128,7 +169,11 @@ function parsePurpose(value: unknown): "ISSUED_PRODUCTION" | "ISSUED_DAY_STORE" 
   const text = String(value ?? "")
     .trim()
     .toLowerCase();
-  if (text.includes("day store") || text.includes("day_store")) return "ISSUED_DAY_STORE";
+  // Matches "Store", "Day Store", "day_store" — every label this column
+  // has ever used, old exports and the current "Issued to Store" wording
+  // alike, all containing "store" as a substring. "Issued to Production"
+  // never does, so this stays unambiguous.
+  if (text.includes("store")) return "ISSUED_DAY_STORE";
   return "ISSUED_PRODUCTION"; // default — the common case, and what a blank/unrecognized cell means
 }
 
@@ -167,8 +212,7 @@ export function parseInventoryRequestWorkbook(buffer: ArrayBuffer, defaultCatego
         continue;
       }
 
-      const categoryText = asText(row, CATEGORY_COLUMNS)?.toUpperCase();
-      const category: "RM" | "PM" = categoryText === "RM" || categoryText === "PM" ? categoryText : defaultCategory;
+      const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
       const neededByRaw = firstNonEmpty(row, NEEDED_BY_COLUMNS);
 
       rows.push({
@@ -232,8 +276,7 @@ export function parseRequirementWorkbook(buffer: ArrayBuffer, defaultCategory: "
         continue;
       }
 
-      const categoryText = asText(row, CATEGORY_COLUMNS)?.toUpperCase();
-      const category: "RM" | "PM" = categoryText === "RM" || categoryText === "PM" ? categoryText : defaultCategory;
+      const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
 
       rows.push({ date, category, itemName, unit, requiredQty, size: asText(row, SIZE_COLUMNS), note: asText(row, NOTE_COLUMNS) });
     }
@@ -246,6 +289,59 @@ export function parseRequirementWorkbook(buffer: ArrayBuffer, defaultCategory: "
 // manual Warehouse entry — it's read live off the real stock ledger
 // (see pre-inventory.routes.ts) — so there's no availability import to
 // parse any more.
+
+// --- Pre-Inventory PO log bulk import (S3) — one row per PO, matched
+// server-side to an existing, still-open requirement by item name +
+// category. No Date/Unit column here (a PO isn't a delivery), but PO
+// Number / Vendor / ETA are all required, same as the single Log PO form. ---
+
+const PO_NUMBER_COLUMNS = ["PO Number", "PO No", "PO"];
+const ETA_COLUMNS = ["ETA", "Expected Date", "Delivery Date"];
+
+export interface ImportPurchaseLogRow {
+  itemName: string;
+  category: "RM" | "PM";
+  poNumber: string;
+  vendorName: string;
+  eta: string;
+}
+
+export interface ParsedPurchaseLogImport {
+  rows: ImportPurchaseLogRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parsePurchaseLogWorkbook(buffer: ArrayBuffer, defaultCategory: "RM" | "PM"): ParsedPurchaseLogImport {
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+  const rows: ImportPurchaseLogRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const itemName = asText(row, ITEM_COLUMNS);
+      const poNumber = asText(row, PO_NUMBER_COLUMNS);
+      const vendorName = asText(row, VENDOR_COLUMNS);
+      const etaRaw = firstNonEmpty(row, ETA_COLUMNS);
+      const eta = parseDate(etaRaw);
+
+      if (!itemName || !poNumber || !vendorName || !eta) {
+        skipped += 1;
+        continue;
+      }
+
+      const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
+
+      rows.push({ itemName, category, poNumber, vendorName, eta });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
 
 // --- Dispatch Transfers (FG / Bill) bulk import — customers are
 // matched by exact name against the existing directory, never created

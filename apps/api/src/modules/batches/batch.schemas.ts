@@ -11,7 +11,16 @@ const CUSTOMER_CONFIRMATIONS = ["Received", "Not Received"] as const;
 export const createBatchSchema = z.object({
   purchaseOrderItemId: z.string().uuid(),
   batchNo: z.string().max(120).optional(),
+  // Which Plant this batch runs at — optional at creation (older batches
+  // predate this), but needed before Dispensing can log real RM/PM
+  // consumption against it. Settable here or later via PATCH.
+  plantId: z.string().uuid().optional(),
 });
+
+// Assigning/changing a batch's Plant after creation — its own tiny
+// schema since it's not a stage transition, just metadata PPIC can fix
+// any time (e.g. batch was created before a Plant was picked).
+export const updateBatchPlantSchema = z.object({ plantId: z.string().uuid().nullable() });
 
 // One schema per stage that actually has data-entry fields (per
 // Date.docx/FLS-MPS.xlsx) — status-only stages (Material Received, GRN
@@ -45,6 +54,23 @@ export const dispensingFieldsSchema = z.object({
   pmIssuedDate: dateField,
   pmDispensingRemarks: z.string().max(1000).optional(),
 });
+
+// Real RM/PM consumption lines logged alongside Dispensing — separate
+// from dispensingFieldsSchema (which is flat scalar fields merged
+// straight into Batch) because this is a repeatable list that creates
+// BatchMaterialConsumption rows instead, validated and handled on its
+// own in the route. Optional: a batch can still move through Dispensing
+// with just the date/remark fields, same as before this existed.
+export const dispensingConsumptionSchema = z
+  .array(
+    z.object({
+      itemId: z.string().uuid(),
+      quantity: z.coerce.number().positive(),
+      unit: z.string().min(1).max(40),
+    }),
+  )
+  .max(200)
+  .optional();
 
 export const productionExecutionFieldsSchema = z.object({
   manufacturingStartDate: dateField,
@@ -116,4 +142,6 @@ export const transitionEnvelopeSchema = z.object({
 });
 
 export type CreateBatchInput = z.infer<typeof createBatchSchema>;
+export type UpdateBatchPlantInput = z.infer<typeof updateBatchPlantSchema>;
+export type DispensingConsumptionInput = z.infer<typeof dispensingConsumptionSchema>;
 export type TransitionEnvelopeInput = z.infer<typeof transitionEnvelopeSchema>;

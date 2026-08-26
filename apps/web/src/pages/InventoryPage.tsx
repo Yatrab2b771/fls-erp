@@ -9,8 +9,10 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  Landmark,
   Package,
   PackageCheck,
+  Pencil,
   Plus,
   Send,
   ShieldAlert,
@@ -18,12 +20,14 @@ import {
   Truck,
   Upload,
   UserPlus,
+  Users,
   Warehouse,
   X,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useAcceptTransaction,
+  useAssignDayStoreUser,
   useConfirmDispatch,
   useCreateDayStore,
   useCreateDispatchTransfer,
@@ -32,7 +36,9 @@ import {
   useCreateInventoryTransaction,
   useCreatePlant,
   useCustomers,
+  useDayStoreAssignments,
   useDayStores,
+  useDayStoreStock,
   useDeleteDispatchTransfer,
   useDeleteInventoryRequest,
   useDeleteInventoryTransaction,
@@ -48,23 +54,45 @@ import {
   useInvoiceDispatchTransfer,
   useIssueInventoryRequest,
   usePlants,
+  usePlantStock,
   useQcReviewDispatchTransfer,
   useQcReviewTransaction,
+  useRenameDayStore,
+  useRenamePlant,
   useReviewInventoryRequest,
+  useStoreUsers,
+  useUnassignDayStoreUser,
 } from "../lib/hooks";
-import type { DispatchTransfer, DispatchTransferType, InventoryCategory, InventoryRequest, InventoryRequestPurpose, InventoryTransaction, InventoryTxnType } from "../lib/types";
+import type {
+  DayStore,
+  DayStoreStockLine,
+  DispatchTransfer,
+  DispatchTransferType,
+  InventoryCategory,
+  InventoryRequest,
+  InventoryRequestPurpose,
+  InventoryTransaction,
+  InventoryTxnType,
+  Plant,
+  PlantStockLine,
+} from "../lib/types";
 import { PickerWithAdd } from "../components/PickerWithAdd";
 import { parseDispatchTransferWorkbook, parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook } from "../lib/inventoryImport";
 import {
   downloadDispatchImportTemplate,
   downloadInventoryImportTemplate,
   downloadInventoryRequestImportTemplate,
+  exportCustomerReconciliationReport,
+  exportDayStoreStockReport,
   exportDispatchReport,
+  exportItemStockByLocation,
+  exportPlantStockReport,
   exportRequestsReport,
   exportStockReport,
   exportTransactionReport,
 } from "../lib/inventoryExport";
-import { ApiError } from "../lib/api";
+import { ApiError, api } from "../lib/api";
+import type { CustomerReconciliationRow, ItemStockByLocation } from "../lib/types";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -76,7 +104,7 @@ const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
 const CATEGORY_LABEL: Record<InventoryCategory, string> = { RM: "Raw Material", PM: "Packaging Material" };
 const TXN_TYPE_LABEL: Record<InventoryTxnType, string> = {
   RECEIVED: "Material Received",
-  ISSUED_DAY_STORE: "Issued to Day Store",
+  ISSUED_DAY_STORE: "Issued to Store",
   ISSUED_PRODUCTION: "Issued to Production",
 };
 const DISPATCH_TYPE_LABEL: Record<DispatchTransferType, string> = {
@@ -84,7 +112,7 @@ const DISPATCH_TYPE_LABEL: Record<DispatchTransferType, string> = {
   BILL: "Bill Transfer to Dispatch",
 };
 const REQUEST_PURPOSE_LABEL: Record<InventoryRequestPurpose, string> = {
-  ISSUED_DAY_STORE: "Issued to Day Store",
+  ISSUED_DAY_STORE: "Issued to Store",
   ISSUED_PRODUCTION: "Issued to Production",
 };
 
@@ -117,12 +145,303 @@ function QcStatusBadge({ status }: { status: string }) {
   );
 }
 
+// Compact "+ New Store" affordance for toolbars — the two places you'd
+// actually reach for a new Day Store (the Stock on Hand Location
+// dropdown, and the Import Excel Day Store dropdown) previously had no
+// create option at all; you had to go find one in the Log Entry or
+// Issue Stock forms first. Same create call as PickerWithAdd, just a
+// smaller footprint to fit a toolbar row instead of a form field.
+function QuickAddDayStore({ onCreated }: { onCreated: (id: string) => void }) {
+  const toast = useToast();
+  const createDayStore = useCreateDayStore();
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState("");
+
+  async function handleCreate() {
+    if (!name.trim()) return;
+    try {
+      const created = await createDayStore.mutateAsync(name.trim());
+      onCreated(created.id);
+      setShow(false);
+      setName("");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not create store — it may already exist.");
+    }
+  }
+
+  if (!show) {
+    return (
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow(true)} title="Add a new Store">
+        <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New Store
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        autoFocus
+        className="field w-36 px-2 py-1.5 text-[11px]"
+        placeholder="Store name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+      />
+      <button type="button" className="btn-primary btn-sm" disabled={createDayStore.isPending} onClick={handleCreate}>
+        {createDayStore.isPending ? "…" : "Add"}
+      </button>
+      <button
+        type="button"
+        className="btn-ghost btn-sm"
+        onClick={() => {
+          setShow(false);
+          setName("");
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+// Same as QuickAddDayStore, for Plants — the Stock on Hand Location
+// dropdown covers both, so both need their own quick-create.
+function QuickAddPlant({ onCreated }: { onCreated: (id: string) => void }) {
+  const toast = useToast();
+  const createPlant = useCreatePlant();
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState("");
+
+  async function handleCreate() {
+    if (!name.trim()) return;
+    try {
+      const created = await createPlant.mutateAsync(name.trim());
+      onCreated(created.id);
+      setShow(false);
+      setName("");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not create plant — it may already exist.");
+    }
+  }
+
+  if (!show) {
+    return (
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow(true)} title="Add a new Plant">
+        <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New Plant
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        autoFocus
+        className="field w-36 px-2 py-1.5 text-[11px]"
+        placeholder="Plant name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+      />
+      <button type="button" className="btn-primary btn-sm" disabled={createPlant.isPending} onClick={handleCreate}>
+        {createPlant.isPending ? "…" : "Add"}
+      </button>
+      <button
+        type="button"
+        className="btn-ghost btn-sm"
+        onClick={() => {
+          setShow(false);
+          setName("");
+        }}
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+// Rename one Day Store in place — "Store 1" etc. often start as
+// placeholders before a real name/ID is assigned later (see the S6/S7
+// call this whole feature traces back to). Same inline-edit pattern as
+// QuickAddDayStore, pre-filled with the current name and PATCHing
+// instead of POSTing.
+function RenameDayStore({ dayStore }: { dayStore: DayStore }) {
+  const toast = useToast();
+  const renameDayStore = useRenameDayStore();
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState(dayStore.name);
+
+  async function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === dayStore.name) return setShow(false);
+    try {
+      await renameDayStore.mutateAsync({ id: dayStore.id, name: trimmed });
+      toast.success(`Renamed to "${trimmed}".`);
+      setShow(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not rename — that name may already be taken.");
+    }
+  }
+
+  if (!show) {
+    return (
+      <button
+        type="button"
+        className="btn-icon"
+        title={`Rename "${dayStore.name}"`}
+        onClick={() => {
+          setName(dayStore.name);
+          setShow(true);
+        }}
+      >
+        <Pencil className="h-3.5 w-3.5" strokeWidth={2.25} />
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <input autoFocus className="field w-36 px-2 py-1.5 text-[11px]" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+      <button type="button" className="btn-primary btn-sm" disabled={renameDayStore.isPending} onClick={handleSave}>
+        {renameDayStore.isPending ? "…" : "Save"}
+      </button>
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+// Who's scoped to this Store — see DayStoreAssignment in schema.prisma.
+// No assignments at all means unrestricted (every STORE user can still
+// manage this store); this panel is purely additive narrowing, so an
+// empty list reads as "open to everyone" rather than "nobody."
+function StoreAssignmentPanel({ dayStore }: { dayStore: DayStore }) {
+  const toast = useToast();
+  const [show, setShow] = useState(false);
+  const [pickUserId, setPickUserId] = useState("");
+  // Not gated on `show` — this panel only ever exists for the one
+  // currently-selected store, so there's no N+1 risk from fetching
+  // eagerly, and the button badge below stays accurate before it's
+  // even opened.
+  const { data: assignments } = useDayStoreAssignments(dayStore.id);
+  const { data: storeUsers } = useStoreUsers();
+  const assignUser = useAssignDayStoreUser();
+  const unassignUser = useUnassignDayStoreUser();
+
+  const assignedIds = new Set((assignments ?? []).map((a) => a.userId));
+  const assignable = (storeUsers ?? []).filter((u) => !assignedIds.has(u.id));
+
+  async function handleAssign() {
+    if (!pickUserId) return;
+    try {
+      await assignUser.mutateAsync({ dayStoreId: dayStore.id, userId: pickUserId });
+      setPickUserId("");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not assign that user.");
+    }
+  }
+
+  async function handleUnassign(userId: string) {
+    try {
+      await unassignUser.mutateAsync({ dayStoreId: dayStore.id, userId });
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not remove that assignment.");
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow((s) => !s)} title="Restrict which Store users can manage this store">
+        <Users className="h-3.5 w-3.5" strokeWidth={2.25} />
+        {assignments?.length ? `Assigned (${assignments.length})` : "Assign Users"}
+      </button>
+
+      {show && (
+        <div className="animate-scale-in absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-lift">
+          <p className="mb-2 text-[11px] font-bold text-slate-500">
+            {assignments?.length ? "Only these users can manage this store:" : "Nobody's assigned yet — every Store user can manage this store."}
+          </p>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {(assignments ?? []).map((a) => (
+              <span key={a.userId} className="flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-2 py-1 text-[11px] font-bold text-brand-700">
+                {a.user.fullName}
+                <button type="button" onClick={() => handleUnassign(a.userId)} title="Remove" className="hover:text-rose-600">
+                  <X className="h-3 w-3" strokeWidth={2.5} />
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <select className="field flex-1 px-2 py-1.5 text-[11px]" value={pickUserId} onChange={(e) => setPickUserId(e.target.value)}>
+              <option value="">— Add a Store user —</option>
+              {assignable.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.fullName}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn-primary btn-sm" disabled={!pickUserId || assignUser.isPending} onClick={handleAssign}>
+              Add
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Same idea as RenameDayStore, for Plants — plants scale just as
+// independently as Day Stores (a large company can have several of
+// each, unrelated counts), so they get the same rename affordance.
+function RenamePlant({ plant }: { plant: Plant }) {
+  const toast = useToast();
+  const renamePlant = useRenamePlant();
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState(plant.name);
+
+  async function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === plant.name) return setShow(false);
+    try {
+      await renamePlant.mutateAsync({ id: plant.id, name: trimmed });
+      toast.success(`Renamed to "${trimmed}".`);
+      setShow(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not rename — that name may already be taken.");
+    }
+  }
+
+  if (!show) {
+    return (
+      <button
+        type="button"
+        className="btn-icon"
+        title={`Rename "${plant.name}"`}
+        onClick={() => {
+          setName(plant.name);
+          setShow(true);
+        }}
+      >
+        <Pencil className="h-3.5 w-3.5" strokeWidth={2.25} />
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5">
+      <input autoFocus className="field w-36 px-2 py-1.5 text-[11px]" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+      <button type="button" className="btn-primary btn-sm" disabled={renamePlant.isPending} onClick={handleSave}>
+        {renamePlant.isPending ? "…" : "Save"}
+      </button>
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 type ViewTab = "stock" | InventoryTxnType | DispatchTransferType | "requests";
 
 const MATERIAL_TABS: { key: ViewTab; label: string; icon: typeof Warehouse }[] = [
   { key: "stock", label: "Stock on Hand", icon: Warehouse },
   { key: "RECEIVED", label: "Material Received", icon: ArrowDownToLine },
-  { key: "ISSUED_DAY_STORE", label: "Issued to Day Store", icon: ArrowUpFromLine },
+  { key: "ISSUED_DAY_STORE", label: "Issued to Store", icon: ArrowUpFromLine },
   { key: "ISSUED_PRODUCTION", label: "Issued to Production", icon: ArrowUpFromLine },
   { key: "requests", label: "Material Requests", icon: ClipboardList },
 ];
@@ -175,6 +494,29 @@ export function InventoryPage() {
   // Received tab only. A toolbar-level toggle since the import button
   // has no per-row form of its own.
   const [importOpeningStock, setImportOpeningStock] = useState(false);
+  // Same idea for Issued to Day Store — which Day Store this sheet's
+  // stock belongs to, picked once for the whole batch (a real sheet from
+  // Sanjay's side is one Day Store's count, not several mixed together).
+  const [importDayStoreId, setImportDayStoreId] = useState("");
+  const { data: dayStores } = useDayStores();
+  const { data: plants } = usePlants();
+  // Stock on Hand's location switch — "" is the existing Warehouse-wide
+  // view (untouched); "ds:<id>"/"pl:<id>" switch to that Day Store's or
+  // Plant's own real-time balance (see stock.ts
+  // getOnHandByDayStoreAndItem / getOnHandByPlantAndItem). One select,
+  // prefixed values, since a Day Store id and a Plant id could collide.
+  const [stockLocation, setStockLocation] = useState("");
+  const stockDayStoreId = stockLocation.startsWith("ds:") ? stockLocation.slice(3) : "";
+  const stockPlantId = stockLocation.startsWith("pl:") ? stockLocation.slice(3) : "";
+  const { data: dayStoreStock, isLoading: dayStoreStockLoading } = useDayStoreStock(stockDayStoreId || undefined);
+  const { data: plantStock, isLoading: plantStockLoading } = usePlantStock(stockPlantId || undefined);
+  // Report #5 — one item, every location side by side. A separate
+  // control from the Location switch above (which re-scopes the whole
+  // table to one place); this instead picks one item and fetches its
+  // breakdown across all of them at once.
+  const [locationReportItemId, setLocationReportItemId] = useState("");
+  const [locationReportLoading, setLocationReportLoading] = useState(false);
+  const [reconciliationLoading, setReconciliationLoading] = useState(false);
 
   const dispatchTab = isDispatchTab(tab);
   const isRequestsTab = tab === "requests";
@@ -201,6 +543,8 @@ export function InventoryPage() {
 
   const q = search.trim().toLowerCase();
   const filteredStock = stock?.filter((s) => !q || s.item.name.toLowerCase().includes(q));
+  const filteredDayStoreStock = dayStoreStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
+  const filteredPlantStock = plantStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
   const filteredTxns = transactions?.filter((t) => !q || t.item.name.toLowerCase().includes(q) || (t.vendorName ?? "").toLowerCase().includes(q));
   const filteredDispatch = dispatchTransfers?.filter((d) => !q || d.productName.toLowerCase().includes(q) || d.customer.companyName.toLowerCase().includes(q));
   const filteredRequests = allRequests?.filter((r) => !q || r.item.name.toLowerCase().includes(q) || r.requestedBy.fullName.toLowerCase().includes(q));
@@ -211,7 +555,15 @@ export function InventoryPage() {
   }
 
   function handleExport() {
-    if (tab === "stock") {
+    if (tab === "stock" && stockDayStoreId) {
+      const storeName = dayStores?.find((d) => d.id === stockDayStoreId)?.name ?? "Store";
+      if (!filteredDayStoreStock?.length) return toast.error(`Nothing to export — ${storeName} has no stock activity yet.`);
+      exportDayStoreStockReport(storeName, filteredDayStoreStock);
+    } else if (tab === "stock" && stockPlantId) {
+      const plantName = plants?.find((p) => p.id === stockPlantId)?.name ?? "Plant";
+      if (!filteredPlantStock?.length) return toast.error(`Nothing to export — ${plantName} has no stock activity yet.`);
+      exportPlantStockReport(plantName, filteredPlantStock);
+    } else if (tab === "stock") {
       if (!filteredStock?.length) return toast.error("Nothing to export — no stock rows match.");
       exportStockReport(filteredStock);
     } else if (dispatchTab) {
@@ -225,6 +577,34 @@ export function InventoryPage() {
       exportTransactionReport(filteredTxns, TXN_TYPE_LABEL[tab as InventoryTxnType], TXN_TYPE_LABEL[tab as InventoryTxnType].replace(/\s+/g, "_"));
     }
     toast.success("Report downloaded — ready to share with the department.");
+  }
+
+  async function handleExportItemLocation() {
+    if (!locationReportItemId) return toast.error("Pick an item first.");
+    setLocationReportLoading(true);
+    try {
+      const data = await api<ItemStockByLocation>(`/api/inventory/items/${locationReportItemId}/stock-by-location`);
+      exportItemStockByLocation(data);
+      toast.success(`Location breakdown downloaded for ${data.item.name}.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not load that item's location breakdown");
+    } finally {
+      setLocationReportLoading(false);
+    }
+  }
+
+  async function handleExportReconciliation() {
+    setReconciliationLoading(true);
+    try {
+      const rows = await api<CustomerReconciliationRow[]>("/api/inventory/reports/customer-reconciliation");
+      if (!rows.length) return toast.error("Nothing to export — no FG shipment has been dispatched yet.");
+      exportCustomerReconciliationReport(rows);
+      toast.success(`Customer reconciliation downloaded — ${rows.length} customer(s).`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not load the reconciliation report");
+    } finally {
+      setReconciliationLoading(false);
+    }
   }
 
   // Import Excel is offered on Received and Issued to Day Store — the
@@ -250,10 +630,17 @@ export function InventoryPage() {
       }
 
       const openingStock = tab === "RECEIVED" && importOpeningStock;
-      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, isOpeningStock: openingStock || undefined });
+      const dayStoreId = tab === "ISSUED_DAY_STORE" && importDayStoreId ? importDayStoreId : undefined;
+      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, isOpeningStock: openingStock || undefined, dayStoreId });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      const hasPerRowStores = tab === "ISSUED_DAY_STORE" && rows.some((r) => r.dayStoreName);
+      const dayStoreNote = hasPerRowStores
+        ? ` — Store read per row from the sheet${result.dayStoresCreated ? `, ${result.dayStoresCreated} new store(s) added` : ""}.`
+        : dayStoreId
+          ? ` — tagged to ${dayStores?.find((d) => d.id === dayStoreId)?.name ?? "the selected Store"}.`
+          : "";
       toast.success(
-        `${openingStock ? "Loaded" : "Imported"} ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}${openingStock ? " — counted immediately, no QC needed." : ""}`,
+        `${openingStock ? "Loaded" : "Imported"} ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}${openingStock ? " — counted immediately, no QC needed." : ""}${dayStoreNote}`,
       );
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
@@ -347,6 +734,22 @@ export function InventoryPage() {
                   Opening Stock
                 </label>
               )}
+              {tab === "ISSUED_DAY_STORE" && (
+                <select
+                  className="rounded-lg border border-slate-200 bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-600"
+                  value={importDayStoreId}
+                  onChange={(e) => setImportDayStoreId(e.target.value)}
+                  title="Which Store this sheet's stock is for — tags every row on import, same as Sanjay's separate Store sheets."
+                >
+                  <option value="">No Store tag</option>
+                  {dayStores?.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {tab === "ISSUED_DAY_STORE" && <QuickAddDayStore onCreated={setImportDayStoreId} />}
             </>
           )}
           {isRequestsTab && canRequest && (
@@ -359,6 +762,11 @@ export function InventoryPage() {
               </button>
               <input ref={importRequestsFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportRequestsFile} />
             </>
+          )}
+          {dispatchTab && (canWrite || canInvoice) && (
+            <button className="btn-ghost" disabled={reconciliationLoading} onClick={handleExportReconciliation} title="Customer-wise: FG dispatched, invoiced, and still outstanding">
+              <Landmark className="h-3.5 w-3.5" strokeWidth={2.5} /> {reconciliationLoading ? "Loading…" : "Customer Reconciliation"}
+            </button>
           )}
           {dispatchTab && canWrite && (
             <>
@@ -450,8 +858,60 @@ export function InventoryPage() {
         </div>
       </div>
 
+      {tab === "stock" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs font-bold text-slate-500">Location</label>
+          <select className="field w-auto" value={stockLocation} onChange={(e) => setStockLocation(e.target.value)}>
+            <option value="">Warehouse</option>
+            {dayStores?.length ? (
+              <optgroup label="Stores">
+                {dayStores.map((d) => (
+                  <option key={d.id} value={`ds:${d.id}`}>
+                    {d.name}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+            {plants?.length ? (
+              <optgroup label="Plants">
+                {plants.map((p) => (
+                  <option key={p.id} value={`pl:${p.id}`}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+          </select>
+          {stockDayStoreId && dayStores?.find((d) => d.id === stockDayStoreId) && <RenameDayStore dayStore={dayStores.find((d) => d.id === stockDayStoreId)!} />}
+          {stockDayStoreId && canWrite && dayStores?.find((d) => d.id === stockDayStoreId) && <StoreAssignmentPanel dayStore={dayStores.find((d) => d.id === stockDayStoreId)!} />}
+          {stockPlantId && plants?.find((p) => p.id === stockPlantId) && <RenamePlant plant={plants.find((p) => p.id === stockPlantId)!} />}
+          <QuickAddDayStore onCreated={(id) => setStockLocation(`ds:${id}`)} />
+          <QuickAddPlant onCreated={(id) => setStockLocation(`pl:${id}`)} />
+
+          <span className="mx-1 hidden h-4 w-px bg-slate-200 sm:block" />
+          <label className="text-xs font-bold text-slate-500">Item breakdown</label>
+          <select className="field w-auto" value={locationReportItemId} onChange={(e) => setLocationReportItemId(e.target.value)}>
+            <option value="">— Pick an RM/PM item —</option>
+            {stock?.map((s) => (
+              <option key={s.item.id} value={s.item.id}>
+                {s.item.name}
+              </option>
+            ))}
+          </select>
+          <button className="btn-ghost" disabled={locationReportLoading} onClick={handleExportItemLocation} title="Download this item's stock split across Warehouse, every Day Store, and every Plant">
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> {locationReportLoading ? "Loading…" : "By Location"}
+          </button>
+        </div>
+      )}
+
       {tab === "stock" ? (
-        <StockTable loading={stockLoading} rows={filteredStock} empty={!stock?.length} />
+        stockDayStoreId ? (
+          <DayStoreStockTable loading={dayStoreStockLoading} rows={filteredDayStoreStock} empty={!dayStoreStock?.stock.length} />
+        ) : stockPlantId ? (
+          <PlantStockTable loading={plantStockLoading} rows={filteredPlantStock} empty={!plantStock?.stock.length} />
+        ) : (
+          <StockTable loading={stockLoading} rows={filteredStock} empty={!stock?.length} />
+        )
       ) : tab === "RECEIVED" ? (
         <ReceivedList loading={txnLoading} rows={filteredTxns} empty={!transactions?.length} canQc={canQc} canWrite={canWrite} />
       ) : tab === "FG" ? (
@@ -483,7 +943,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
               <th>Unit</th>
               <th className="text-right">Received</th>
               <th className="text-right">Rejected</th>
-              <th className="text-right">Issued (Day Store)</th>
+              <th className="text-right">Issued (Store)</th>
               <th className="text-right">Issued (Production)</th>
               <th className="text-right">On Hand</th>
             </tr>
@@ -498,6 +958,85 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
                 <td className="text-right font-mono text-slate-400">{s.rejectedQty || "—"}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
+                <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Real-time balance for one Day Store — simpler columns than Warehouse's
+// StockTable above (no Received/Rejected breakdown; a store never
+// receives directly, see stock.ts getOnHandByDayStoreAndItem). Rows with
+// nothing ever issued to/from this store don't show at all — the API
+// only returns items that actually have activity here.
+function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: DayStoreStockLine[] | undefined; empty: boolean }) {
+  if (loading) return <SkeletonRows rows={5} cols={6} />;
+  if (empty) return <EmptyState icon={Warehouse} title="Nothing issued to this store yet" hint="Issue stock to it from the Issued to Store tab, or import a sheet tagged to it." accent="brand" />;
+  if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Category</th>
+              <th>Unit</th>
+              <th className="text-right">Received (from Warehouse)</th>
+              <th className="text-right">Issued (to Production)</th>
+              <th className="text-right">On Hand (this store)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.item.id}>
+                <td className="font-bold text-slate-800">{s.item.name}</td>
+                <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
+                <td className="text-slate-500">{s.item.unit ?? "—"}</td>
+                <td className="text-right font-mono text-slate-600">{s.receivedFromWarehouse}</td>
+                <td className="text-right font-mono text-slate-600">{s.issuedToProduction}</td>
+                <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Real-time balance for one Plant — same shape as DayStoreStockTable
+// above; the outflow behind these numbers comes from the Batches module
+// (RM/PM consumption logged at Dispensing) instead of another Inventory
+// transaction type, but the display is identical.
+function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: PlantStockLine[] | undefined; empty: boolean }) {
+  if (loading) return <SkeletonRows rows={5} cols={4} />;
+  if (empty) return <EmptyState icon={Warehouse} title="Nothing issued to this plant yet" hint="Issue stock to it from Issued to Production, or log RM/PM consumption at a batch's Dispensing stage." accent="brand" />;
+  if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th>Category</th>
+              <th>Unit</th>
+              <th className="text-right">On Hand (this plant)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.item.id}>
+                <td className="font-bold text-slate-800">{s.item.name}</td>
+                <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
+                <td className="text-slate-500">{s.item.unit ?? "—"}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
               </tr>
             ))}
@@ -524,7 +1063,7 @@ function TransactionTable({
   const toast = useToast();
   const deleteTxn = useDeleteInventoryTransaction();
 
-  if (loading) return <SkeletonRows rows={5} cols={7} />;
+  if (loading) return <SkeletonRows rows={5} cols={12} />;
   if (empty)
     return (
       <EmptyState
@@ -558,8 +1097,13 @@ function TransactionTable({
               <th>Unit</th>
               <th>Size</th>
               <th>Vendor / Note</th>
-              {type === "ISSUED_DAY_STORE" && <th>Day Store</th>}
+              {type === "ISSUED_DAY_STORE" && <th>Store</th>}
               {type === "ISSUED_PRODUCTION" && <th>Plant</th>}
+              <th>Batch No</th>
+              <th>GRN No</th>
+              <th>Mfg Date</th>
+              <th>Expiry Date</th>
+              <th>Remark</th>
               {canWrite && <th />}
             </tr>
           </thead>
@@ -575,6 +1119,11 @@ function TransactionTable({
                 <td className="text-slate-500">{t.vendorName ?? "—"}</td>
                 {type === "ISSUED_DAY_STORE" && <td className="text-slate-500">{t.dayStore?.name ?? "—"}</td>}
                 {type === "ISSUED_PRODUCTION" && <td className="text-slate-500">{t.plant?.name ?? "—"}</td>}
+                <td className="text-slate-500">{t.batchNo ?? "—"}</td>
+                <td className="text-slate-500">{t.grnNo ?? "—"}</td>
+                <td className="text-slate-500">{t.mfgDate ? new Date(t.mfgDate).toLocaleDateString() : "—"}</td>
+                <td className="text-slate-500">{t.expiryDate ? new Date(t.expiryDate).toLocaleDateString() : "—"}</td>
+                <td className="text-slate-500">{t.remark ?? "—"}</td>
                 {canWrite && (
                   <td className="text-right">
                     <button onClick={() => handleDelete(t.id)} className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove entry">
@@ -669,11 +1218,6 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [type, setType] = useState<Exclude<InventoryTxnType, "ISSUED_PRODUCTION">>(initialType);
   const [category, setCategory] = useState<InventoryCategory>("RM");
   const { data: items } = useInventoryItems(category);
-  const { data: vendors } = useInventoryVendors();
-  const { data: dayStores } = useDayStores();
-  const createItem = useCreateInventoryItem();
-  const createTxn = useCreateInventoryTransaction();
-  const createDayStore = useCreateDayStore();
 
   const [itemId, setItemId] = useState("");
   const [showNewItem, setShowNewItem] = useState(false);
@@ -686,8 +1230,19 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [vendorName, setVendorName] = useState("");
   const [dayStoreId, setDayStoreId] = useState("");
   const [isOpeningStock, setIsOpeningStock] = useState(false);
+  const [batchNo, setBatchNo] = useState("");
+  const [grnNo, setGrnNo] = useState("");
+  const [mfgDate, setMfgDate] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [remark, setRemark] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  const { data: vendors } = useInventoryVendors();
+  const { data: dayStores } = useDayStores();
+  const createItem = useCreateInventoryItem();
+  const createTxn = useCreateInventoryTransaction();
+  const createDayStore = useCreateDayStore();
 
   const sortedItems = useMemo(() => items ?? [], [items]);
 
@@ -725,6 +1280,11 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         vendorName: vendorName.trim() || undefined,
         dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
         isOpeningStock: type === "RECEIVED" && isOpeningStock ? true : undefined,
+        batchNo: batchNo.trim() || undefined,
+        grnNo: grnNo.trim() || undefined,
+        mfgDate: mfgDate || undefined,
+        expiryDate: expiryDate || undefined,
+        remark: remark.trim() || undefined,
       });
       toast.success(type === "RECEIVED" ? (isOpeningStock ? "Opening stock logged — counted immediately, no QC needed." : "Entry logged — awaiting inward QC.") : `${TXN_TYPE_LABEL[type]} entry logged.`);
       onDone();
@@ -830,21 +1390,41 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
           <label className="label">Vendor Name (optional)</label>
           <input className="field" list="vendor-name-options" placeholder="Vendor / supplier" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
           <datalist id="vendor-name-options">
-            {vendors?.map((v) => (
+            {vendors?.vendors.map((v) => (
               <option key={v} value={v} />
             ))}
           </datalist>
         </div>
         {type === "ISSUED_DAY_STORE" && (
           <PickerWithAdd
-            label="Day Store (optional)"
-            placeholder="— Which day store —"
+            label="Store (optional)"
+            placeholder="— Which store —"
             options={dayStores ?? []}
             value={dayStoreId}
             onChange={setDayStoreId}
             onCreate={(name) => createDayStore.mutateAsync(name)}
           />
         )}
+        <div>
+          <label className="label">Batch No (optional)</label>
+          <input className="field" placeholder="e.g. B-2026-081" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">GRN No (optional)</label>
+          <input className="field" placeholder="e.g. GRN-1042" value={grnNo} onChange={(e) => setGrnNo(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Mfg Date (optional)</label>
+          <input type="date" className="field" value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Expiry Date (optional)</label>
+          <input type="date" className="field" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
+        </div>
+        <div className="sm:col-span-2 lg:col-span-3">
+          <label className="label">Remark (optional)</label>
+          <input className="field" placeholder="Any other note for this entry" value={remark} onChange={(e) => setRemark(e.target.value)} />
+        </div>
       </div>
 
       {error && (
@@ -984,14 +1564,19 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
           </div>
         )}
         {type === "FG" && (
-          <PickerWithAdd
-            label="Plant (optional)"
-            placeholder="— Which plant is this from —"
-            options={plants ?? []}
-            value={plantId}
-            onChange={setPlantId}
-            onCreate={(name) => createPlant.mutateAsync(name)}
-          />
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <PickerWithAdd
+                label="Plant (optional)"
+                placeholder="— Which plant is this from —"
+                options={plants ?? []}
+                value={plantId}
+                onChange={setPlantId}
+                onCreate={(name) => createPlant.mutateAsync(name)}
+              />
+            </div>
+            {plantId && plants?.find((p) => p.id === plantId) && <RenamePlant plant={plants.find((p) => p.id === plantId)!} />}
+          </div>
         )}
       </div>
 
@@ -1136,6 +1721,15 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
             {txn.size && <> · {txn.size}</>}
             {txn.vendorName && <> · {txn.vendorName}</>} · {new Date(txn.date).toLocaleDateString()}
           </p>
+          {(txn.batchNo || txn.grnNo || txn.mfgDate || txn.expiryDate) && (
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              {txn.batchNo && <>Batch {txn.batchNo}</>}
+              {txn.grnNo && <> · GRN {txn.grnNo}</>}
+              {txn.mfgDate && <> · Mfg {new Date(txn.mfgDate).toLocaleDateString()}</>}
+              {txn.expiryDate && <> · Exp {new Date(txn.expiryDate).toLocaleDateString()}</>}
+            </p>
+          )}
+          {txn.remark && <p className="mt-0.5 text-[11px] text-slate-500">Remark: {txn.remark}</p>}
           <p className="mt-0.5 text-[11px] text-slate-400">
             Logged by {txn.createdBy.fullName}
             {txn.qcCheckedBy && <> · QC by {txn.qcCheckedBy.fullName}</>}
@@ -1566,7 +2160,7 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
           <label className="label">Purpose</label>
           <select className="field" value={purpose} onChange={(e) => setPurpose(e.target.value as InventoryRequestPurpose)}>
             <option value="ISSUED_PRODUCTION">Issued to Production</option>
-            <option value="ISSUED_DAY_STORE">Issued to Day Store</option>
+            <option value="ISSUED_DAY_STORE">Issued to Store</option>
           </select>
         </div>
         <div>
@@ -1582,7 +2176,12 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
           <input className="field" placeholder="e.g. Batch GB-BCAA-0098, urgent" value={note} onChange={(e) => setNote(e.target.value)} />
         </div>
         {purpose === "ISSUED_PRODUCTION" && (
-          <PickerWithAdd label="Plant (optional)" placeholder="— Which plant is this for —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+          <div className="flex items-end gap-2">
+            <div className="flex-1">
+              <PickerWithAdd label="Plant (optional)" placeholder="— Which plant is this for —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+            </div>
+            {plantId && plants?.find((p) => p.id === plantId) && <RenamePlant plant={plants.find((p) => p.id === plantId)!} />}
+          </div>
         )}
       </div>
 
@@ -1653,6 +2252,11 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
   const [issueUnit, setIssueUnit] = useState(UNIT_OPTIONS[0]!);
   const [issueQty, setIssueQty] = useState(String(request.remainingQty));
   const [issueSize, setIssueSize] = useState("");
+  // No default — an explicit choice is required (see
+  // issueInventoryRequestSchema: dayStoreId is now a required, nullable
+  // key, not an optional one). "" means nothing picked yet and blocks
+  // submit; "CENTRAL" means null on purpose; "STORE" needs issueDayStoreId too.
+  const [issueSource, setIssueSource] = useState<"" | "CENTRAL" | "STORE">("");
   const [issueDayStoreId, setIssueDayStoreId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -1680,9 +2284,12 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
     setError(null);
     if (!issueQty || Number(issueQty) <= 0) return setError("Enter a quantity greater than zero.");
     if (Number(issueQty) > request.remainingQty) return setError(`Only ${request.remainingQty} remaining on this request.`);
+    if (!issueSource) return setError("Choose whether this is coming from a Store or Central / Warehouse Stock.");
+    if (issueSource === "STORE" && !issueDayStoreId) return setError("Select which Store this is coming from.");
     try {
       const qty = Number(issueQty);
-      await issue.mutateAsync({ id: request.id, date: issueDate, unit: issueUnit, quantity: qty, size: issueSize.trim() || undefined, dayStoreId: issueDayStoreId || undefined });
+      const dayStoreId = issueSource === "STORE" ? issueDayStoreId : null;
+      await issue.mutateAsync({ id: request.id, date: issueDate, unit: issueUnit, quantity: qty, size: issueSize.trim() || undefined, dayStoreId });
       toast.success(qty >= request.remainingQty ? "Stock issued — request complete." : `${qty} issued — ${request.remainingQty - qty} still remaining on this request.`);
       setShowIssue(false);
     } catch (err) {
@@ -1761,6 +2368,8 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
               className="btn-primary btn-sm"
               onClick={() => {
                 setIssueQty(String(request.remainingQty));
+                setIssueSource("");
+                setIssueDayStoreId("");
                 setShowIssue(true);
               }}
             >
@@ -1828,14 +2437,33 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
               <input className="field" placeholder="e.g. 25 Kg bag" value={issueSize} onChange={(e) => setIssueSize(e.target.value)} />
             </div>
           </div>
-          <PickerWithAdd
-            label="Day Store fulfilling this (optional)"
-            placeholder="— Not via a Day Store —"
-            options={dayStores ?? []}
-            value={issueDayStoreId}
-            onChange={setIssueDayStoreId}
-            onCreate={(name) => createDayStore.mutateAsync(name)}
-          />
+          <div>
+            <label className="label">Coming from</label>
+            <div className="flex flex-wrap gap-1 rounded-xl bg-slate-100/80 p-1">
+              {(["CENTRAL", "STORE"] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setIssueSource(s)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-all duration-150 ${
+                    issueSource === s ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  {s === "CENTRAL" ? "Central / Warehouse Stock" : "A Store"}
+                </button>
+              ))}
+            </div>
+          </div>
+          {issueSource === "STORE" && (
+            <PickerWithAdd
+              label="Which Store"
+              placeholder="— Select —"
+              options={dayStores ?? []}
+              value={issueDayStoreId}
+              onChange={setIssueDayStoreId}
+              onCreate={(name) => createDayStore.mutateAsync(name)}
+            />
+          )}
           {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
           <div className="flex justify-end gap-2">
             <button

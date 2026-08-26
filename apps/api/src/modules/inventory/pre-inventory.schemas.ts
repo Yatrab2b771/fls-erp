@@ -45,6 +45,26 @@ export const setPurchaseSchema = z.object({
   eta: z.coerce.date(),
 });
 
+// Bulk upload of PO rows — each row is matched to an existing, still-open
+// requirement by item name + category (oldest first), not created fresh
+// like the requirement import above. There's no requirement to match a
+// PO against without PPIC having asked for it first.
+export const importPurchaseLogSchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        itemName: z.string().min(1).max(200),
+        category: z.enum(CATEGORIES),
+        poNumber: z.string().min(1).max(100),
+        vendorName: z.string().min(1).max(200),
+        eta: z.coerce.date(),
+      }),
+    )
+    .min(1)
+    .max(2000),
+});
+
 export type CreateRequirementInput = z.infer<typeof createRequirementSchema>;
 export type ImportRequirementsInput = z.infer<typeof importRequirementsSchema>;
 export type SetPurchaseInput = z.infer<typeof setPurchaseSchema>;
+export type ImportPurchaseLogInput = z.infer<typeof importPurchaseLogSchema>;

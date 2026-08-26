@@ -6,6 +6,7 @@ import pinoHttp from "pino-http";
 import type { NextFunction, Request, Response } from "express";
 import { logger } from "./common/lib/logger";
 import { env } from "./common/lib/env";
+import { RouteError } from "./common/lib/route-error";
 import { authRouter } from "./modules/auth/auth.routes";
 import { usersRouter } from "./modules/users/users.routes";
 import { customersRouter } from "./modules/customers/customers.routes";
@@ -19,6 +20,7 @@ import { inventoryRouter } from "./modules/inventory/inventory.routes";
 import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
 import { dayStoresRouter, plantsRouter } from "./modules/inventory/locations.routes";
 import { notificationsRouter } from "./modules/notifications/notifications.routes";
+import { poReadinessRouter } from "./modules/po-readiness/po-readiness.routes";
 
 export function createApp() {
   const app = express();
@@ -69,11 +71,19 @@ export function createApp() {
   app.use("/api/inventory/day-stores", dayStoresRouter);
   app.use("/api/inventory/plants", plantsRouter);
   app.use("/api/notifications", notificationsRouter);
+  app.use("/api/po-readiness", poReadinessRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+    // A RouteError is a validation/conflict failure a handler threw from
+    // inside a runSerializable callback (see serializable-transaction.ts)
+    // — there's no `res` reachable at the point it's raised, so it
+    // carries its own intended status out through next(err) instead.
+    // Expected, not a bug, so it's not logged as an error.
+    if (err instanceof RouteError) return res.status(err.status).json({ error: err.message });
+
     req.log?.error({ err }, "unhandled error");
     res.status(500).json({ error: "Internal server error" });
   });

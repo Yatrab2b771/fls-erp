@@ -7,8 +7,12 @@ import type {
   CatalogBrand,
   CatalogSku,
   Customer,
+  CustomerReconciliationRow,
   DayStore,
+  DayStoreAssignment,
+  DayStoreStockLine,
   DispatchTransfer,
+  PlantStockLine,
   DispatchTransferType,
   DispatchQcStatus,
   InventoryCategory,
@@ -20,16 +24,23 @@ import type {
   InventoryStockLine,
   InventoryTransaction,
   InventoryTxnType,
+  ImportPoRequirementsResult,
+  ImportPurchaseOrdersResult,
+  ItemStockByLocation,
   ManagedUser,
   Plant,
+  PoReadinessRow,
+  PoWastageRejectionRow,
   PreInventoryRequirement,
   PurchaseOrder,
   RecipeSummary,
   RmPlan,
   RoleName,
+  StoreUser,
 } from "./types";
 import type { ImportBrandPayload } from "./catalogImport";
-import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow, ImportRequirementRow } from "./inventoryImport";
+import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow, ImportPurchaseLogRow, ImportRequirementRow } from "./inventoryImport";
+import type { ImportPurchaseOrderRow } from "./purchaseOrdersImport";
 
 // --- Customers ---
 
@@ -47,8 +58,28 @@ export function useCreateCustomer() {
 
 // --- Purchase Orders ---
 
+// pageSize=200 (the server's max, see pagination.ts) — without it this
+// silently truncated at the default 50, which the page's own "Download
+// Report" button (and now the pending-PO-aging report) both rely on
+// being the complete list, not a first page of it.
 export function usePurchaseOrders() {
-  return useQuery({ queryKey: ["purchase-orders"], queryFn: () => api<PurchaseOrder[]>("/api/purchase-orders") });
+  return useQuery({ queryKey: ["purchase-orders"], queryFn: () => api<PurchaseOrder[]>("/api/purchase-orders?pageSize=200") });
+}
+
+export function usePoWastageRejectionReport(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["purchase-orders", "reports", "wastage-rejection"],
+    queryFn: () => api<PoWastageRejectionRow[]>("/api/purchase-orders/reports/wastage-rejection"),
+    enabled: options?.enabled,
+  });
+}
+
+export function useItemStockByLocation(itemId: string | undefined) {
+  return useQuery({
+    queryKey: ["inventory", "items", itemId, "stock-by-location"],
+    queryFn: () => api<ItemStockByLocation>(`/api/inventory/items/${itemId}/stock-by-location`),
+    enabled: !!itemId,
+  });
 }
 
 export function usePurchaseOrder(id: string | undefined) {
@@ -86,6 +117,17 @@ export function useCreatePurchaseOrder() {
   });
 }
 
+export function useImportPurchaseOrders() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rows: ImportPurchaseOrderRow[]) => api<ImportPurchaseOrdersResult>("/api/purchase-orders/import", { method: "POST", body: { rows } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["purchase-orders"] });
+      qc.invalidateQueries({ queryKey: ["customers"] });
+    },
+  });
+}
+
 // Draft → BD Approve/Reject. A batch can't be created off any of this
 // PO's line items until it's approved (see useCreateBatch below).
 export function useReviewPurchaseOrder(poId: string) {
@@ -104,6 +146,72 @@ export function useAddPurchaseOrderItem(poId: string) {
   return useMutation({
     mutationFn: (body: CreatePurchaseOrderPayload["items"][number]) => api(`/api/purchase-orders/${poId}/items`, { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+  });
+}
+
+// --- PO Material Readiness — see PoMaterialRequirement in schema.prisma.
+// pageSize is pinned at the API's max (200) rather than paginated in the
+// UI — matches the scale the requirement was raised for (hundreds of
+// POs at once), and this is a live "what's ready right now" view, not a
+// browsable archive that needs real pagination. ---
+
+export function usePoReadiness(readyOnly?: boolean, options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["po-readiness", readyOnly ?? false],
+    queryFn: () => api<PoReadinessRow[]>(`/api/po-readiness?pageSize=200${readyOnly ? "&ready=true" : ""}`),
+    enabled: options?.enabled,
+  });
+}
+
+export function usePoReadinessDetail(purchaseOrderId: string | undefined) {
+  return useQuery({
+    queryKey: ["po-readiness", "detail", purchaseOrderId],
+    queryFn: () => api<PoReadinessRow>(`/api/po-readiness/${purchaseOrderId}`),
+    enabled: !!purchaseOrderId,
+  });
+}
+
+export interface ImportPoRequirementRow {
+  poNumber: string;
+  category: "RM" | "PM";
+  itemName: string;
+  requiredQty: number;
+  unit: string;
+}
+
+export function useImportPoRequirements() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rows: ImportPoRequirementRow[]) => api<ImportPoRequirementsResult>("/api/po-readiness/import", { method: "POST", body: { rows } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["po-readiness"] }),
+  });
+}
+
+export interface CreatePoRequirementPayload {
+  purchaseOrderId: string;
+  itemId: string;
+  category: "RM" | "PM";
+  requiredQty: number;
+  unit: string;
+}
+
+// The "Add Manually" form next to Import Excel — same pair as every
+// other module's manual-entry-plus-bulk-import (Pre-Inventory, Material
+// Requests, ...).
+export function useCreatePoRequirement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreatePoRequirementPayload) => api("/api/po-readiness", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["po-readiness"] }),
+  });
+}
+
+export function useDeletePoRequirementItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ purchaseOrderId, itemId }: { purchaseOrderId: string; itemId: string }) =>
+      api<void>(`/api/po-readiness/${purchaseOrderId}/items/${itemId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["po-readiness"] }),
   });
 }
 
@@ -143,8 +251,22 @@ export function useBatch(id: string | undefined) {
 export function useCreateBatch() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { purchaseOrderItemId: string; batchNo?: string }) => api<Batch>("/api/batches", { method: "POST", body }),
+    mutationFn: (body: { purchaseOrderItemId: string; batchNo?: string; plantId?: string }) => api<Batch>("/api/batches", { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["batches"] }),
+  });
+}
+
+// Assign/change which Plant a batch runs at — separate from the stage
+// transition, PPIC's call any time (e.g. fixing a batch created before a
+// Plant was picked). null explicitly clears it.
+export function useAssignBatchPlant(batchId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (plantId: string | null) => api<Batch>(`/api/batches/${batchId}/plant`, { method: "PATCH", body: { plantId } }),
+    onSuccess: (updated) => {
+      qc.setQueryData(["batches", "detail", batchId], updated);
+      qc.invalidateQueries({ queryKey: ["batches"] });
+    },
   });
 }
 
@@ -367,6 +489,11 @@ export interface CreateInventoryTransactionPayload {
   vendorName?: string;
   dayStoreId?: string;
   isOpeningStock?: boolean;
+  batchNo?: string;
+  grnNo?: string;
+  mfgDate?: string;
+  expiryDate?: string;
+  remark?: string;
 }
 
 export function useCreateInventoryTransaction() {
@@ -376,6 +503,7 @@ export function useCreateInventoryTransaction() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
       qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
     },
   });
 }
@@ -383,12 +511,14 @@ export function useCreateInventoryTransaction() {
 export function useImportInventoryTransactions() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[]; isOpeningStock?: boolean }) =>
-      api<{ transactionsCreated: number; itemsCreated: number }>("/api/inventory/transactions/import", { method: "POST", body }),
+    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[]; isOpeningStock?: boolean; dayStoreId?: string }) =>
+      api<{ transactionsCreated: number; itemsCreated: number; dayStoresCreated: number }>("/api/inventory/transactions/import", { method: "POST", body }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
       qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
       qc.invalidateQueries({ queryKey: ["inventory", "items"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "day-stores"] });
     },
   });
 }
@@ -404,8 +534,18 @@ export function useDeleteInventoryTransaction() {
   });
 }
 
-export function useInventoryVendors(options?: { enabled?: boolean }) {
-  return useQuery({ queryKey: ["inventory", "vendors"], queryFn: () => api<string[]>("/api/inventory/vendors"), enabled: options?.enabled });
+export interface InventoryVendors {
+  vendors: string[];
+  // Whoever most recently supplied this item, when `itemId` was passed — null otherwise.
+  suggested: string | null;
+}
+
+export function useInventoryVendors(options?: { enabled?: boolean; itemId?: string }) {
+  return useQuery({
+    queryKey: ["inventory", "vendors", options?.itemId ?? null],
+    queryFn: () => api<InventoryVendors>(`/api/inventory/vendors${options?.itemId ? `?itemId=${options.itemId}` : ""}`),
+    enabled: options?.enabled,
+  });
 }
 
 // --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA_QC reviews
@@ -488,7 +628,7 @@ export function useReviewInventoryRequest() {
 export function useIssueInventoryRequest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; date: string; unit: string; quantity: number; size?: string; dayStoreId?: string }) =>
+    mutationFn: ({ id, ...body }: { id: string; date: string; unit: string; quantity: number; size?: string; dayStoreId: string | null }) =>
       api<InventoryTransaction>(`/api/inventory/requests/${id}/issue`, { method: "POST", body }),
     onSuccess: () => invalidateRequests(qc),
   });
@@ -510,10 +650,22 @@ export function useDispatchTransfers(filters?: { type?: DispatchTransferType; cu
   if (filters?.type) params.set("type", filters.type);
   if (filters?.customerId) params.set("customerId", filters.customerId);
   if (filters?.qcStatus) params.set("qcStatus", filters.qcStatus);
+  // Server max (see pagination.ts) — without it this silently truncated
+  // at the default 50, same gap as usePurchaseOrders/
+  // usePreInventoryRequirements had before those were fixed.
+  params.set("pageSize", "200");
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "dispatch-transfers", filters],
-    queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers${qs ? `?${qs}` : ""}`),
+    queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers?${qs}`),
+    enabled: options?.enabled,
+  });
+}
+
+export function useCustomerReconciliationReport(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "reports", "customer-reconciliation"],
+    queryFn: () => api<CustomerReconciliationRow[]>("/api/inventory/reports/customer-reconciliation"),
     enabled: options?.enabled,
   });
 }
@@ -600,6 +752,76 @@ export function useCreateDayStore() {
   });
 }
 
+export function useRenameDayStore() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api<DayStore>(`/api/inventory/day-stores/${id}`, { method: "PATCH", body: { name } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "day-stores"] });
+      // Every transaction/request list that shows a Day Store's name
+      // needs to pick up the new name too, not just the picker list.
+      qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "requests"] });
+    },
+  });
+}
+
+// --- Store assignment — which STORE users are scoped to which store(s).
+// See DayStoreAssignment in schema.prisma / day-store-access.ts. ---
+
+export function useDayStoreAssignments(dayStoreId: string | undefined) {
+  return useQuery({
+    queryKey: ["inventory", "day-stores", dayStoreId, "assignments"],
+    queryFn: () => api<DayStoreAssignment[]>(`/api/inventory/day-stores/${dayStoreId}/assignments`),
+    enabled: !!dayStoreId,
+  });
+}
+
+// The assignable pool — every user holding the STORE role. Shared across
+// every store's assignment picker, so it's one cached query, not
+// refetched per store.
+export function useStoreUsers() {
+  return useQuery({ queryKey: ["inventory", "day-stores", "store-users"], queryFn: () => api<StoreUser[]>("/api/inventory/day-stores/store-users") });
+}
+
+export function useAssignDayStoreUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ dayStoreId, userId }: { dayStoreId: string; userId: string }) =>
+      api<DayStoreAssignment>(`/api/inventory/day-stores/${dayStoreId}/assignments`, { method: "POST", body: { userId } }),
+    onSuccess: (_data, { dayStoreId }) => qc.invalidateQueries({ queryKey: ["inventory", "day-stores", dayStoreId, "assignments"] }),
+  });
+}
+
+export function useUnassignDayStoreUser() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ dayStoreId, userId }: { dayStoreId: string; userId: string }) =>
+      api<void>(`/api/inventory/day-stores/${dayStoreId}/assignments/${userId}`, { method: "DELETE" }),
+    onSuccess: (_data, { dayStoreId }) => qc.invalidateQueries({ queryKey: ["inventory", "day-stores", dayStoreId, "assignments"] }),
+  });
+}
+
+// Real-time balance for one Day Store — see locations.routes.ts
+// GET /:id/stock. Disabled until a store is actually picked.
+export function useDayStoreStock(dayStoreId: string | undefined, category?: InventoryCategory) {
+  return useQuery({
+    queryKey: ["inventory", "day-stores", dayStoreId, "stock", category],
+    queryFn: () => api<{ dayStore: DayStore; stock: DayStoreStockLine[] }>(`/api/inventory/day-stores/${dayStoreId}/stock${category ? `?category=${category}` : ""}`),
+    enabled: !!dayStoreId,
+  });
+}
+
+// Real-time balance for one Plant — see locations.routes.ts
+// GET /plants/:id/stock. Same shape/usage as useDayStoreStock above.
+export function usePlantStock(plantId: string | undefined, category?: InventoryCategory) {
+  return useQuery({
+    queryKey: ["inventory", "plants", plantId, "stock", category],
+    queryFn: () => api<{ plant: Plant; stock: PlantStockLine[] }>(`/api/inventory/plants/${plantId}/stock${category ? `?category=${category}` : ""}`),
+    enabled: !!plantId,
+  });
+}
+
 export function usePlants() {
   return useQuery({ queryKey: ["inventory", "plants"], queryFn: () => api<Plant[]>("/api/inventory/plants") });
 }
@@ -612,6 +834,19 @@ export function useCreatePlant() {
   });
 }
 
+export function useRenamePlant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => api<Plant>(`/api/inventory/plants/${id}`, { method: "PATCH", body: { name } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "plants"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "requests"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "dispatch-transfers"] });
+    },
+  });
+}
+
 // --- Pre-Inventory — S1-S4: PPIC states a requirement, Warehouse says
 // what's available, Purchase logs a PO for the shortfall, Finance reads
 // the resulting vendor list. See pre-inventory.routes.ts. ---
@@ -620,10 +855,15 @@ export function usePreInventoryRequirements(filters?: { category?: InventoryCate
   const params = new URLSearchParams();
   if (filters?.category) params.set("category", filters.category);
   if (filters?.short) params.set("short", "true");
+  // Server max (see pagination.ts) — without it this silently truncated
+  // at the default 50, which both the existing "Download Report" button
+  // and the new PO-aging report (#7) need to see the full list, not a
+  // first page of it.
+  params.set("pageSize", "200");
   const qs = params.toString();
   return useQuery({
     queryKey: ["pre-inventory", "requirements", filters],
-    queryFn: () => api<PreInventoryRequirement[]>(`/api/inventory/requirements${qs ? `?${qs}` : ""}`),
+    queryFn: () => api<PreInventoryRequirement[]>(`/api/inventory/requirements?${qs}`),
   });
 }
 
@@ -662,7 +902,21 @@ export function useSetRequirementPurchase() {
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string; poNumber: string; vendorName: string; eta: string }) =>
       api<PreInventoryRequirement>(`/api/inventory/requirements/${id}/purchase`, { method: "PATCH", body }),
-    onSuccess: () => invalidateRequirements(qc),
+    onSuccess: () => {
+      invalidateRequirements(qc);
+      qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
+    },
+  });
+}
+
+export function useImportPurchaseLog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { rows: ImportPurchaseLogRow[] }) => api<{ posLogged: number; unmatched: string[] }>("/api/inventory/requirements/purchase/import", { method: "POST", body }),
+    onSuccess: () => {
+      invalidateRequirements(qc);
+      qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
+    },
   });
 }
 

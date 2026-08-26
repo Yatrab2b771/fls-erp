@@ -26,7 +26,9 @@ import {
   useBatches,
   useCreateBatch,
   useCreateBomPlan,
+  useCreatePlant,
   useCreateRmPlan,
+  usePlants,
   usePurchaseOrder,
   useRemovePurchaseOrderItem,
   useReviewPurchaseOrder,
@@ -34,6 +36,7 @@ import {
 } from "../lib/hooks";
 import { StageBadge, DelayBadge, PoStatusBadge } from "../components/Badges";
 import { EmptyState } from "../components/EmptyState";
+import { PickerWithAdd } from "../components/PickerWithAdd";
 import { downloadFile, ApiError } from "../lib/api";
 import { useToast } from "../components/Toast";
 import type { Batch, PurchaseOrder, PurchaseOrderItem } from "../lib/types";
@@ -88,6 +91,14 @@ export function PurchaseOrderDetailPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl font-black tracking-tight text-slate-900">{po.poNumber ?? po.id.slice(0, 8)}</h1>
                 <PoStatusBadge status={po.status} />
+                {po.completion.isCompleted && (
+                  <span
+                    className="pill border-emerald-200 bg-emerald-50 text-emerald-700"
+                    title={po.completion.completionDate ? `Every batch shipped & customer-confirmed by ${new Date(po.completion.completionDate).toLocaleDateString()}` : undefined}
+                  >
+                    {po.completion.daysTaken !== null ? `Completed in ${po.completion.daysTaken} day${po.completion.daysTaken === 1 ? "" : "s"}` : "Completed"}
+                  </span>
+                )}
               </div>
               <p className="text-sm text-slate-500">
                 {po.customer.companyName} {po.brandName && `· ${po.brandName}`}
@@ -338,10 +349,13 @@ function ProductionPipeline({ item, batches }: { item: PurchaseOrderItem; batche
 function ProductLineItem({ poId, item, poStatus }: { poId: string; item: PurchaseOrderItem; poStatus: PurchaseOrder["status"] }) {
   const { hasRole } = useAuth();
   const { data: batches } = useBatches(item.id);
+  const { data: plants } = usePlants();
+  const createPlant = useCreatePlant();
   const createBatch = useCreateBatch();
   const removeItem = useRemovePurchaseOrderItem(poId);
   const toast = useToast();
   const [batchNo, setBatchNo] = useState("");
+  const [plantId, setPlantId] = useState("");
   const [showNewBatch, setShowNewBatch] = useState(false);
   const isApproved = poStatus === "APPROVED";
 
@@ -393,19 +407,30 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
       <ProductionPipeline item={item} batches={batches ?? []} />
 
       {showNewBatch && (
-        <div className="mt-3 flex gap-2 border-t border-slate-100 pt-3">
-          <input className="field" placeholder="Batch No. (optional)" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
-          <button
-            className="btn-primary shrink-0"
-            onClick={async () => {
-              await createBatch.mutateAsync({ purchaseOrderItemId: item.id, batchNo: batchNo || undefined });
-              setBatchNo("");
-              setShowNewBatch(false);
-              toast.success("Batch created.");
-            }}
-          >
-            Create
-          </button>
+        <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+          <div className="flex gap-2">
+            <input className="field" placeholder="Batch No. (optional)" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
+            <button
+              className="btn-primary shrink-0"
+              onClick={async () => {
+                await createBatch.mutateAsync({ purchaseOrderItemId: item.id, batchNo: batchNo || undefined, plantId: plantId || undefined });
+                setBatchNo("");
+                setPlantId("");
+                setShowNewBatch(false);
+                toast.success("Batch created.");
+              }}
+            >
+              Create
+            </button>
+          </div>
+          <PickerWithAdd
+            label="Plant (optional — can be set later)"
+            placeholder="— Which plant runs this batch —"
+            options={plants ?? []}
+            value={plantId}
+            onChange={setPlantId}
+            onCreate={(name) => createPlant.mutateAsync(name)}
+          />
         </div>
       )}
 

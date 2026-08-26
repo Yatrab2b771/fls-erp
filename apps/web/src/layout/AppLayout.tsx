@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { Bell, ChevronDown, ClipboardList, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
+import { Bell, CheckCircle2, ChevronDown, ClipboardList, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { formatEmployeeId } from "../lib/format";
 import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications } from "../lib/hooks";
@@ -36,6 +36,7 @@ const TABS: { to: string; label: string; icon: typeof Truck; roles?: RoleName[];
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/purchase-orders", label: "Order Tracking", icon: Truck },
   { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
+  { to: "/po-readiness", label: "PO Readiness", icon: CheckCircle2, roles: ["PPIC"] },
   { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "DISPATCH", "ACCOUNTS"] },
   { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["PPIC", "PURCHASE"] },
   { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["PPIC", "BD"] },
@@ -120,26 +121,36 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </div>
           </div>
 
-          {/* Desktop nav — horizontal pills, centered in the remaining space */}
-          <div className="scrollbar-none hidden flex-1 items-center justify-center gap-1 overflow-x-auto md:flex">
-            {visibleTabs.map((tab) => {
-              const Icon = tab.icon;
-              return (
-                <NavLink
-                  key={tab.to}
-                  to={tab.to}
-                  end={tab.end}
-                  className={({ isActive }) =>
-                    `flex shrink-0 items-center gap-1.5 rounded-xl px-3.5 py-2 text-[13px] font-bold transition-all duration-150 ${
-                      isActive ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(79,70,229,.12)]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                    }`
-                  }
-                >
-                  <Icon className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
-                  <span className="truncate">{tab.label}</span>
-                </NavLink>
-              );
-            })}
+          {/* Desktop nav — horizontal pills. Left-aligned, not centered:
+              justify-center on an overflowing flex row starts the scroll
+              position mid-content, clipping the first tab(s) off the left
+              edge with zero indication there's more to scroll to — that's
+              exactly the "Inventory got cut off" bug this replaces.
+              Edge fades hint that it actually scrolls, since the
+              scrollbar itself is hidden. */}
+          <div className="relative min-w-0 flex-1">
+            <div className="scrollbar-none hidden items-center gap-1 overflow-x-auto md:flex">
+              {visibleTabs.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <NavLink
+                    key={tab.to}
+                    to={tab.to}
+                    end={tab.end}
+                    className={({ isActive }) =>
+                      `flex shrink-0 items-center gap-1.5 rounded-xl px-2.5 py-2 text-[12.5px] font-bold transition-all duration-150 lg:px-3.5 ${
+                        isActive ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(79,70,229,.12)]" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"
+                      }`
+                    }
+                  >
+                    <Icon className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+                    <span className="truncate">{tab.label}</span>
+                  </NavLink>
+                );
+              })}
+            </div>
+            <div className="pointer-events-none absolute inset-y-0 left-0 hidden w-6 bg-gradient-to-r from-white/90 to-transparent md:block" />
+            <div className="pointer-events-none absolute inset-y-0 right-0 hidden w-6 bg-gradient-to-l from-white/90 to-transparent md:block" />
           </div>
 
           <div className="ml-auto flex items-center gap-2 md:ml-0">

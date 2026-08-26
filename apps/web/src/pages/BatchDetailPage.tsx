@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Check, ClipboardEdit, Download, FlaskConical, Lock, Shuffle, Undo2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Beaker, Check, ClipboardEdit, Download, FlaskConical, Lock, Pencil, Plus, Shuffle, Trash2, Undo2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useBatch, useTransitionBatchStage } from "../lib/hooks";
+import { useAssignBatchPlant, useBatch, useCreatePlant, useInventoryItems, usePlants, useTransitionBatchStage } from "../lib/hooks";
 import { BATCH_STAGE_FIELDS, BATCH_STAGE_LABEL, BATCH_STAGE_ORDER, BATCH_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/batchStage";
 import { FieldGrid } from "../components/FieldGrid";
+import { PickerWithAdd } from "../components/PickerWithAdd";
 import { DelayBadge, WastageBadge } from "../components/Badges";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
@@ -57,6 +58,9 @@ export function BatchDetailPage() {
               <p className="text-sm text-slate-500">
                 {batch.purchaseOrderItem.productName} · {po.customer.companyName}
               </p>
+              <div className="mt-1.5">
+                <BatchPlantControl batch={batch} />
+              </div>
             </div>
           </div>
           <ExportReportButton batch={batch} />
@@ -66,6 +70,8 @@ export function BatchDetailPage() {
       <StageProgressStrip batch={batch} />
 
       <CurrentStageCard batch={batch} />
+
+      <ConsumptionHistory batch={batch} />
 
       <StageHistory batch={batch} />
     </div>
@@ -168,6 +174,74 @@ function ExportReportButton({ batch }: { batch: Batch }) {
   );
 }
 
+// Which Plant this batch runs at — PPIC's call, any time (not just at
+// creation). Needed before Dispensing can log real consumption against
+// it (see DispensingConsumption below) — shown to everyone, editable
+// only by PPIC/ADMIN.
+function BatchPlantControl({ batch }: { batch: Batch }) {
+  const { hasRole } = useAuth();
+  const toast = useToast();
+  const { data: plants } = usePlants();
+  const createPlant = useCreatePlant();
+  const assignPlant = useAssignBatchPlant(batch.id);
+  const [editing, setEditing] = useState(false);
+  const [plantId, setPlantId] = useState(batch.plantId ?? "");
+  const canEdit = hasRole("PPIC") || hasRole("ADMIN");
+
+  async function handleSave() {
+    try {
+      await assignPlant.mutateAsync(plantId || null);
+      toast.success(plantId ? "Plant assigned." : "Plant cleared.");
+      setEditing(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not assign Plant");
+    }
+  }
+
+  if (!editing) {
+    return (
+      <div className="flex items-center gap-1.5">
+        {batch.plant ? (
+          <span className="pill border-violet-200 bg-violet-50 text-violet-700">
+            <Beaker className="h-3 w-3" strokeWidth={2.5} /> {batch.plant.name}
+          </span>
+        ) : (
+          <span className="pill border-slate-200 bg-slate-50 text-slate-400">
+            <Beaker className="h-3 w-3" strokeWidth={2.5} /> No Plant assigned
+          </span>
+        )}
+        {canEdit && (
+          <button
+            type="button"
+            className="btn-icon h-6 w-6"
+            title="Assign / change Plant"
+            onClick={() => {
+              setPlantId(batch.plantId ?? "");
+              setEditing(true);
+            }}
+          >
+            <Pencil className="h-3 w-3" strokeWidth={2.25} />
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-end gap-2">
+      <div className="w-56">
+        <PickerWithAdd label="Plant" placeholder="— No Plant —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+      </div>
+      <button type="button" className="btn-primary btn-sm" disabled={assignPlant.isPending} onClick={handleSave}>
+        {assignPlant.isPending ? "…" : "Save"}
+      </button>
+      <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(false)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function CurrentStageCard({ batch }: { batch: Batch }) {
   const { hasRole } = useAuth();
   const stage = batch.currentStageId;
@@ -185,12 +259,14 @@ function CurrentStageCard({ batch }: { batch: Batch }) {
   const [showReject, setShowReject] = useState(false);
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [consumptionLines, setConsumptionLines] = useState<ConsumptionLine[]>([]);
 
   useEffect(() => {
     if (fields) setValues(Object.fromEntries(fields.map((f) => [f.name, fieldValue(batch, f.name)])));
     setShowReject(false);
     setNote("");
     setError(null);
+    setConsumptionLines([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [batch.id, batch.currentStageId]);
 
@@ -199,6 +275,9 @@ function CurrentStageCard({ batch }: { batch: Batch }) {
     const body: Record<string, unknown> = { action: "FORWARD" };
     for (const [key, value] of Object.entries(values)) {
       if (value !== "") body[key] = value;
+    }
+    if (stage === "DISPENSING" && consumptionLines.length > 0) {
+      body.consumption = consumptionLines.map((l) => ({ itemId: l.itemId, quantity: Number(l.quantity), unit: l.unit }));
     }
     try {
       await transition.mutateAsync(body as never);
@@ -251,6 +330,8 @@ function CurrentStageCard({ batch }: { batch: Batch }) {
           <p className="text-xs text-slate-400">This stage is status-only — no fields to fill, just forward or send it back.</p>
         )}
 
+        {canAct && stage === "DISPENSING" && <DispensingConsumptionEditor hasPlant={!!batch.plantId} lines={consumptionLines} onChange={setConsumptionLines} />}
+
         {error && <p className="mt-3 text-xs font-bold text-rose-600">{error}</p>}
 
         {canAct && (
@@ -288,6 +369,126 @@ function CurrentStageCard({ batch }: { batch: Batch }) {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+interface ConsumptionLine {
+  itemId: string;
+  itemName: string;
+  quantity: string;
+  unit: string;
+}
+
+// Real RM/PM consumption — Dispensing only, entirely optional (a batch
+// can still move through Dispensing with just the date/remark fields
+// above, same as before this existed). Each line becomes a
+// BatchMaterialConsumption row on forward, reducing the batch's Plant's
+// real-time balance — see stock.ts getOnHandByPlantAndItem.
+function DispensingConsumptionEditor({ hasPlant, lines, onChange }: { hasPlant: boolean; lines: ConsumptionLine[]; onChange: (lines: ConsumptionLine[]) => void }) {
+  const [category, setCategory] = useState<"RM" | "PM">("RM");
+  const { data: items } = useInventoryItems(category);
+  const [itemId, setItemId] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [unit, setUnit] = useState("Kg");
+
+  function addLine() {
+    const item = items?.find((i) => i.id === itemId);
+    if (!item || !quantity || Number(quantity) <= 0) return;
+    onChange([...lines, { itemId, itemName: item.name, quantity, unit }]);
+    setItemId("");
+    setQuantity("");
+  }
+
+  function removeLine(idx: number) {
+    onChange(lines.filter((_, i) => i !== idx));
+  }
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+      <p className="mb-2 text-xs font-bold text-slate-600">RM/PM Consumption — optional, reduces this batch's Plant balance</p>
+      {!hasPlant ? (
+        <p className="flex items-center gap-1.5 text-xs font-bold text-amber-600">
+          <Lock className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} /> This batch has no Plant assigned — ask PPIC to set one (above) before logging consumption.
+        </p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <select
+              className="field w-auto"
+              value={category}
+              onChange={(e) => {
+                setCategory(e.target.value as "RM" | "PM");
+                setItemId("");
+              }}
+            >
+              <option value="RM">Raw Material</option>
+              <option value="PM">Packaging Material</option>
+            </select>
+            <select className="field min-w-0 flex-1" value={itemId} onChange={(e) => setItemId(e.target.value)}>
+              <option value="">— Select item —</option>
+              {items?.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+            <input className="field w-24 font-mono" type="number" min="0" step="any" placeholder="Qty" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+            <input className="field w-20" placeholder="Unit" value={unit} onChange={(e) => setUnit(e.target.value)} />
+            <button type="button" className="btn-ghost shrink-0" onClick={addLine}>
+              <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add
+            </button>
+          </div>
+          {lines.length > 0 && (
+            <div className="mt-2 space-y-1">
+              {lines.map((l, idx) => (
+                <div key={idx} className="flex items-center justify-between rounded-lg bg-white px-2.5 py-1.5 text-xs">
+                  <span className="font-bold text-slate-700">{l.itemName}</span>
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono text-slate-600">
+                      {l.quantity} {l.unit}
+                    </span>
+                    <button type="button" className="btn-icon h-6 w-6 hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeLine(idx)}>
+                      <Trash2 className="h-3 w-3" strokeWidth={2.25} />
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Every consumption line ever logged on this batch — visible always
+// (not just while at Dispensing), same "it's a ledger, look back any
+// time" reasoning as StageHistory below.
+function ConsumptionHistory({ batch }: { batch: Batch }) {
+  if (batch.consumptions.length === 0) return null;
+  return (
+    <div className="card overflow-hidden">
+      <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+        <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
+          <Beaker className="h-3.5 w-3.5" /> RM/PM Consumption
+        </h3>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {batch.consumptions.map((c) => (
+          <div key={c.id} className="flex items-center justify-between px-4 py-2.5">
+            <span className="text-xs font-bold text-slate-700">{c.item.name}</span>
+            <span className="flex items-center gap-2 text-xs">
+              <span className="font-mono font-bold text-slate-600">
+                {c.quantity} {c.unit}
+              </span>
+              <span className="text-slate-400">
+                {c.createdBy.fullName} · {new Date(c.createdAt).toLocaleDateString()}
+              </span>
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
