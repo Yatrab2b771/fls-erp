@@ -10,9 +10,11 @@ import { BatchDetailPage } from "./pages/BatchDetailPage";
 import { PackagingBomPage } from "./pages/PackagingBomPage";
 import { RmCostingPage } from "./pages/RmCostingPage";
 import { InventoryPage } from "./pages/InventoryPage";
+import { InventoryItemDetailPage } from "./pages/InventoryItemDetailPage";
 import { PreInventoryPage } from "./pages/PreInventoryPage";
 import { PoReadinessPage } from "./pages/PoReadinessPage";
 import { UsersPage } from "./pages/UsersPage";
+import { RecycleBinPage } from "./pages/RecycleBinPage";
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -42,9 +44,11 @@ export default function App() {
           <Route path="/packaging-bom" element={<PackagingBomPage />} />
           <Route path="/rm-costing" element={<RmCostingPage />} />
           <Route path="/inventory" element={<InventoryPage />} />
+          <Route path="/inventory/items/:itemId" element={<InventoryItemDetailPage />} />
           <Route path="/pre-inventory" element={<PreInventoryPage />} />
           <Route path="/po-readiness" element={<PoReadinessPage />} />
           <Route path="/users" element={<UsersPage />} />
+          <Route path="/recycle-bin" element={<RecycleBinPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AppLayout>

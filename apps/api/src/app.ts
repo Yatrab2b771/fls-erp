@@ -21,6 +21,7 @@ import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
 import { dayStoresRouter, plantsRouter } from "./modules/inventory/locations.routes";
 import { notificationsRouter } from "./modules/notifications/notifications.routes";
 import { poReadinessRouter } from "./modules/po-readiness/po-readiness.routes";
+import { recycleBinRouter } from "./modules/recycle-bin/recycle-bin.routes";
 
 export function createApp() {
   const app = express();
@@ -72,6 +73,7 @@ export function createApp() {
   app.use("/api/inventory/plants", plantsRouter);
   app.use("/api/notifications", notificationsRouter);
   app.use("/api/po-readiness", poReadinessRouter);
+  app.use("/api/recycle-bin", recycleBinRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

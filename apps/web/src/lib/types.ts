@@ -696,4 +696,28 @@ export interface ManagedUser {
   roles: RoleName[];
 }
 
+// --- Recycle Bin (Admin only) — every soft-deletable entity type in the
+// system, unified into one list. See recycle-bin.routes.ts for the full
+// reasoning: nothing in this app hard-deletes real data any more. ---
+
+export type RecycleBinEntityType =
+  | "inventory-transaction"
+  | "dispatch-transfer"
+  | "inventory-request"
+  | "po-material-requirement"
+  | "purchase-order-item"
+  | "purchase-order-document"
+  | "bom-plan-item"
+  | "rm-plan-item"
+  | "pre-inventory-requirement";
+
+export interface RecycleBinRow {
+  entityType: RecycleBinEntityType;
+  id: string;
+  label: string;
+  detail: string;
+  deletedAt: string;
+  deletedBy: PersonRef | null;
+}
+
 export const ALL_ROLES: RoleName[] = ["ADMIN", "BD", "PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH"];

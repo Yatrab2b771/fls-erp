@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
-import { Bell, CheckCircle2, ChevronDown, ClipboardList, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
+import { Bell, CheckCircle2, ChevronDown, ClipboardList, FlaskConical, LayoutDashboard, LogOut, Menu, Microscope, Package, RotateCcw, ShieldCheck, Truck, Warehouse, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { formatEmployeeId } from "../lib/format";
 import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications } from "../lib/hooks";
@@ -41,6 +41,7 @@ const TABS: { to: string; label: string; icon: typeof Truck; roles?: RoleName[];
   { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["PPIC", "PURCHASE"] },
   { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["PPIC", "BD"] },
   { to: "/users", label: "Users", icon: ShieldCheck, roles: ["ADMIN"] },
+  { to: "/recycle-bin", label: "Recycle Bin", icon: RotateCcw, roles: ["ADMIN"] },
 ];
 
 function initials(name: string) {

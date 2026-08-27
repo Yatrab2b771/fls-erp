@@ -56,7 +56,9 @@ function serializePlan(plan: {
 }
 
 const planInclude = {
-  items: { include: { sku: { include: { brand: true } } } },
+  // deletedAt: null — a soft-deleted SKU line drops out of the plan the
+  // instant it's removed, same as before, just recoverable now.
+  items: { where: { deletedAt: null }, include: { sku: { include: { brand: true } } } },
   purchaseOrderItem: { include: { purchaseOrder: { select: { id: true, poNumber: true } } } },
 } satisfies Prisma.BomPlanInclude;
 
@@ -158,7 +160,10 @@ bomPlanRouter.delete(
   "/plans/:id/items/:itemId",
   async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
     try {
-      await prisma.bomPlanItem.deleteMany({ where: { id: req.params.itemId, planId: req.params.id } });
+      await prisma.bomPlanItem.updateMany({
+        where: { id: req.params.itemId, planId: req.params.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedById: req.user!.id },
+      });
       // Removing an item invalidates any prior calculation for this plan —
       // same rule POST /items already applies, previously missing here,
       // which left a stale resultSnapshot (for SKUs no longer queued)

@@ -247,7 +247,10 @@ export function PackagingBomPage() {
                           <td className="text-slate-600">{i.productName}</td>
                           <td className="text-center font-mono font-bold text-emerald-700">{i.targetYield}</td>
                           <td className="text-center">
-                            <button className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" onClick={() => removeItem.mutate(i.id)}>
+                            <button
+                              className="btn-icon hover:!bg-rose-50 hover:!text-rose-600"
+                              onClick={() => window.confirm(`Remove "${i.productName}" from this plan?`) && removeItem.mutate(i.id)}
+                            >
                               <X className="h-3.5 w-3.5" strokeWidth={2.25} />
                             </button>
                           </td>

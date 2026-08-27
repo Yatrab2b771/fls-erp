@@ -34,6 +34,8 @@ import type {
   PreInventoryRequirement,
   PurchaseOrder,
   RecipeSummary,
+  RecycleBinEntityType,
+  RecycleBinRow,
   RmPlan,
   RoleName,
   StoreUser,
@@ -471,10 +473,15 @@ export function useInventoryTransactions(
   if (filters?.category) params.set("category", filters.category);
   if (filters?.itemId) params.set("itemId", filters.itemId);
   if (filters?.receiptStatus) params.set("receiptStatus", filters.receiptStatus);
+  // Server max (see pagination.ts) — without it this silently truncated
+  // at the default 50, same gap as every other list hook fixed earlier —
+  // an item's full history (the item detail page) especially needs to
+  // see everything, not a first page of it.
+  params.set("pageSize", "200");
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "transactions", filters],
-    queryFn: () => api<InventoryTransaction[]>(`/api/inventory/transactions${qs ? `?${qs}` : ""}`),
+    queryFn: () => api<InventoryTransaction[]>(`/api/inventory/transactions?${qs}`),
     enabled: options?.enabled,
   });
 }
@@ -1019,5 +1026,29 @@ export function useMarkAllNotificationsRead() {
   return useMutation({
     mutationFn: () => api<{ markedRead: number }>("/api/notifications/read-all", { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+}
+
+// --- Recycle Bin (Admin only) ---
+
+export function useRecycleBin(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["recycle-bin"],
+    queryFn: () => api<RecycleBinRow[]>("/api/recycle-bin"),
+    enabled: options?.enabled,
+  });
+}
+
+export function useRestoreFromRecycleBin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ entityType, id }: { entityType: RecycleBinEntityType; id: string }) => api(`/api/recycle-bin/${entityType}/${id}/restore`, { method: "POST" }),
+    onSuccess: () => {
+      // Broad invalidation on purpose — a restored row can affect almost
+      // any list/stock number in the app depending on which of the nine
+      // entity types it was, and this action is rare enough that a full
+      // refetch costs nothing compared to guessing wrong about scope.
+      qc.invalidateQueries();
+    },
   });
 }

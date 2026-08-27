@@ -109,6 +109,7 @@ export function PoReadinessPage() {
   }
 
   async function handleRemoveItem(purchaseOrderId: string, itemId: string) {
+    if (!window.confirm("Remove this RM/PM requirement from the PO? This can't be undone.")) return;
     try {
       await deleteItem.mutateAsync({ purchaseOrderId, itemId });
       toast.success("Requirement removed.");

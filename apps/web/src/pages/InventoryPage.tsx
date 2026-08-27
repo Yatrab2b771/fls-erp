@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { Link } from "react-router-dom";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
@@ -7,6 +8,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Download,
+  Eye,
   FileSpreadsheet,
   FileText,
   Landmark,
@@ -338,7 +340,8 @@ function StoreAssignmentPanel({ dayStore }: { dayStore: DayStore }) {
     }
   }
 
-  async function handleUnassign(userId: string) {
+  async function handleUnassign(userId: string, userName: string) {
+    if (!window.confirm(`Remove ${userName}'s access to this store?`)) return;
     try {
       await unassignUser.mutateAsync({ dayStoreId: dayStore.id, userId });
     } catch (err) {
@@ -362,7 +365,7 @@ function StoreAssignmentPanel({ dayStore }: { dayStore: DayStore }) {
             {(assignments ?? []).map((a) => (
               <span key={a.userId} className="flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-2 py-1 text-[11px] font-bold text-brand-700">
                 {a.user.fullName}
-                <button type="button" onClick={() => handleUnassign(a.userId)} title="Remove" className="hover:text-rose-600">
+                <button type="button" onClick={() => handleUnassign(a.userId, a.user.fullName)} title="Remove" className="hover:text-rose-600">
                   <X className="h-3 w-3" strokeWidth={2.5} />
                 </button>
               </span>
@@ -946,6 +949,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
               <th className="text-right">Issued (Store)</th>
               <th className="text-right">Issued (Production)</th>
               <th className="text-right">On Hand</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -959,6 +963,11 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
                 <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+                <td className="text-right">
+                  <Link to={`/inventory/items/${s.item.id}`} className="btn-ghost btn-sm inline-flex" title="See everything received/issued for this item">
+                    <Eye className="h-3.5 w-3.5" strokeWidth={2.25} /> View
+                  </Link>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -990,6 +999,7 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
               <th className="text-right">Received (from Warehouse)</th>
               <th className="text-right">Issued (to Production)</th>
               <th className="text-right">On Hand (this store)</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -1001,6 +1011,11 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
                 <td className="text-right font-mono text-slate-600">{s.receivedFromWarehouse}</td>
                 <td className="text-right font-mono text-slate-600">{s.issuedToProduction}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+                <td className="text-right">
+                  <Link to={`/inventory/items/${s.item.id}`} className="btn-ghost btn-sm inline-flex" title="See everything received/issued for this item">
+                    <Eye className="h-3.5 w-3.5" strokeWidth={2.25} /> View
+                  </Link>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1029,6 +1044,7 @@ function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: Pla
               <th>Category</th>
               <th>Unit</th>
               <th className="text-right">On Hand (this plant)</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -1038,6 +1054,11 @@ function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: Pla
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+                <td className="text-right">
+                  <Link to={`/inventory/items/${s.item.id}`} className="btn-ghost btn-sm inline-flex" title="See everything received/issued for this item">
+                    <Eye className="h-3.5 w-3.5" strokeWidth={2.25} /> View
+                  </Link>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1076,6 +1097,7 @@ function TransactionTable({
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
   async function handleDelete(id: string) {
+    if (!window.confirm("Remove this entry? This can't be undone.")) return;
     try {
       await deleteTxn.mutateAsync(id);
       toast.success("Entry removed.");
@@ -1169,6 +1191,7 @@ function DispatchTable({
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
   async function handleDelete(id: string) {
+    if (!window.confirm("Remove this dispatch transfer entry? This can't be undone.")) return;
     try {
       await deleteTransfer.mutateAsync(id);
       toast.success("Entry removed.");
@@ -1694,6 +1717,7 @@ function ReceivedCard({ txn, canQc, canWrite }: { txn: InventoryTransaction; can
   }
 
   async function handleDelete() {
+    if (!window.confirm(`Remove this ${txn.quantity} ${txn.unit} ${txn.item.name} entry? This can't be undone.`)) return;
     try {
       await deleteTxn.mutateAsync(txn.id);
       toast.success("Entry removed.");
@@ -1910,6 +1934,7 @@ function FgTransferCard({
   }
 
   async function handleDelete() {
+    if (!window.confirm(`Remove this ${transfer.quantity} ${transfer.productName} transfer to ${transfer.customer.companyName}? This can't be undone.`)) return;
     try {
       await deleteTransfer.mutateAsync(transfer.id);
       toast.success("Entry removed.");
@@ -2298,6 +2323,7 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
   }
 
   async function handleWithdraw() {
+    if (!window.confirm(`Withdraw this request for ${request.requestedQty} ${request.item.name}? This can't be undone.`)) return;
     try {
       await deleteRequest.mutateAsync(request.id);
       toast.success("Request withdrawn.");

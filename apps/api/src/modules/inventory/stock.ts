@@ -19,7 +19,11 @@ type Db = Pick<PrismaClient, "inventoryTransaction" | "batchMaterialConsumption"
 // Availability" step; PPIC's requirement is compared against this same
 // number, live, every time it's read).
 export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Promise<Map<string, number>> {
-  const itemFilter: Prisma.InventoryTransactionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
+  // deletedAt: null everywhere in this file — a soft-deleted transaction
+  // (Recycle Bin) stops counting toward stock the instant it's removed,
+  // same as the hard delete this replaced did, and starts counting again
+  // the instant an Admin restores it.
+  const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
   const [receivedTotals, issuedDayStoreTotals, issuedProductionTotals] = await Promise.all([
     // Only ACCEPTED counts — a delivery still sitting in QC, or one QC
@@ -66,7 +70,7 @@ export interface DayStoreBalance {
 // nets out both ISSUED_* types regardless of which store they went
 // through.
 export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: string[], db: Db = prisma): Promise<Map<string, DayStoreBalance>> {
-  const itemFilter: Prisma.InventoryTransactionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
+  const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
   const [issuedToStoreTotals, issuedFromStoreTotals] = await Promise.all([
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE", dayStoreId }, _sum: { quantity: true } }),
@@ -95,7 +99,7 @@ export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: s
 // the Inventory side for the outflow; it lives entirely in the Batches
 // module, joined here through Batch.plantId.
 export async function getOnHandByPlantAndItem(plantId: string, itemIds?: string[], db: Db = prisma): Promise<Map<string, number>> {
-  const itemFilter: Prisma.InventoryTransactionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
+  const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
   const consumptionItemFilter: Prisma.BatchMaterialConsumptionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
 
   const [issuedToPlantTotals, consumedTotals] = await Promise.all([
@@ -172,7 +176,7 @@ export async function notifyIfNewlyAvailable(params: { itemId: string; addedQty:
 
   const [item, requirements] = await Promise.all([
     prisma.inventoryItem.findUnique({ where: { id: itemId } }),
-    prisma.preInventoryRequirement.findMany({ where: { itemId }, select: { id: true, requestedById: true } }),
+    prisma.preInventoryRequirement.findMany({ where: { itemId, deletedAt: null }, select: { id: true, requestedById: true } }),
   ]);
   if (!item || requirements.length === 0) return; // nobody's waiting on this one
 

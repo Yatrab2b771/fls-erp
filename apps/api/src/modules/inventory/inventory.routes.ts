@@ -122,9 +122,9 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, nex
       // rejected, hasn't actually become usable stock yet. rejectedQty
       // is summed alongside quantity so a partially-rejected delivery
       // only counts its actually-usable remainder (see qcReviewSchema).
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED", receiptStatus: "ACCEPTED" }, _sum: { quantity: true, rejectedQty: true } }),
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null }, _sum: { quantity: true, rejectedQty: true } }),
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE", deletedAt: null }, _sum: { quantity: true } }),
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION", deletedAt: null }, _sum: { quantity: true } }),
     ]);
 
     // Kept as one bulk breakdown (received/issued-day-store/
@@ -200,13 +200,13 @@ inventoryRouter.get("/vendors", requireRole("STORE", "PURCHASE"), async (req, re
   try {
     const itemId = typeof req.query.itemId === "string" ? req.query.itemId : undefined;
     const [txnRows, requirementRows, lastTxn, lastRequirement] = await Promise.all([
-      prisma.inventoryTransaction.findMany({ where: { vendorName: { not: null } }, distinct: ["vendorName"], select: { vendorName: true } }),
-      prisma.preInventoryRequirement.findMany({ where: { vendorName: { not: null } }, distinct: ["vendorName"], select: { vendorName: true } }),
+      prisma.inventoryTransaction.findMany({ where: { vendorName: { not: null }, deletedAt: null }, distinct: ["vendorName"], select: { vendorName: true } }),
+      prisma.preInventoryRequirement.findMany({ where: { vendorName: { not: null }, deletedAt: null }, distinct: ["vendorName"], select: { vendorName: true } }),
       itemId
-        ? prisma.inventoryTransaction.findFirst({ where: { itemId, vendorName: { not: null } }, orderBy: { date: "desc" }, select: { vendorName: true, date: true } })
+        ? prisma.inventoryTransaction.findFirst({ where: { itemId, vendorName: { not: null }, deletedAt: null }, orderBy: { date: "desc" }, select: { vendorName: true, date: true } })
         : null,
       itemId
-        ? prisma.preInventoryRequirement.findFirst({ where: { itemId, vendorName: { not: null } }, orderBy: { purchaseAt: "desc" }, select: { vendorName: true, purchaseAt: true } })
+        ? prisma.preInventoryRequirement.findFirst({ where: { itemId, vendorName: { not: null }, deletedAt: null }, orderBy: { purchaseAt: "desc" }, select: { vendorName: true, purchaseAt: true } })
         : null,
     ]);
     const names = new Set([...txnRows, ...requirementRows].map((r) => r.vendorName).filter((v): v is string => !!v));
@@ -252,6 +252,7 @@ inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC"), async (req, 
     const pagination = parsePagination(req);
 
     const where: Prisma.InventoryTransactionWhereInput = {
+      deletedAt: null,
       ...(type ? { type } : {}),
       ...(itemId ? { itemId } : {}),
       ...(category ? { item: { category } } : {}),
@@ -543,7 +544,7 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
 inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const txn = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
-    if (!txn) return res.status(404).json({ error: "Transaction not found" });
+    if (!txn || txn.deletedAt) return res.status(404).json({ error: "Transaction not found" });
 
     // Deleting a row can send stock negative from either direction:
     // - An ACCEPTED RECEIVED row is an inflow to the Warehouse-wide
@@ -596,9 +597,9 @@ inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: Au
               );
             }
           }
-          await tx.inventoryTransaction.delete({ where: { id: req.params.id } });
+          await tx.inventoryTransaction.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
         })
-      : prisma.inventoryTransaction.delete({ where: { id: req.params.id } }));
+      : prisma.inventoryTransaction.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } }));
 
     await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_removed", entityType: "InventoryTransaction", entityId: req.params.id, metadata: { itemId: txn.itemId, type: txn.type } });
 
@@ -725,7 +726,9 @@ const requestInclude = {
   requestedBy: { select: { id: true, employeeId: true, fullName: true } },
   reviewedBy: { select: { id: true, employeeId: true, fullName: true } },
   plant: true,
-  fulfillments: { include: { dayStore: true }, orderBy: { createdAt: "asc" } },
+  // deletedAt: null — a soft-deleted fulfillment stops counting toward
+  // issuedQty/remainingQty immediately, same as it would've if hard-deleted.
+  fulfillments: { where: { deletedAt: null }, include: { dayStore: true }, orderBy: { createdAt: "asc" } },
 } satisfies Prisma.InventoryRequestInclude;
 
 type RequestRow = Prisma.InventoryRequestGetPayload<{ include: typeof requestInclude }>;
@@ -743,6 +746,7 @@ inventoryRouter.get("/requests", requireRole("STORE", "PPIC"), async (req: Authe
     const pagination = parsePagination(req);
 
     const where: Prisma.InventoryRequestWhereInput = {
+      deletedAt: null,
       ...(status ? { status } : {}),
       // PPIC (not also Store/Admin) only ever sees its own indents —
       // it's a request queue, not a window into the whole warehouse.
@@ -1005,7 +1009,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
 inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.inventoryRequest.findUnique({ where: { id: req.params.id } });
-    if (!existing) return res.status(404).json({ error: "Request not found" });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Request not found" });
     if (existing.status === "ISSUED" || existing.status === "PARTIALLY_ISSUED") {
       return res.status(409).json({ error: "This request already has real ledger transactions against it and can't be removed" });
     }
@@ -1014,7 +1018,7 @@ inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req
     const isStoreOrAdmin = req.user!.roles.includes("STORE") || req.user!.roles.includes("ADMIN");
     if (!isOwner && !isStoreOrAdmin) return res.status(403).json({ error: "You do not have permission to perform this action" });
 
-    await prisma.inventoryRequest.delete({ where: { id: req.params.id } });
+    await prisma.inventoryRequest.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
 
     await recordAudit({ actorId: req.user!.id, action: "inventory_request.removed", entityType: "InventoryRequest", entityId: req.params.id, metadata: { status: existing.status } });
 
@@ -1047,6 +1051,7 @@ inventoryRouter.get("/dispatch-transfers", requireRole("STORE", "QA_QC", "DISPAT
     const pagination = parsePagination(req);
 
     const where: Prisma.DispatchTransferWhereInput = {
+      deletedAt: null,
       ...(type ? { type } : {}),
       ...(customerId ? { customerId } : {}),
       ...(qcStatus ? { qcStatus } : {}),
@@ -1076,7 +1081,7 @@ inventoryRouter.get("/dispatch-transfers", requireRole("STORE", "QA_QC", "DISPAT
 inventoryRouter.get("/reports/customer-reconciliation", requireRole("STORE", "ACCOUNTS"), async (_req, res, next) => {
   try {
     const transfers = await prisma.dispatchTransfer.findMany({
-      where: { type: "FG", dispatchedAt: { not: null } },
+      where: { type: "FG", dispatchedAt: { not: null }, deletedAt: null },
       select: { quantity: true, invoicedAt: true, customer: { select: { id: true, companyName: true } } },
     });
 
@@ -1324,9 +1329,9 @@ inventoryRouter.patch("/dispatch-transfers/:id/invoice", requireRole("ACCOUNTS")
 inventoryRouter.delete("/dispatch-transfers/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const transfer = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
-    if (!transfer) return res.status(404).json({ error: "Dispatch transfer not found" });
+    if (!transfer || transfer.deletedAt) return res.status(404).json({ error: "Dispatch transfer not found" });
 
-    await prisma.dispatchTransfer.delete({ where: { id: req.params.id } });
+    await prisma.dispatchTransfer.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
 
     await recordAudit({
       actorId: req.user!.id,

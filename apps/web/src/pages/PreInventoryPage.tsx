@@ -391,6 +391,7 @@ function RequirementCard({ requirement, canPurchase, isOwner }: { requirement: P
   }
 
   async function handleDelete() {
+    if (!window.confirm(`Remove this requirement for ${requirement.requiredQty} ${requirement.unit} ${requirement.item.name}? This can't be undone.`)) return;
     try {
       await deleteRequirement.mutateAsync(requirement.id);
       toast.success("Requirement removed.");

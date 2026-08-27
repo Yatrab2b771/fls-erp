@@ -41,10 +41,14 @@ poReadinessRouter.post("/", requireRole("PPIC"), validateBody(createPoRequiremen
     // Same upsert-on-(PO, item) as the bulk path — re-adding the same
     // pair from the form is a correction (update the quantity), not a
     // duplicate row PPIC would have to notice and clean up themselves.
+    // If that (PO, item) pair was previously soft-deleted, this same
+    // unique key matches the deleted row — clearing deletedAt/deletedById
+    // on the update branch "un-deletes" it in place instead of leaving a
+    // resurrected-but-still-hidden row behind.
     const requirement = await prisma.poMaterialRequirement.upsert({
       where: { purchaseOrderId_itemId: { purchaseOrderId: data.purchaseOrderId, itemId: data.itemId } },
       create: { ...data, createdById: req.user!.id },
-      update: { requiredQty: data.requiredQty, unit: data.unit, category: data.category },
+      update: { requiredQty: data.requiredQty, unit: data.unit, category: data.category, deletedAt: null, deletedById: null },
       include: { item: true, purchaseOrder: { select: { poNumber: true } } },
     });
 
@@ -110,7 +114,9 @@ poReadinessRouter.post("/import", requireRole("PPIC"), validateBody(importPoRequ
       await prisma.poMaterialRequirement.upsert({
         where: { purchaseOrderId_itemId: { purchaseOrderId, itemId } },
         create: { purchaseOrderId, itemId, category: row.category, requiredQty: row.requiredQty, unit: row.unit, createdById: req.user!.id },
-        update: { requiredQty: row.requiredQty, unit: row.unit, category: row.category },
+        // deletedAt/deletedById cleared — see the manual-add route's own
+        // comment on this same pattern for why.
+        update: { requiredQty: row.requiredQty, unit: row.unit, category: row.category, deletedAt: null, deletedById: null },
       });
       rowsImported += 1;
     }
@@ -160,6 +166,7 @@ interface PoReadinessRow {
 // just reintroduced at the query level instead of the math level.
 async function computeReadiness(filterPoIds?: string[]): Promise<PoReadinessRow[]> {
   const requirements = await prisma.poMaterialRequirement.findMany({
+    where: { deletedAt: null },
     include: { item: true, purchaseOrder: { include: poSummaryInclude } },
     orderBy: { createdAt: "asc" },
   });
@@ -233,9 +240,9 @@ poReadinessRouter.delete("/:purchaseOrderId/items/:itemId", requireRole("PPIC"),
     const existing = await prisma.poMaterialRequirement.findUnique({
       where: { purchaseOrderId_itemId: { purchaseOrderId: req.params.purchaseOrderId, itemId: req.params.itemId } },
     });
-    if (!existing) return res.status(404).json({ error: "Requirement row not found" });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Requirement row not found" });
 
-    await prisma.poMaterialRequirement.delete({ where: { id: existing.id } });
+    await prisma.poMaterialRequirement.update({ where: { id: existing.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
     await recordAudit({ actorId: req.user!.id, action: "po_readiness.requirement_removed", entityType: "PoMaterialRequirement", entityId: existing.id });
 
     res.status(204).send();

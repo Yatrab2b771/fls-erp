@@ -6,7 +6,7 @@ import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
-import { deleteUploadedFile, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
+import { detectFileType, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { buildPurchaseOrderPdf } from "./po-pdf";
 import {
@@ -29,13 +29,18 @@ purchaseOrdersRouter.use(requireAuth);
 
 // Photo or PDF only, per the intake form's "Upload" control — matches how
 // a PO is actually received (a scan or a forwarded PDF), nothing else.
+//
+// No fileFilter here on purpose: the field the browser sends as
+// `file.mimetype` is just the multipart part's Content-Type header, which
+// the uploader fully controls — a curl/Postman/Burp request can label
+// anything (an .exe, a script) "application/pdf" and walk straight past a
+// check like that. The real gate is `detectFileType()` below, which reads
+// the actual bytes multer buffered in memory. Only the byte count (20MB
+// cap) is enforced up front, since that's a genuine request-level limit,
+// not a claim the client can lie about.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith("image/") || file.mimetype === "application/pdf") return cb(null, true);
-    cb(new MulterError("LIMIT_UNEXPECTED_FILE", "Only image or PDF files are accepted"));
-  },
 });
 
 // multer's own errors (bad file type via fileFilter, file too large) land
@@ -52,6 +57,9 @@ const poInclude = {
   customer: { select: { id: true, companyName: true } },
   reviewedBy: { select: { id: true, fullName: true } },
   items: {
+    // deletedAt: null — a soft-deleted line item drops out of the PO the
+    // instant it's removed, same as before, just recoverable now.
+    where: { deletedAt: null },
     include: {
       _count: { select: { batches: true } },
       // Lightweight summaries only — full plan detail (items, calculated
@@ -67,7 +75,8 @@ const poInclude = {
     },
     orderBy: { createdAt: "asc" },
   },
-  documents: { select: { id: true, filename: true, mimeType: true, uploadedAt: true, uploadedById: true } },
+  // deletedAt: null — same reasoning as items above.
+  documents: { where: { deletedAt: null }, select: { id: true, filename: true, mimeType: true, uploadedAt: true, uploadedById: true } },
 } satisfies Prisma.PurchaseOrderInclude;
 
 type PoWithBatches = Prisma.PurchaseOrderGetPayload<{ include: typeof poInclude }>;
@@ -427,7 +436,7 @@ purchaseOrdersRouter.patch(
 purchaseOrdersRouter.delete("/:id/items/:itemId", requireRole("BD"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
   try {
     const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { _count: { select: { batches: true } } } });
-    if (!item || item.purchaseOrderId !== req.params.id) return res.status(404).json({ error: "Line item not found" });
+    if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
 
     // Batch.purchaseOrderItemId cascades on delete — this item's own
     // production Batches (and everything hanging off each one:
@@ -444,7 +453,7 @@ purchaseOrdersRouter.delete("/:id/items/:itemId", requireRole("BD"), async (req:
       });
     }
 
-    await prisma.purchaseOrderItem.delete({ where: { id: req.params.itemId } });
+    await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
 
     await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_removed", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: req.params.itemId } });
 
@@ -461,12 +470,25 @@ purchaseOrdersRouter.post("/:id/documents", requireRole("BD"), upload.single("fi
     if (!order) return res.status(404).json({ error: "Purchase order not found" });
     if (!req.file) return res.status(400).json({ error: "No file uploaded (expected multipart field \"file\")" });
 
-    const storagePath = saveUploadedFile(req.file.originalname, req.file.buffer);
+    // Identify the file from its real bytes, not the filename or
+    // Content-Type the request claims — see the comment on `upload` above.
+    // Anything that isn't actually a PDF or a supported image is rejected
+    // here, before it ever touches disk.
+    const detected = detectFileType(req.file.buffer);
+    if (!detected) {
+      return res.status(400).json({ error: "That file isn't a PDF or a supported image (JPEG, PNG, GIF, WEBP, BMP) — the upload was rejected." });
+    }
+
+    const storagePath = saveUploadedFile(detected.ext, req.file.buffer);
     const doc = await prisma.purchaseOrderDocument.create({
       data: {
         purchaseOrderId: req.params.id,
+        // Original filename is kept only as a display label (and is what
+        // downloads back as the Content-Disposition filename) — it never
+        // decides the stored extension or MIME type, both of which come
+        // from `detected` above.
         filename: req.file.originalname,
-        mimeType: req.file.mimetype,
+        mimeType: detected.mimeType,
         storagePath,
         uploadedById: req.user!.id,
       },
@@ -486,7 +508,7 @@ purchaseOrdersRouter.post("/:id/documents", requireRole("BD"), upload.single("fi
 purchaseOrdersRouter.get("/:id/documents/:docId/download", async (req: AuthedRequest<{ id: string; docId: string }>, res, next) => {
   try {
     const doc = await prisma.purchaseOrderDocument.findUnique({ where: { id: req.params.docId } });
-    if (!doc || doc.purchaseOrderId !== req.params.id) return res.status(404).json({ error: "Document not found" });
+    if (!doc || doc.purchaseOrderId !== req.params.id || doc.deletedAt) return res.status(404).json({ error: "Document not found" });
 
     res.setHeader("Content-Type", doc.mimeType);
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(doc.filename)}"`);
@@ -499,10 +521,11 @@ purchaseOrdersRouter.get("/:id/documents/:docId/download", async (req: AuthedReq
 purchaseOrdersRouter.delete("/:id/documents/:docId", requireRole("BD"), async (req: AuthedRequest<{ id: string; docId: string }>, res, next) => {
   try {
     const doc = await prisma.purchaseOrderDocument.findUnique({ where: { id: req.params.docId } });
-    if (!doc || doc.purchaseOrderId !== req.params.id) return res.status(404).json({ error: "Document not found" });
+    if (!doc || doc.purchaseOrderId !== req.params.id || doc.deletedAt) return res.status(404).json({ error: "Document not found" });
 
-    await prisma.purchaseOrderDocument.delete({ where: { id: req.params.docId } });
-    deleteUploadedFile(doc.storagePath);
+    // Soft delete only — the file on disk stays put (see storage.ts)
+    // so a Recycle Bin restore has something real to bring back.
+    await prisma.purchaseOrderDocument.update({ where: { id: req.params.docId }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
 
     await recordAudit({ actorId: req.user!.id, action: "purchase_order.document_removed", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { documentId: req.params.docId } });
 

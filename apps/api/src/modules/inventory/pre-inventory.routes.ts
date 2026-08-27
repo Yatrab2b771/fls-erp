@@ -63,6 +63,7 @@ preInventoryRouter.get("/", requireRole("PPIC", "STORE", "PURCHASE", "ACCOUNTS",
     const isPpicOnly = req.user!.roles.every((r) => r === "PPIC");
 
     const where: Prisma.PreInventoryRequirementWhereInput = {
+      deletedAt: null,
       ...(category ? { category } : {}),
       ...(isPpicOnly ? { requestedById: req.user!.id } : {}),
     };
@@ -227,7 +228,7 @@ preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBod
     const { rows } = req.body as ImportPurchaseLogInput;
 
     const openRequirements = await prisma.preInventoryRequirement.findMany({
-      where: { purchaseAt: null },
+      where: { purchaseAt: null, deletedAt: null },
       include: { item: true },
       orderBy: { createdAt: "asc" },
     });
@@ -344,14 +345,14 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
 preInventoryRouter.delete("/:id", requireRole("PPIC", "STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id } });
-    if (!existing) return res.status(404).json({ error: "Requirement not found" });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Requirement not found" });
     if (existing.purchaseAt) return res.status(409).json({ error: "A PO has already been logged against this — it can't be removed" });
 
     const isOwner = existing.requestedById === req.user!.id;
     const isStoreOrAdmin = req.user!.roles.includes("STORE") || req.user!.roles.includes("ADMIN");
     if (!isOwner && !isStoreOrAdmin) return res.status(403).json({ error: "You do not have permission to perform this action" });
 
-    await prisma.preInventoryRequirement.delete({ where: { id: req.params.id } });
+    await prisma.preInventoryRequirement.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
     await recordAudit({ actorId: req.user!.id, action: "pre_inventory.requirement_removed", entityType: "PreInventoryRequirement", entityId: req.params.id });
 
     res.status(204).send();

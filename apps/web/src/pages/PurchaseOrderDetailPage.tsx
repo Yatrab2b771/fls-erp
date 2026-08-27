@@ -393,6 +393,7 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
             <button
               className="btn-icon hover:!bg-rose-50 hover:!text-rose-600"
               onClick={async () => {
+                if (!window.confirm(`Remove "${item.productName}" from this PO? This can't be undone.`)) return;
                 await removeItem.mutateAsync(item.id);
                 toast.success(`${item.productName} removed from this PO.`);
               }}

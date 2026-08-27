@@ -50,33 +50,45 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  roles                     UserRole[]
-  auditLogs                 AuditLog[]
-  customersCreated          Customer[]
-  purchaseOrders            PurchaseOrder[]           @relation("PurchaseOrderCreatedBy")
-  purchaseOrdersReviewed    PurchaseOrder[]           @relation("PurchaseOrderReviewedBy")
-  uploadedDocuments         PurchaseOrderDocument[]
-  bomPlans                  BomPlan[]
-  rmPlans                   RmPlan[]
-  batchStageEvents          BatchStageEvent[]
-  inventoryTxns             InventoryTransaction[]
-  dispatchTransfers         DispatchTransfer[]
-  inventoryRequested        InventoryRequest[]        @relation("InventoryRequestRequestedBy")
-  inventoryReviewed         InventoryRequest[]        @relation("InventoryRequestReviewedBy")
-  inventoryQcChecked        InventoryTransaction[]    @relation("InventoryTxnQcCheckedBy")
-  inventoryAccepted         InventoryTransaction[]    @relation("InventoryTxnAcceptedBy")
-  dispatchQcChecked         DispatchTransfer[]        @relation("DispatchTransferQcCheckedBy")
-  notifications             Notification[]
-  dayStoresCreated          DayStore[]                @relation("DayStoreCreatedBy")
-  plantsCreated             Plant[]                   @relation("PlantCreatedBy")
-  batchConsumptionsLogged   BatchMaterialConsumption[]
-  preInventoryRequested     PreInventoryRequirement[] @relation("PreInventoryRequirementRequestedBy")
-  preInventoryPurchased     PreInventoryRequirement[] @relation("PreInventoryRequirementPurchaseBy")
-  dispatchTransfersSent     DispatchTransfer[]        @relation("DispatchTransferDispatchedBy")
-  dispatchTransfersInvoiced DispatchTransfer[]        @relation("DispatchTransferInvoicedBy")
-  dayStoreAssignments       DayStoreAssignment[]       @relation("DayStoreAssignmentUser")
-  dayStoreAssignmentsGranted DayStoreAssignment[]      @relation("DayStoreAssignmentAssignedBy")
+  roles                       UserRole[]
+  auditLogs                   AuditLog[]
+  customersCreated            Customer[]
+  purchaseOrders              PurchaseOrder[]            @relation("PurchaseOrderCreatedBy")
+  purchaseOrdersReviewed      PurchaseOrder[]            @relation("PurchaseOrderReviewedBy")
+  uploadedDocuments           PurchaseOrderDocument[]
+  bomPlans                    BomPlan[]
+  rmPlans                     RmPlan[]
+  batchStageEvents            BatchStageEvent[]
+  inventoryTxns               InventoryTransaction[]
+  dispatchTransfers           DispatchTransfer[]
+  inventoryRequested          InventoryRequest[]         @relation("InventoryRequestRequestedBy")
+  inventoryReviewed           InventoryRequest[]         @relation("InventoryRequestReviewedBy")
+  inventoryQcChecked          InventoryTransaction[]     @relation("InventoryTxnQcCheckedBy")
+  inventoryAccepted           InventoryTransaction[]     @relation("InventoryTxnAcceptedBy")
+  dispatchQcChecked           DispatchTransfer[]         @relation("DispatchTransferQcCheckedBy")
+  notifications               Notification[]
+  dayStoresCreated            DayStore[]                 @relation("DayStoreCreatedBy")
+  plantsCreated               Plant[]                    @relation("PlantCreatedBy")
+  batchConsumptionsLogged     BatchMaterialConsumption[]
+  preInventoryRequested       PreInventoryRequirement[]  @relation("PreInventoryRequirementRequestedBy")
+  preInventoryPurchased       PreInventoryRequirement[]  @relation("PreInventoryRequirementPurchaseBy")
+  dispatchTransfersSent       DispatchTransfer[]         @relation("DispatchTransferDispatchedBy")
+  dispatchTransfersInvoiced   DispatchTransfer[]         @relation("DispatchTransferInvoicedBy")
+  dayStoreAssignments         DayStoreAssignment[]       @relation("DayStoreAssignmentUser")
+  dayStoreAssignmentsGranted  DayStoreAssignment[]       @relation("DayStoreAssignmentAssignedBy")
   poMaterialRequirementsAdded PoMaterialRequirement[]
+
+  // Recycle Bin — who soft-deleted what. See the model comments above
+  // each of these ("Soft delete") and recycle-bin.routes.ts.
+  poMaterialRequirementsDeleted   PoMaterialRequirement[]   @relation("PoMaterialRequirementDeletedBy")
+  purchaseOrderDocumentsDeleted   PurchaseOrderDocument[]   @relation("PurchaseOrderDocumentDeletedBy")
+  purchaseOrderItemsDeleted       PurchaseOrderItem[]       @relation("PurchaseOrderItemDeletedBy")
+  bomPlanItemsDeleted             BomPlanItem[]             @relation("BomPlanItemDeletedBy")
+  rmPlanItemsDeleted              RmPlanItem[]              @relation("RmPlanItemDeletedBy")
+  preInventoryRequirementsDeleted PreInventoryRequirement[] @relation("PreInventoryRequirementDeletedBy")
+  inventoryRequestsDeleted        InventoryRequest[]        @relation("InventoryRequestDeletedBy")
+  inventoryTxnsDeleted            InventoryTransaction[]    @relation("InventoryTransactionDeletedBy")
+  dispatchTransfersDeleted        DispatchTransfer[]        @relation("DispatchTransferDeletedBy")
 
   @@map("users")
 }
@@ -203,11 +215,11 @@ model PurchaseOrder {
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
-  customer   Customer                @relation(fields: [customerId], references: [id])
-  createdBy  User                    @relation("PurchaseOrderCreatedBy", fields: [createdById], references: [id])
-  reviewedBy User?                   @relation("PurchaseOrderReviewedBy", fields: [reviewedById], references: [id])
-  items      PurchaseOrderItem[]
-  documents  PurchaseOrderDocument[]
+  customer             Customer                @relation(fields: [customerId], references: [id])
+  createdBy            User                    @relation("PurchaseOrderCreatedBy", fields: [createdById], references: [id])
+  reviewedBy           User?                   @relation("PurchaseOrderReviewedBy", fields: [reviewedById], references: [id])
+  items                PurchaseOrderItem[]
+  documents            PurchaseOrderDocument[]
   materialRequirements PoMaterialRequirement[]
 
   @@map("purchase_orders")
@@ -235,10 +247,17 @@ model PoMaterialRequirement {
   createdById     String
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
+  // Soft delete — see the Recycle Bin comment block near the bottom of
+  // this file for the shared reasoning across every model that has
+  // these two fields. Reads everywhere filter deletedAt: null; nothing
+  // in this app hard-deletes this row any more.
+  deletedAt       DateTime?
+  deletedById     String?
 
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
   item          InventoryItem @relation(fields: [itemId], references: [id])
   createdBy     User          @relation(fields: [createdById], references: [id])
+  deletedBy     User?         @relation("PoMaterialRequirementDeletedBy", fields: [deletedById], references: [id])
 
   // One row per (PO, item) — re-uploading the same PO+item pair updates the
   // quantity in place (a corrected sheet) instead of creating a duplicate
@@ -253,16 +272,22 @@ model PoMaterialRequirement {
 // separately from the header so a PO can carry more than one attachment
 // (e.g. a scan plus a follow-up clarification email as PDF).
 model PurchaseOrderDocument {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   purchaseOrderId String
   filename        String
   mimeType        String
   storagePath     String
   uploadedById    String
-  uploadedAt      DateTime @default(now())
+  uploadedAt      DateTime  @default(now())
+  // Soft delete — the underlying file on disk is never removed either
+  // (see storage.ts / purchase-orders.routes.ts); a "delete" here only
+  // hides the record until an Admin restores it from the Recycle Bin.
+  deletedAt       DateTime?
+  deletedById     String?
 
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
   uploadedBy    User          @relation(fields: [uploadedById], references: [id])
+  deletedBy     User?         @relation("PurchaseOrderDocumentDeletedBy", fields: [deletedById], references: [id])
 
   @@map("purchase_order_documents")
 }
@@ -271,7 +296,7 @@ model PurchaseOrderDocument {
 // intake form needs. Each line item can require more than one production
 // batch to fulfill its quantity, so Batch hangs off this, not off the PO.
 model PurchaseOrderItem {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   purchaseOrderId String
   productName     String
   dosageForm      String?
@@ -281,8 +306,13 @@ model PurchaseOrderItem {
   packSize        String?
   packType        String?
   bomRef          String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  // Soft delete — only reachable when no Batch exists against this item
+  // (see the route's own guard); a real production history is never at
+  // risk of being hidden this way.
+  deletedAt       DateTime?
+  deletedById     String?
 
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
   batches       Batch[]
@@ -290,6 +320,7 @@ model PurchaseOrderItem {
   // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
   bomPlans      BomPlan[]
   rmPlans       RmPlan[]
+  deletedBy     User?         @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("purchase_order_items")
 }
@@ -574,15 +605,19 @@ model BomPlan {
 }
 
 model BomPlanItem {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   planId      String
   skuId       String
   targetYield Int
   addedById   String
-  addedAt     DateTime @default(now())
+  addedAt     DateTime  @default(now())
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
 
-  plan BomPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  sku  Sku     @relation(fields: [skuId], references: [id])
+  plan      BomPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  sku       Sku     @relation(fields: [skuId], references: [id])
+  deletedBy User?   @relation("BomPlanItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("bom_plan_items")
 }
@@ -670,15 +705,19 @@ model RmPlan {
 }
 
 model RmPlanItem {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   planId      String
   recipeId    String
   batchSizeKg Float
   addedById   String
-  addedAt     DateTime @default(now())
+  addedAt     DateTime  @default(now())
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
 
-  plan   RmPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  recipe Recipe @relation(fields: [recipeId], references: [id])
+  plan      RmPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  recipe    Recipe @relation(fields: [recipeId], references: [id])
+  deletedBy User?  @relation("RmPlanItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("rm_plan_items")
 }
@@ -857,9 +896,14 @@ model PreInventoryRequirement {
   purchaseById String?
   purchaseAt   DateTime?
 
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
+
   item        InventoryItem @relation(fields: [itemId], references: [id])
   requestedBy User          @relation("PreInventoryRequirementRequestedBy", fields: [requestedById], references: [id])
   purchaseBy  User?         @relation("PreInventoryRequirementPurchaseBy", fields: [purchaseById], references: [id])
+  deletedBy   User?         @relation("PreInventoryRequirementDeletedBy", fields: [deletedById], references: [id])
 
   @@index([category])
   @@index([itemId])
@@ -907,10 +951,16 @@ model InventoryRequest {
   // not need one.
   plantId String?
 
+  // Soft delete — this is the "withdraw" action on a request Store hasn't
+  // issued anything against yet.
+  deletedAt   DateTime?
+  deletedById String?
+
   item         InventoryItem          @relation(fields: [itemId], references: [id])
   requestedBy  User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
   reviewedBy   User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
   plant        Plant?                 @relation(fields: [plantId], references: [id])
+  deletedBy    User?                  @relation("InventoryRequestDeletedBy", fields: [deletedById], references: [id])
   // One request can now be issued against more than once (partial
   // fulfillment) — issuedQty/remainingQty are derived by summing these,
   // never stored, same "never let a number drift out of sync" rule as
@@ -998,12 +1048,20 @@ model InventoryTransaction {
   expiryDate DateTime?
   remark     String?
 
+  // Soft delete — every stock-on-hand calculation in stock.ts filters
+  // deletedAt: null, so a "deleted" receipt/issue stops counting toward
+  // stock the instant it's removed, same as a hard delete used to —
+  // it just isn't gone forever any more.
+  deletedAt   DateTime?
+  deletedById String?
+
   item        InventoryItem @relation(fields: [itemId], references: [id])
   createdBy   User          @relation(fields: [createdById], references: [id])
   qcCheckedBy User?         @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
   acceptedBy  User?         @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
   dayStore    DayStore?     @relation(fields: [dayStoreId], references: [id])
   plant       Plant?        @relation(fields: [plantId], references: [id])
+  deletedBy   User?         @relation("InventoryTransactionDeletedBy", fields: [deletedById], references: [id])
 
   @@index([itemId])
   @@index([type, date])
@@ -1081,6 +1139,10 @@ model DispatchTransfer {
   invoicedById  String?
   invoicedAt    DateTime?
 
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
+
   customer      Customer          @relation(fields: [customerId], references: [id])
   createdBy     User              @relation(fields: [createdById], references: [id])
   qcCheckedBy   User?             @relation("DispatchTransferQcCheckedBy", fields: [qcCheckedById], references: [id])
@@ -1088,6 +1150,7 @@ model DispatchTransfer {
   plant         Plant?            @relation(fields: [plantId], references: [id])
   dispatchedBy  User?             @relation("DispatchTransferDispatchedBy", fields: [dispatchedById], references: [id])
   invoicedBy    User?             @relation("DispatchTransferInvoicedBy", fields: [invoicedById], references: [id])
+  deletedBy     User?             @relation("DispatchTransferDeletedBy", fields: [deletedById], references: [id])
 
   @@index([customerId])
   @@index([type, date])

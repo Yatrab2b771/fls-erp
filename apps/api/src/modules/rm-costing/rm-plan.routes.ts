@@ -61,7 +61,8 @@ function serializePlan(plan: {
 }
 
 const planInclude = {
-  items: { include: { recipe: true } },
+  // deletedAt: null — same reasoning as Packaging BOM's own planInclude.
+  items: { where: { deletedAt: null }, include: { recipe: true } },
   purchaseOrderItem: { include: { purchaseOrder: { select: { id: true, poNumber: true } } } },
 } satisfies Prisma.RmPlanInclude;
 
@@ -185,7 +186,10 @@ rmPlanRouter.delete(
   "/plans/:id/items/:itemId",
   async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
     try {
-      await prisma.rmPlanItem.deleteMany({ where: { id: req.params.itemId, planId: req.params.id } });
+      await prisma.rmPlanItem.updateMany({
+        where: { id: req.params.itemId, planId: req.params.id, deletedAt: null },
+        data: { deletedAt: new Date(), deletedById: req.user!.id },
+      });
       // Removing a batch invalidates any prior calculation for this plan —
       // same rule POST /items already applies, previously missing here,
       // which left a stale resultSnapshot (for batches no longer queued)

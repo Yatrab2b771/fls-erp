@@ -235,7 +235,11 @@ function UserRow({ user }: { user: ManagedUser }) {
           {user.roles.map((r) => (
             <span key={r} className="flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-2 py-0.5 text-[9px] font-bold uppercase text-brand-700">
               {r}
-              <button onClick={() => revokeRole.mutate({ userId: user.id, role: r })} className="text-brand-400 hover:text-rose-600" title="Revoke role">
+              <button
+                onClick={() => window.confirm(`Revoke ${r} from ${user.fullName}? This takes effect immediately, even on a session they're already logged into.`) && revokeRole.mutate({ userId: user.id, role: r })}
+                className="text-brand-400 hover:text-rose-600"
+                title="Revoke role"
+              >
                 <X className="h-2.5 w-2.5" strokeWidth={3} />
               </button>
             </span>

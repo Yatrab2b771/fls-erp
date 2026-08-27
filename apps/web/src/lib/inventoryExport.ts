@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { formatEmployeeId } from "./format";
-import type { CustomerReconciliationRow, DayStoreStockLine, DispatchTransfer, InventoryRequest, InventoryStockLine, InventoryTransaction, ItemStockByLocation, PersonRef, PlantStockLine, PreInventoryRequirement } from "./types";
+import type { CustomerReconciliationRow, DayStoreStockLine, DispatchTransfer, InventoryItem, InventoryRequest, InventoryStockLine, InventoryTransaction, ItemStockByLocation, PersonRef, PlantStockLine, PreInventoryRequirement } from "./types";
 
 // Builds and downloads a single-sheet workbook straight from whatever the
 // page already has loaded — no round trip to the server. Each report is
@@ -129,6 +129,33 @@ export function exportTransactionReport(rows: InventoryTransaction[], sheetName:
         : {}),
     })),
     `FLS_Inventory_${filenamePart}_${todayStamp()}.xlsx`,
+  );
+}
+
+// One item's complete history — every Received/Issued row, mixed
+// together and sorted the same way the item detail page shows them,
+// unlike exportTransactionReport above which is always one type at a
+// time (this is the "everything about this one item" report, not the
+// "everything on this one sheet" report).
+export function exportItemHistoryReport(item: InventoryItem, rows: InventoryTransaction[]) {
+  const TYPE_LABEL: Record<string, string> = { RECEIVED: "Received", ISSUED_DAY_STORE: "Issued to Store", ISSUED_PRODUCTION: "Issued to Production" };
+  download(
+    `History — ${item.name}`.slice(0, 31),
+    rows.map((r) => ({
+      Date: new Date(r.date).toLocaleDateString(),
+      Type: TYPE_LABEL[r.type] ?? r.type,
+      Quantity: r.quantity,
+      Unit: r.unit,
+      Location: r.dayStore?.name ?? r.plant?.name ?? "",
+      "Vendor / Note": r.vendorName ?? "",
+      "Batch No": r.batchNo ?? "",
+      "GRN No": r.grnNo ?? "",
+      Status: r.type === "RECEIVED" ? (r.receiptStatus ?? "") : "",
+      "Rejected Qty": r.rejectedQty ?? "",
+      "Logged By": formatPerson(r.createdBy),
+      "Logged At": formatTimestamp(r.createdAt),
+    })),
+    `FLS_Inventory_Item_History_${item.name.replace(/\s+/g, "_")}_${todayStamp()}.xlsx`,
   );
 }
 
