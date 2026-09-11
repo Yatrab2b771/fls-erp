@@ -137,67 +137,110 @@ async function seedCustomersAndOrders(bdUserId: string | null, ppicUserId: strin
   }
 
   const midPo = "PO-2026-0098";
-  if (await prisma.purchaseOrder.findFirst({ where: { poNumber: midPo } })) {
-    console.log(`PO "${midPo}" already exists — skipping.`);
+  const existingMidOrder = await prisma.purchaseOrder.findFirst({ where: { poNumber: midPo }, include: { items: true } });
+  // Re-run safety: the PO+item creation and the pre-production pipeline
+  // below used to be guarded by one "does the PO exist" check, but a run
+  // that creates the PO and then dies partway through the pipeline (e.g.
+  // a since-fixed bug) would otherwise be stuck permanently skipping this
+  // PO on every future run, with no pipeline ever getting attached to it.
+  // So: skip only once this PO's item actually has a PreProduction.
+  if (existingMidOrder?.items[0] && (await prisma.preProduction.findUnique({ where: { purchaseOrderItemId: existingMidOrder.items[0].id } }))) {
+    console.log(`PO "${midPo}" already exists with its pre-production pipeline — skipping.`);
     return;
   }
 
-  const midOrder = await prisma.purchaseOrder.create({
-    data: {
-      customerId: nova.id,
-      createdById: bdUserId,
-      poNumber: midPo,
-      orderDate: new Date("2026-07-20"),
-      regulatoryBody: "FSSAI",
-      regulatoryStatus: "Issued",
-      // APPROVED — batches can only be released against an approved PO.
-      status: "APPROVED",
-      reviewedById: bdUserId,
-      reviewedAt: new Date("2026-07-21"),
-      items: {
-        create: [
-          { productName: "BCAA 2:1:1 300g", dosageForm: "Powders", quantity: 1500, unit: "SKU", packSize: "300g", packType: "Jar" },
-        ],
+  const midOrder =
+    existingMidOrder ??
+    (await prisma.purchaseOrder.create({
+      data: {
+        customerId: nova.id,
+        createdById: bdUserId,
+        poNumber: midPo,
+        orderDate: new Date("2026-07-20"),
+        regulatoryBody: "FSSAI",
+        regulatoryStatus: "Issued",
+        // APPROVED — batches can only be released against an approved PO.
+        status: "APPROVED",
+        reviewedById: bdUserId,
+        reviewedAt: new Date("2026-07-21"),
+        items: {
+          create: [{ productName: "BCAA 2:1:1 300g", dosageForm: "Powders", quantity: 1500, unit: "SKU", packSize: "300g", packType: "Jar" }],
+        },
       },
-    },
-    include: { items: true },
-  });
+      include: { items: true },
+    }));
   const item = midOrder.items[0]!;
 
-  // One batch carried all the way through the manufacturing QA gate,
-  // currently sitting at Packaging — every earlier stage's fields filled
-  // in, plus a few representative history events.
-  const batch1 = await prisma.batch.create({
+  // One pre-production run carried through Sample QC Approval, with one
+  // completed production batch that pushed combinedQty up to plannedQty —
+  // so its CombinedLot exists and sits at Packaging, approved with a small
+  // reject/wastage split (routed to Recycle), plus a bit of representative
+  // history on both the pre-production and combined-lot timelines.
+  const pp1 = await prisma.preProduction.create({
     data: {
       purchaseOrderItemId: item.id,
-      batchNo: "GB-BCAA-0098",
-      currentStageId: "PACKAGING",
+      plannedQty: item.quantity,
+      combinedQty: item.quantity,
+      currentStageId: "SAMPLE_QC_APPROVAL",
       prodIndentSlipSign: "PPIC-IND-0098",
       productionPlanDate: new Date("2026-07-28"),
       unit: "41",
       dispatchPlanDate: new Date("2026-08-18"),
-      rmPoDate: new Date("2026-07-21"),
-      rmExpectedDate: new Date("2026-07-30"),
-      rmStatus: "Available",
-      pmPoDate: new Date("2026-07-21"),
-      pmExpectedDate: new Date("2026-07-29"),
-      pmStatus: "Available",
       rmDispensingDate: new Date("2026-07-31"),
       pmIssuedDate: new Date("2026-07-31"),
-      manufacturingStartDate: new Date("2026-08-01"),
-      manufacturingStatus: "Blending",
-      manufacturingEndDate: new Date("2026-08-03"),
-      mfgQaStatus: "Approved",
-      mfgQcStatus: "Approved",
+      lineClearanceStatus: "Approved",
+      sampleQcStatus: "Approved",
+      sampleQcRemarks: "Matched spec — cleared for production.",
     },
   });
+
   if (ppicUserId) {
-    await prisma.batchStageEvent.createMany({
+    await prisma.productionBatch.create({
+      data: {
+        preProductionId: pp1.id,
+        batchNo: "GB-BCAA-0098",
+        plannedQty: item.quantity,
+        status: "COMPLETED",
+        manufacturingStartDate: new Date("2026-08-01"),
+        manufacturingStatus: "Completed",
+        manufacturingEndDate: new Date("2026-08-03"),
+        inputQty: item.quantity + 20,
+        outputQty: item.quantity,
+        createdById: ppicUserId,
+        completedById: ppicUserId,
+        completedAt: new Date("2026-08-03"),
+      },
+    });
+
+    const cl1 = await prisma.combinedLot.create({
+      data: {
+        preProductionId: pp1.id,
+        currentStageId: "PACKAGING",
+        ipqcStatus: "Approved",
+        mfgQaStatus: "Approved",
+        mfgQcStatus: "Approved",
+        mfgRemarks: "Bulk approved — transferred to packing area.",
+        mfgApprovedQty: item.quantity - 15,
+        mfgRejectedQty: 5,
+        mfgWastageQty: 10,
+        packagingStartDate: new Date("2026-08-05"),
+        packagingStatus: "In Progress",
+      },
+    });
+    await prisma.batchRecycleLog.create({
+      data: { combinedLotId: cl1.id, stageId: "QA_GATE_MFG", quantity: 10, unit: "SKU", createdById: ppicUserId },
+    });
+
+    await prisma.preProductionStageEvent.createMany({
       data: [
-        { batchId: batch1.id, fromStageId: "PO_RELEASE", toStageId: "MATERIAL_RECEIVED", action: "FORWARD", actorId: ppicUserId, createdAt: new Date("2026-07-22") },
-        { batchId: batch1.id, fromStageId: "PRODUCTION_EXECUTION", toStageId: "QA_GATE_MFG", action: "FORWARD", actorId: ppicUserId, createdAt: new Date("2026-08-03") },
+        { preProductionId: pp1.id, fromStageId: "MATERIAL_RECEIVED", toStageId: "INDENT_ISSUE", action: "FORWARD", actorId: ppicUserId, createdAt: new Date("2026-07-22") },
+        { preProductionId: pp1.id, fromStageId: "DISPENSING", toStageId: "SAMPLE_QC_APPROVAL", action: "FORWARD", actorId: ppicUserId, createdAt: new Date("2026-08-01") },
+      ],
+    });
+    await prisma.combinedLotStageEvent.createMany({
+      data: [
         {
-          batchId: batch1.id,
+          combinedLotId: cl1.id,
           fromStageId: "QA_GATE_MFG",
           toStageId: "PACKAGING",
           action: "FORWARD",
@@ -209,23 +252,7 @@ async function seedCustomersAndOrders(bdUserId: string | null, ppicUserId: strin
     });
   }
 
-  // A second batch against the same line item, still early (Indent Issue
-  // — which now also carries the former Production Plan fields) and
-  // overdue on its own dispatch plan date — exercises the delay indicator.
-  await prisma.batch.create({
-    data: {
-      purchaseOrderItemId: item.id,
-      batchNo: "GB-BCAA-0098-B",
-      currentStageId: "INDENT_ISSUE",
-      productionPlanDate: new Date("2026-07-18"),
-      unit: "48",
-      dispatchPlanDate: new Date("2026-08-05"),
-      rmStatus: "Available",
-      pmStatus: "Available",
-    },
-  });
-
-  console.log(`Created demo PO "${midPo}" (${midOrder.id}) — 1 line item, 2 batches (one at Packaging with history, one overdue at Indent Issue).`);
+  console.log(`Created demo PO "${midPo}" (${midOrder.id}) — 1 line item, 1 pre-production run through Sample QC Approval with a completed production batch combined into a CombinedLot at Packaging.`);
 }
 
 // Same fixture bom-engine.test.ts is pinned to, so a real BOM plan
@@ -494,112 +521,162 @@ async function seedBatchPipelineV2Demo(userIds: Partial<Record<RoleName, string>
   // one PO.
   await prisma.preInventoryRequirement.create({ data: { date: new Date("2026-08-19"), category: "RM", itemId: wheyIsolate.id, unit: "Kg", requiredQty: 500, note: "Q3 running requirement", requestedById: ppicId } });
 
-  /** Batch A — walked all the way to Packaging: the full round trip through Dispensing's 3-way split, a resolved QC Sample, and QA Gate Mfg's Approved/Rejected/Wastage split. */
-  const batchA = await prisma.batch.create({
+  /** Pre-production run — the full Dispensing 3-way split (Production/
+   * Sample/Waste) and a resolved QC Sample lifecycle, Sample QC Approval
+   * cleared — then TWO completed production batches whose combined
+   * output crossed plannedQty, so a CombinedLot exists and is currently
+   * Held at QA Gate Mfg (so the QC Dashboard's held-lot queue has
+   * something real to show). */
+  const ppWhey = await prisma.preProduction.create({
     data: {
       purchaseOrderItemId: wheyItem.id,
-      batchNo: "GB-WHEY-0210-A",
       plannedQty: 100,
+      combinedQty: 100.5,
       plantId: plant.id,
-      currentStageId: "PACKAGING",
+      currentStageId: "SAMPLE_QC_APPROVAL",
       grnNo: "GRN-2026-0455",
       grnDate: new Date("2026-08-20"),
       prodIndentSlipSign: "PPIC-IND-0210A",
       productionPlanDate: new Date("2026-08-21"),
       unit: "41",
       dispatchPlanDate: new Date("2026-09-05"),
+      lineClearanceStatus: "Approved",
       rmDispensingDate: new Date("2026-08-22"),
       rmDispensingRemarks: "70 Kg to production, 5 Kg to QC sample, 5 Kg spilled at weighing.",
       sampleQcStatus: "Approved",
       sampleQcRemarks: "Matched spec on assay — cleared for production.",
+    },
+  });
+  await prisma.batchMaterialConsumption.createMany({
+    data: [
+      { preProductionId: ppWhey.id, itemId: wheyIsolate.id, quantity: 70, unit: "Kg", purpose: "PRODUCTION", createdById: storeId },
+      { preProductionId: ppWhey.id, itemId: wheyIsolate.id, quantity: 5, unit: "Kg", purpose: "SAMPLE", createdById: storeId },
+      { preProductionId: ppWhey.id, itemId: wheyIsolate.id, quantity: 5, unit: "Kg", purpose: "WASTE", createdById: storeId },
+    ],
+  });
+  await prisma.inventoryTransaction.create({
+    data: {
+      itemId: wheyIsolate.id,
+      type: "ISSUED_RECYCLE",
+      date: new Date("2026-08-22"),
+      unit: "Kg",
+      quantity: 5,
+      plantId: plant.id,
+      preProductionId: ppWhey.id,
+      remark: "Dispensing spill — routed to Recycle Store",
+      createdById: storeId,
+    },
+  });
+  const sampleTransferWhey = await prisma.qcSampleTransfer.create({
+    data: { preProductionId: ppWhey.id, direction: "TO_QC", itemId: wheyIsolate.id, quantity: 5, unit: "Kg", sentById: storeId, sentAt: new Date("2026-08-22"), confirmedById: qaId, confirmedAt: new Date("2026-08-22") },
+  });
+  await prisma.qcSampleTransaction.create({
+    data: { preProductionId: ppWhey.id, itemId: wheyIsolate.id, type: "INBOUND", quantity: 5, unit: "Kg", transferId: sampleTransferWhey.id, createdById: qaId, createdAt: new Date("2026-08-22") },
+  });
+  await prisma.qcSampleTransaction.create({
+    data: { preProductionId: ppWhey.id, itemId: wheyIsolate.id, type: "CONSUMED", quantity: 5, unit: "Kg", consumeReason: "TESTING", note: "Assay + microbial screen, both within spec.", createdById: qaId, createdAt: new Date("2026-08-22") },
+  });
+  if (ppicId) {
+    await prisma.preProductionStageEvent.createMany({
+      data: [
+        { preProductionId: ppWhey.id, fromStageId: "MATERIAL_RECEIVED", toStageId: "INDENT_ISSUE", action: "FORWARD", actorId: storeId, createdAt: new Date("2026-08-20") },
+        { preProductionId: ppWhey.id, fromStageId: "DISPENSING", toStageId: "SAMPLE_QC_APPROVAL", action: "FORWARD", actorId: storeId, createdAt: new Date("2026-08-22") },
+      ],
+    });
+  }
+
+  await prisma.productionBatch.create({
+    data: {
+      preProductionId: ppWhey.id,
+      batchNo: "GB-WHEY-0210-A",
+      plannedQty: 70,
+      status: "COMPLETED",
       manufacturingStartDate: new Date("2026-08-23"),
       manufacturingEndDate: new Date("2026-08-24"),
       manufacturingStatus: "Completed",
       inputQty: 70,
       outputQty: 68.5,
-      mfgQaStatus: "Approved",
-      mfgQcStatus: "Approved",
-      mfgRemarks: "Bulk cleared — released to packing.",
-      mfgApprovedQty: 65,
-      mfgRejectedQty: 1.5,
-      mfgWastageQty: 2,
-      packagingStartDate: new Date("2026-08-25"),
-      packagingStatus: "In Progress",
+      createdById: storeId,
+      completedById: qaId,
+      completedAt: new Date("2026-08-24"),
     },
   });
-  await prisma.batchMaterialConsumption.createMany({
-    data: [
-      { batchId: batchA.id, itemId: wheyIsolate.id, quantity: 70, unit: "Kg", purpose: "PRODUCTION", createdById: storeId },
-      { batchId: batchA.id, itemId: wheyIsolate.id, quantity: 5, unit: "Kg", purpose: "SAMPLE", createdById: storeId },
-      { batchId: batchA.id, itemId: wheyIsolate.id, quantity: 5, unit: "Kg", purpose: "WASTE", createdById: storeId },
-    ],
-  });
-  await prisma.inventoryTransaction.create({
-    data: { itemId: wheyIsolate.id, type: "ISSUED_RECYCLE", date: new Date("2026-08-22"), unit: "Kg", quantity: 5, plantId: plant.id, batchId: batchA.id, remark: "Dispensing spill — routed to Recycle Store", createdById: storeId },
-  });
-  const sampleTransferA = await prisma.qcSampleTransfer.create({
-    data: { batchId: batchA.id, direction: "TO_QC", itemId: wheyIsolate.id, quantity: 5, unit: "Kg", sentById: storeId, sentAt: new Date("2026-08-22"), confirmedById: qaId, confirmedAt: new Date("2026-08-22") },
-  });
-  await prisma.qcSampleTransaction.create({ data: { batchId: batchA.id, itemId: wheyIsolate.id, type: "INBOUND", quantity: 5, unit: "Kg", transferId: sampleTransferA.id, createdById: qaId, createdAt: new Date("2026-08-22") } });
-  await prisma.qcSampleTransaction.create({
-    data: { batchId: batchA.id, itemId: wheyIsolate.id, type: "CONSUMED", quantity: 5, unit: "Kg", consumeReason: "TESTING", note: "Assay + microbial screen, both within spec.", createdById: qaId, createdAt: new Date("2026-08-22") },
-  });
-  await prisma.batchRecycleLog.create({ data: { batchId: batchA.id, stageId: "QA_GATE_MFG", quantity: 2, unit: "SKU", createdById: qaId } });
-  if (ppicId) {
-    await prisma.batchStageEvent.createMany({
-      data: [
-        { batchId: batchA.id, fromStageId: "MATERIAL_RECEIVED", toStageId: "INDENT_ISSUE", action: "FORWARD", actorId: storeId, createdAt: new Date("2026-08-20") },
-        { batchId: batchA.id, fromStageId: "DISPENSING", toStageId: "SAMPLE_QC_APPROVAL", action: "FORWARD", actorId: storeId, createdAt: new Date("2026-08-22") },
-        { batchId: batchA.id, fromStageId: "SAMPLE_QC_APPROVAL", toStageId: "PRODUCTION_EXECUTION", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-22") },
-        { batchId: batchA.id, fromStageId: "QA_GATE_MFG", toStageId: "PACKAGING", action: "FORWARD", note: "Bulk cleared — released to packing.", actorId: qaId, createdAt: new Date("2026-08-24") },
-      ],
-    });
-  }
-
-  /** Batch B — parked with a Hold at QA Gate Mfg, so the QC Dashboard's held-batches queue has something real to show. */
-  const batchB = await prisma.batch.create({
+  await prisma.productionBatch.create({
     data: {
-      purchaseOrderItemId: wheyItem.id,
-      batchNo: "GB-WHEY-0210-B",
-      plannedQty: 100,
-      plantId: plant.id,
-      currentStageId: "QA_GATE_MFG",
-      unit: "41",
-      rmDispensingDate: new Date("2026-08-23"),
-      sampleQcStatus: "Approved",
+      preProductionId: ppWhey.id,
+      batchNo: "GB-WHEY-0210-A2",
+      plannedQty: 30,
+      status: "COMPLETED",
       manufacturingStartDate: new Date("2026-08-24"),
       manufacturingEndDate: new Date("2026-08-25"),
       manufacturingStatus: "Completed",
-      inputQty: 92,
-      outputQty: 90,
+      inputQty: 33,
+      outputQty: 32,
+      createdById: storeId,
+      completedById: qaId,
+      completedAt: new Date("2026-08-25"),
+    },
+  });
+
+  const clWhey = await prisma.combinedLot.create({
+    data: {
+      preProductionId: ppWhey.id,
+      currentStageId: "QA_GATE_MFG",
+      ipqcStatus: "Approved",
       mfgQaStatus: "Hold",
       mfgQcStatus: "Hold",
       mfgRemarks: "Checking a deviation report on Line 2 before releasing.",
     },
   });
-  await prisma.batchMaterialConsumption.createMany({
-    data: [
-      { batchId: batchB.id, itemId: wheyIsolate.id, quantity: 92, unit: "Kg", purpose: "PRODUCTION", createdById: storeId },
-      { batchId: batchB.id, itemId: wheyIsolate.id, quantity: 3, unit: "Kg", purpose: "WASTE", createdById: storeId },
-    ],
-  });
-  await prisma.inventoryTransaction.create({
-    data: { itemId: wheyIsolate.id, type: "ISSUED_RECYCLE", date: new Date("2026-08-23"), unit: "Kg", quantity: 3, plantId: plant.id, batchId: batchB.id, remark: "Dispensing spill — routed to Recycle Store", createdById: storeId },
+  await prisma.combinedLotStageEvent.createMany({
+    data: [{ combinedLotId: clWhey.id, fromStageId: "IPQC", toStageId: "QA_GATE_MFG", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-25") }],
   });
 
-  /** Batch C — sitting at Sample QC Approval with its sample still unconfirmed, so the "Awaiting confirmation" queue (QC Dashboard, Transit tab, QC Sample panel) has a live example. */
-  const batchC = await prisma.batch.create({
-    data: { purchaseOrderItemId: wheyItem.id, batchNo: "GB-WHEY-0210-C", plannedQty: 100, plantId: plant.id, currentStageId: "SAMPLE_QC_APPROVAL", unit: "41", rmDispensingDate: new Date("2026-08-25") },
-  });
-  await prisma.batchMaterialConsumption.createMany({
-    data: [
-      { batchId: batchC.id, itemId: wheyIsolate.id, quantity: 70, unit: "Kg", purpose: "PRODUCTION", createdById: storeId },
-      { batchId: batchC.id, itemId: wheyIsolate.id, quantity: 8, unit: "Kg", purpose: "SAMPLE", createdById: storeId },
-    ],
-  });
-  await prisma.qcSampleTransfer.create({ data: { batchId: batchC.id, direction: "TO_QC", itemId: wheyIsolate.id, quantity: 8, unit: "Kg", sentById: storeId, sentAt: new Date("2026-08-25") } });
+  /** A second, smaller demo PO — a pre-production run still sitting at
+   * Sample QC Approval with its sample sent to QC but not yet confirmed,
+   * so the "Awaiting confirmation" queue (QC Dashboard, Transit tab, QC
+   * Sample panel) has a live example, and no production batch exists yet
+   * since the Sample QC Approval hard gate hasn't cleared. */
+  const v2PoB = "PO-2026-0225";
+  if (await prisma.purchaseOrder.findFirst({ where: { poNumber: v2PoB } })) {
+    console.log(`PO "${v2PoB}" already exists — skipping.`);
+  } else {
+    const poB = await prisma.purchaseOrder.create({
+      data: {
+        customerId: customer.id,
+        createdById: bdId,
+        poNumber: v2PoB,
+        orderDate: new Date("2026-08-24"),
+        regulatoryBody: "FSSAI",
+        regulatoryStatus: "Issued",
+        status: "APPROVED",
+        reviewedById: bdId,
+        reviewedAt: new Date("2026-08-25"),
+        items: { create: [{ productName: "Creatine Monohydrate 500g", dosageForm: "Powders", quantity: 200, unit: "SKU", packSize: "500g", packType: "Jar" }] },
+      },
+      include: { items: true },
+    });
+    const creatineItem = poB.items[0]!;
+    const ppCreatine = await prisma.preProduction.create({
+      data: {
+        purchaseOrderItemId: creatineItem.id,
+        plannedQty: creatineItem.quantity,
+        plantId: plant.id,
+        currentStageId: "SAMPLE_QC_APPROVAL",
+        unit: "41",
+        lineClearanceStatus: "Approved",
+        rmDispensingDate: new Date("2026-08-25"),
+      },
+    });
+    await prisma.qcSampleTransfer.create({
+      data: { preProductionId: ppCreatine.id, direction: "TO_QC", itemId: wheyIsolate.id, quantity: 8, unit: "Kg", sentById: storeId, sentAt: new Date("2026-08-25") },
+    });
+    console.log(`Created PO "${v2PoB}" (${poB.id}) — 1 pre-production run at Sample QC Approval, sample sent but not yet confirmed by QC.`);
+  }
 
-  console.log(`Created batch-pipeline-v2 demo: PO "${v2Po}" (Plant 41, Day Store 59), 3 batches — one through Packaging with a resolved QC sample + QA-gate wastage, one Held at QA Gate Mfg, one awaiting Sample QC confirmation.`);
+  console.log(
+    `Created batch-pipeline-v2 demo: PO "${v2Po}" (Plant 41, Day Store 59) — 1 pre-production run through Sample QC Approval with 2 completed production batches combined into a CombinedLot Held at QA Gate Mfg.`,
+  );
 
   // R&D Store — one small, fully-resolved sample lifecycle so that page
   // isn't empty either.
@@ -619,7 +696,7 @@ async function seedBatchPipelineV2Demo(userIds: Partial<Record<RoleName, string>
     });
     console.log("Created R&D Store demo: one Warehouse → R&D sample, confirmed and used in a formulation trial.");
   }
-  if (prodId) console.log(`Production demo user available (${prodId}) — Batch B/C are ready for a PRODUCTION login to act on next.`);
+  if (prodId) console.log(`Production demo user available (${prodId}) — the CombinedLot Held at QA Gate Mfg is ready for a PRODUCTION login to act on next.`);
 }
 
 async function main() {
