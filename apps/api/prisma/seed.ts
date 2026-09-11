@@ -699,6 +699,181 @@ async function seedBatchPipelineV2Demo(userIds: Partial<Record<RoleName, string>
   if (prodId) console.log(`Production demo user available (${prodId}) — the CombinedLot Held at QA Gate Mfg is ready for a PRODUCTION login to act on next.`);
 }
 
+/** Purchase & Accounts — pricing on a couple of catalog items (Purchase/
+ * Accounts-only fields, invisible to every other role — see
+ * inventory.routes.ts) plus a debit note against a real vendor delivery,
+ * so those two departments have something of their own to look at
+ * instead of just downstream visibility into the production pipeline. */
+async function seedPurchaseAccountsDemo(userIds: Partial<Record<RoleName, string>>) {
+  const purchaseId = userIds.PURCHASE;
+  if (!purchaseId) {
+    console.log("No Purchase demo user available — skipping demo pricing/debit note data.");
+    return;
+  }
+
+  const wheyIsolate = await prisma.inventoryItem.findUnique({ where: { category_name: { category: "RM", name: "Whey Protein Isolate" } } });
+  if (wheyIsolate && wheyIsolate.costPrice === null) {
+    await prisma.inventoryItem.update({ where: { id: wheyIsolate.id }, data: { costPrice: 620, purchasePrice: 640, mrp: 950, salesPrice: 880 } });
+  }
+  const creatine = await prisma.inventoryItem.findUnique({ where: { category_name: { category: "RM", name: "Creatine Monohydrate" } } });
+  if (creatine && creatine.costPrice === null) {
+    await prisma.inventoryItem.update({ where: { id: creatine.id }, data: { costPrice: 810, purchasePrice: 830, mrp: 1200, salesPrice: 1100 } });
+  }
+  console.log("Set demo Cost/Purchase/MRP/Sales pricing on 2 catalog items for Purchase/Accounts.");
+
+  if (wheyIsolate) {
+    const receipt = await prisma.inventoryTransaction.findFirst({ where: { itemId: wheyIsolate.id, type: "RECEIVED" }, orderBy: { date: "asc" } });
+    if (receipt && (await prisma.debitNote.count({ where: { transactionId: receipt.id } })) === 0) {
+      await prisma.debitNote.create({
+        data: {
+          transactionId: receipt.id,
+          debitNoteNo: "DN-2026-0031",
+          date: new Date("2026-08-06"),
+          vendorName: receipt.vendorName,
+          itemId: wheyIsolate.id,
+          quantity: 5,
+          unit: "Kg",
+          amount: 3100,
+          reason: "5 Kg short-delivered against the GRN quantity.",
+          createdById: purchaseId,
+        },
+      });
+      console.log("Created demo debit note (short-delivery) against the first Whey Protein Isolate receipt.");
+    }
+  }
+}
+
+/** One more pre-production run — walked all the way through IPQC, QA Gate
+ * Mfg, Bulk QC, a signed-off COA, Packaging, QA Gate Packaging, Billing &
+ * E-Way Bill, and Dispatch Plan, linked to a real FG DispatchTransfer —
+ * so Accounts and Dispatch each have one genuinely completed example to
+ * look at, instead of only the in-flight runs seeded above. */
+async function seedFullPipelineDispatchDemo(userIds: Partial<Record<RoleName, string>>) {
+  const { BD: bdId, STORE: storeId, QA_QC: qaId, ACCOUNTS: accountsId, DISPATCH: dispatchId } = userIds;
+  if (!bdId || !storeId || !qaId || !accountsId || !dispatchId) {
+    console.log("Missing a demo department user — skipping the full-pipeline Dispatch demo.");
+    return;
+  }
+
+  const v3Po = "PO-2026-0260";
+  if (await prisma.purchaseOrder.findFirst({ where: { poNumber: v3Po } })) {
+    console.log(`PO "${v3Po}" already exists — skipping the full-pipeline Dispatch demo.`);
+    return;
+  }
+
+  const customer = await prisma.customer.findFirst({ where: { companyName: "Acme Wellness Retail Pvt. Ltd." } });
+  if (!customer) {
+    console.log("Demo customer not found — skipping the full-pipeline Dispatch demo.");
+    return;
+  }
+
+  const po = await prisma.purchaseOrder.create({
+    data: {
+      customerId: customer.id,
+      createdById: bdId,
+      poNumber: v3Po,
+      orderDate: new Date("2026-08-01"),
+      regulatoryBody: "FSSAI",
+      regulatoryStatus: "Issued",
+      status: "APPROVED",
+      reviewedById: bdId,
+      reviewedAt: new Date("2026-08-02"),
+      items: { create: [{ productName: "Whey Gold 1kg", dosageForm: "Powders", quantity: 400, unit: "SKU", packSize: "1kg", packType: "Jar" }] },
+    },
+    include: { items: true },
+  });
+  const item = po.items[0]!;
+
+  const pp = await prisma.preProduction.create({
+    data: {
+      purchaseOrderItemId: item.id,
+      plannedQty: item.quantity,
+      combinedQty: item.quantity,
+      currentStageId: "SAMPLE_QC_APPROVAL",
+      prodIndentSlipSign: "PPIC-IND-0260",
+      productionPlanDate: new Date("2026-08-03"),
+      unit: "41",
+      dispatchPlanDate: new Date("2026-08-20"),
+      lineClearanceStatus: "Approved",
+      rmDispensingDate: new Date("2026-08-05"),
+      sampleQcStatus: "Approved",
+    },
+  });
+  await prisma.productionBatch.create({
+    data: {
+      preProductionId: pp.id,
+      batchNo: "GB-WHEYGOLD-0260",
+      plannedQty: item.quantity,
+      status: "COMPLETED",
+      manufacturingStartDate: new Date("2026-08-06"),
+      manufacturingEndDate: new Date("2026-08-07"),
+      manufacturingStatus: "Completed",
+      inputQty: item.quantity + 15,
+      outputQty: item.quantity,
+      createdById: storeId,
+      completedById: qaId,
+      completedAt: new Date("2026-08-07"),
+    },
+  });
+
+  const dispatchTransfer = await prisma.dispatchTransfer.create({
+    data: { type: "FG", date: new Date("2026-08-20"), customerId: customer.id, productName: item.productName, quantity: item.quantity, createdById: dispatchId },
+  });
+
+  const cl = await prisma.combinedLot.create({
+    data: {
+      preProductionId: pp.id,
+      currentStageId: "DISPATCH_PLAN",
+      ipqcStatus: "Approved",
+      mfgQaStatus: "Approved",
+      mfgQcStatus: "Approved",
+      mfgApprovedQty: item.quantity - 5,
+      mfgRejectedQty: 2,
+      mfgWastageQty: 3,
+      bulkQcStatus: "Approved",
+      coaResult: "Complies",
+      coaAnalyzedById: qaId,
+      coaAnalyzedAt: new Date("2026-08-10"),
+      coaReviewedById: qaId,
+      coaReviewedAt: new Date("2026-08-11"),
+      coaApprovedById: qaId,
+      coaApprovedAt: new Date("2026-08-12"),
+      packagingStartDate: new Date("2026-08-13"),
+      packagingEndDate: new Date("2026-08-14"),
+      packagingStatus: "Completed",
+      packQaStatus: "Approved",
+      packQcStatus: "Approved",
+      packApprovedQty: item.quantity - 5,
+      invoiceNo: "INV-2026-0451",
+      invoiceDate: new Date("2026-08-18"),
+      ewayBillNo: "EWB-2026-0451",
+      ewayBillDate: new Date("2026-08-18"),
+      billingRemarks: "Invoice + E-Way Bill raised for the full dispatch quantity.",
+      dispatchDate: new Date("2026-08-20"),
+      dispatchedQty: item.quantity - 5,
+      shipperQty: 40,
+      totalShipperWeight: 410,
+      transportType: "By Land",
+      remainingQty: 0,
+      dispatchTransferId: dispatchTransfer.id,
+    },
+  });
+  await prisma.combinedLotStageEvent.createMany({
+    data: [
+      { combinedLotId: cl.id, fromStageId: "IPQC", toStageId: "QA_GATE_MFG", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-09") },
+      { combinedLotId: cl.id, fromStageId: "QA_GATE_MFG", toStageId: "BULK_QC", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-10") },
+      { combinedLotId: cl.id, fromStageId: "BULK_QC", toStageId: "PACKAGING", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-12") },
+      { combinedLotId: cl.id, fromStageId: "PACKAGING", toStageId: "QA_GATE_PACKAGING", action: "FORWARD", actorId: qaId, createdAt: new Date("2026-08-14") },
+      { combinedLotId: cl.id, fromStageId: "QA_GATE_PACKAGING", toStageId: "BILLING_EWAY_BILL", action: "FORWARD", actorId: accountsId, createdAt: new Date("2026-08-18") },
+      { combinedLotId: cl.id, fromStageId: "BILLING_EWAY_BILL", toStageId: "DISPATCH_PLAN", action: "FORWARD", actorId: dispatchId, createdAt: new Date("2026-08-20") },
+    ],
+  });
+
+  console.log(
+    `Created PO "${v3Po}" (${po.id}) — one pre-production run walked all the way through to Dispatch Plan, with billing/e-way bill and a linked FG dispatch transfer, so Accounts and Dispatch have a completed example each.`,
+  );
+}
+
 async function main() {
   await seedRoles();
   const adminId = await seedAdmin();
@@ -709,6 +884,8 @@ async function main() {
   await seedRmCosting(userIds.PPIC);
   await seedInventory(userIds.STORE);
   await seedBatchPipelineV2Demo(userIds);
+  await seedPurchaseAccountsDemo(userIds);
+  await seedFullPipelineDispatchDemo(userIds);
 }
 
 main()
