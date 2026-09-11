@@ -54,7 +54,15 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
     body: opts.body === undefined ? undefined : opts.isFormData ? (opts.body as FormData) : JSON.stringify(opts.body),
   });
 
-  if (res.status === 401) {
+  // A 401 doesn't always mean "your session expired" — POST /auth/login
+  // (wrong email/password) and PATCH /auth/change-password (wrong current
+  // password) both legitimately 401 as their own business response, not a
+  // rejected token (see auth.routes.ts). Only auth.ts's token-verification
+  // middleware 401s mean the session itself is invalid, and that's every
+  // OTHER endpoint — so treat those two as ordinary errors (real server
+  // message, no forced logout) and everything else as session expiry.
+  const isSelfContainedAuthCall = path === "/api/auth/login" || path === "/api/auth/change-password";
+  if (res.status === 401 && !isSelfContainedAuthCall) {
     onUnauthorized();
     throw new ApiError("Session expired — please log in again.", 401);
   }

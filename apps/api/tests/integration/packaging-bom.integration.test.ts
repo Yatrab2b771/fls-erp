@@ -6,9 +6,9 @@ import { authHeader, createUser } from "./helpers";
 const app = createApp();
 
 const CATALOG_IMPORT_BODY = {
-  brands: [
+  customers: [
     {
-      brand: "IntegrationBrand",
+      customerName: "IntegrationBrand",
       skus: [
         {
           productName: "Test Whey 1kg",
@@ -28,23 +28,49 @@ const CATALOG_IMPORT_BODY = {
 };
 
 describe("POST /api/catalog/import", () => {
-  it("is restricted to PPIC/PURCHASE", async () => {
+  it("is restricted to RND", async () => {
     const { token: plainToken } = await createUser([]);
     const denied = await request(app).post("/api/catalog/import").set(authHeader(plainToken)).send(CATALOG_IMPORT_BODY);
     expect(denied.status).toBe(403);
 
+    // PPIC/PURCHASE used to own this too — now it's R&D's job (PPIC
+    // requests what's missing, R&D delivers it — see recipe-request.routes.ts).
     const { token: ppicToken } = await createUser(["PPIC"]);
-    const allowed = await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
+    const stillDenied = await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
+    expect(stillDenied.status).toBe(403);
+
+    const { token: rndToken } = await createUser(["RND"]);
+    const allowed = await request(app).post("/api/catalog/import").set(authHeader(rndToken)).send(CATALOG_IMPORT_BODY);
     expect(allowed.status).toBe(201);
-    expect(allowed.body.brandsTouched).toBe(1);
+    expect(allowed.body.customersTouched).toBe(1);
     expect(allowed.body.skusUpserted).toBe(1);
+  });
+});
+
+describe("GET /api/catalog/product-names", () => {
+  it("lists distinct product names across every customer — not scoped to one — so a brand-new customer's PO form can suggest an already-made product", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/catalog/import").set(authHeader(rndToken)).send(CATALOG_IMPORT_BODY);
+    // A second customer importing the exact same product name — the
+    // endpoint should still return it only once.
+    await request(app)
+      .post("/api/catalog/import")
+      .set(authHeader(rndToken))
+      .send({ customers: [{ customerName: "AnotherBrand", skus: [{ productName: "Test Whey 1kg" }] }] });
+
+    const { token: plainToken } = await createUser([]);
+    const res = await request(app).get("/api/catalog/product-names").set(authHeader(plainToken));
+    expect(res.status).toBe(200);
+    expect(res.body).toContain("Test Whey 1kg");
+    expect(res.body.filter((n: string) => n === "Test Whey 1kg")).toHaveLength(1);
   });
 });
 
 describe("full BOM plan lifecycle", () => {
   it("create plan -> queue SKU -> calculate -> export", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/catalog/import").set(authHeader(rndToken)).send(CATALOG_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
     const skus = await request(app).get("/api/catalog/skus").set(authHeader(ppicToken));
     const skuId = skus.body[0].id;
 
@@ -77,8 +103,9 @@ describe("full BOM plan lifecycle", () => {
   });
 
   it("PPIC can send a calculated plan straight into Pre-Inventory as PM requirements", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/catalog/import").set(authHeader(rndToken)).send(CATALOG_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
     const skuId = (await request(app).get("/api/catalog/skus").set(authHeader(ppicToken))).body[0].id;
 
     const plan = await request(app).post("/api/bom/plans").set(authHeader(ppicToken)).send({ name: "Send Test Plan" });
@@ -112,8 +139,9 @@ describe("full BOM plan lifecycle", () => {
   });
 
   it("invalidates a calculated result — and blocks export again — after removing the item that was queued when it was calculated", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/catalog/import").set(authHeader(rndToken)).send(CATALOG_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/catalog/import").set(authHeader(ppicToken)).send(CATALOG_IMPORT_BODY);
     const skuId = (await request(app).get("/api/catalog/skus").set(authHeader(ppicToken))).body[0].id;
 
     const { token } = await createUser([]);

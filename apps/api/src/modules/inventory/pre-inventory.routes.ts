@@ -93,7 +93,13 @@ preInventoryRouter.get("/", requireRole("PPIC", "STORE", "PURCHASE", "ACCOUNTS",
   }
 });
 
-preInventoryRouter.post("/", requireRole("PPIC"), validateBody(createRequirementSchema), async (req: AuthedRequest, res, next) => {
+// PPIC-only used to be the rule — per the client, Purchase shouldn't have
+// to wait for PPIC to log a shortfall it already knows about (e.g. a
+// standing reorder, or something Purchase spotted before PPIC did).
+// This is still just planning (raising the requirement) — logging the
+// actual PO/Vendor/ETA against it stays Purchase-only, see PATCH
+// /:id/purchase below: PPIC's job is deciding what's needed, not buying it.
+preInventoryRouter.post("/", requireRole("PPIC", "PURCHASE"), validateBody(createRequirementSchema), async (req: AuthedRequest, res, next) => {
   try {
     const data = req.body as CreateRequirementInput;
 
@@ -112,16 +118,10 @@ preInventoryRouter.post("/", requireRole("PPIC"), validateBody(createRequirement
       metadata: { itemId: data.itemId, requiredQty: data.requiredQty },
     });
 
-    // Live stock is already known at creation time — no reason to wait
-    // for a separate confirmation step before telling Purchase there's
-    // a gap to cover.
-    if (withStock!.shortQty > 0) {
-      await notifyRoles(
-        ["PURCHASE"],
-        { title: `Shortfall: ${item.name}`, body: `${withStock!.shortQty} ${data.unit} short (${withStock!.currentStock} on hand) — log a PO.`, link: "/pre-inventory" },
-        req.user!.id,
-      ).catch(notifyFailed(req, "pre_inventory.shortfall"));
-    }
+    // Per the client: telling Purchase there's a gap to cover is PPIC's
+    // own call to make, not something the system decides on PPIC's
+    // behalf the instant a shortfall exists — see POST /:id/notify-purchase
+    // below, the explicit "Send to Purchase" action.
 
     res.status(201).json(withStock);
   } catch (err) {
@@ -131,8 +131,10 @@ preInventoryRouter.post("/", requireRole("PPIC"), validateBody(createRequirement
 
 // Shared by the Excel bulk import below AND by Packaging BOM / RM
 // Costing's "Send to Pre-Inventory" buttons — same resolve-or-create-
-// item + create-rows + notify-Purchase-if-short behavior regardless of
-// where the rows came from. `req` is only used for the failure logger,
+// item + create-rows behavior regardless of where the rows came from.
+// `req` isn't used inside any more (telling Purchase is now a separate
+// explicit PPIC action, not auto-fired here) but is kept in the
+// signature so every existing caller doesn't need updating for it,
 // typed loosely so callers from other modules don't need an exact
 // AuthedRequest<P> match.
 export interface RequirementSourceRow {
@@ -179,23 +181,9 @@ export async function bulkCreateRequirements(
     })),
   });
 
-  // Check live stock against every row just created, so the same
-  // "notify Purchase immediately" behavior as the single-create path
-  // applies here too, regardless of source.
-  const onHand = await getOnHandByItemId([...itemIds.values()]);
-  const shortfallCount = rows.filter((row) => {
-    const currentStock = onHand.get(itemIds.get(`${row.category}::${row.itemName}`)!) ?? 0;
-    return currentStock < row.requiredQty;
-  }).length;
-
-  if (shortfallCount > 0) {
-    await notifyRoles(
-      ["PURCHASE"],
-      { title: `${shortfallCount} shortfall(s) from a bulk requirement add`, body: "Check the Pre-Inventory tab for what needs a PO.", link: "/pre-inventory" },
-      requestedById,
-    ).catch(notifyFailed(req, "pre_inventory.requirements_bulk_created"));
-  }
-
+  // No auto-notify here either — same as the single-create path, telling
+  // Purchase is PPIC's own explicit call (POST /:id/notify-purchase),
+  // not something a bulk import decides on PPIC's behalf.
   return { requirementsCreated: rows.length, itemsCreated };
 }
 
@@ -223,6 +211,9 @@ preInventoryRouter.post("/import", requireRole("PPIC"), validateBody(importRequi
 // same eligibility rule as the single-item route below. A PO can't be
 // logged against something PPIC never asked for, so unmatched rows are
 // skipped and reported back rather than creating anything.
+// Purchase-only — logging the PO/Vendor/ETA is Purchase's job, not
+// PPIC's; PPIC's own role here stops at raising the requirement (see
+// POST / above) — same split on the single-item route below.
 preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBody(importPurchaseLogSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { rows } = req.body as ImportPurchaseLogInput;
@@ -291,6 +282,9 @@ preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBod
   }
 });
 
+// Purchase-only — PPIC plans (raises the requirement, POST / above),
+// Purchase buys (logs the PO/Vendor/ETA here). Kept as two separate
+// roles rather than letting PPIC do both.
 preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(setPurchaseSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id }, include: { item: true } });
@@ -336,6 +330,35 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
     ]);
 
     const [withStock] = await withLiveStock([updated]);
+    res.json(withStock);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PPIC's own explicit "Send to Purchase" — per the client, a shortfall
+// existing isn't reason enough for the system to tell Purchase on its
+// own; PPIC decides when it's actually worth raising. Doesn't touch the
+// row itself (no new field, no state to track) — this is purely the
+// notification POST /:id/purchase's own success already sends for other
+// events, just triggerable by hand instead of tied to creation.
+preInventoryRouter.post("/:id/notify-purchase", requireRole("PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id }, include: requirementInclude });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Requirement not found" });
+    if (existing.purchaseAt) return res.status(409).json({ error: "A PO has already been logged against this one." });
+
+    const [withStock] = await withLiveStock([existing]);
+    if (withStock!.shortQty <= 0) return res.status(400).json({ error: "This item isn't actually short against live stock right now — nothing to send." });
+
+    await notifyRoles(
+      ["PURCHASE"],
+      { title: `Shortfall: ${existing.item.name}`, body: `${withStock!.shortQty} ${existing.unit} short (${withStock!.currentStock} on hand) — log a PO.`, link: "/pre-inventory" },
+      req.user!.id,
+    );
+
+    await recordAudit({ actorId: req.user!.id, action: "pre_inventory.sent_to_purchase", entityType: "PreInventoryRequirement", entityId: existing.id, metadata: { shortQty: withStock!.shortQty } });
+
     res.json(withStock);
   } catch (err) {
     next(err);

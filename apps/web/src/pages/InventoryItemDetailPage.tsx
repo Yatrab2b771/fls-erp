@@ -1,13 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowDownToLine, ArrowUpFromLine, Boxes, Download, Package, Warehouse } from "lucide-react";
-import { useInventoryTransactions, useItemStockByLocation } from "../lib/hooks";
+import { ArrowLeft, ArrowDownToLine, ArrowUpFromLine, Boxes, Download, IndianRupee, Package, Warehouse } from "lucide-react";
+import { useInventoryTransactions, useItemStockByLocation, useUpdateInventoryItemPricing } from "../lib/hooks";
+import { useAuth } from "../lib/auth";
 import { EmptyState } from "../components/EmptyState";
 import { StatTile } from "../components/StatTile";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
+import { ApiError } from "../lib/api";
 import { exportItemHistoryReport } from "../lib/inventoryExport";
-import type { InventoryTransaction } from "../lib/types";
+import type { InventoryItem, InventoryTransaction } from "../lib/types";
 
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
@@ -92,6 +94,8 @@ export function InventoryItemDetailPage() {
           <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download History
         </button>
       </div>
+
+      <PricingPanel item={location.item} />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile icon={ArrowDownToLine} label="Total Received" value={totalReceived} accent="emerald" />
@@ -202,6 +206,80 @@ function ItemHistoryTable({ rows, empty }: { rows: InventoryTransaction[] | unde
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// Pricing/costing — matches the client's own stock-report format (Cost
+// Price, M.R.P., Purchase Price, Sales Price), which the rest of this
+// app otherwise had no equivalent for at all. Purchase/Accounts-only:
+// hidden entirely from every other role, not shown blank — the API
+// already strips these fields out of the item it hands back to anyone
+// else (see item-pricing.ts), so `item.costPrice === undefined` here
+// just mirrors that same "can't see it" state, not "never priced."
+function PricingPanel({ item }: { item: InventoryItem }) {
+  const { hasRole } = useAuth();
+  const canEdit = hasRole("PURCHASE") || hasRole("ACCOUNTS");
+  const update = useUpdateInventoryItemPricing();
+  const toast = useToast();
+
+  const [costPrice, setCostPrice] = useState(item.costPrice?.toString() ?? "");
+  const [mrp, setMrp] = useState(item.mrp?.toString() ?? "");
+  const [purchasePrice, setPurchasePrice] = useState(item.purchasePrice?.toString() ?? "");
+  const [salesPrice, setSalesPrice] = useState(item.salesPrice?.toString() ?? "");
+
+  // Re-sync if the item reloads with different saved values (e.g. after
+  // a successful save invalidates the query).
+  useEffect(() => {
+    setCostPrice(item.costPrice?.toString() ?? "");
+    setMrp(item.mrp?.toString() ?? "");
+    setPurchasePrice(item.purchasePrice?.toString() ?? "");
+    setSalesPrice(item.salesPrice?.toString() ?? "");
+  }, [item.costPrice, item.mrp, item.purchasePrice, item.salesPrice]);
+
+  if (!canEdit) return null;
+
+  async function handleSave() {
+    try {
+      await update.mutateAsync({
+        id: item.id,
+        costPrice: costPrice ? Number(costPrice) : null,
+        mrp: mrp ? Number(mrp) : null,
+        purchasePrice: purchasePrice ? Number(purchasePrice) : null,
+        salesPrice: salesPrice ? Number(salesPrice) : null,
+      });
+      toast.success("Pricing saved.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save");
+    }
+  }
+
+  return (
+    <div className="card p-5">
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-black text-slate-800">
+        <IndianRupee className="h-4 w-4" strokeWidth={2.5} /> Pricing — Purchase / Accounts only
+      </h2>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div>
+          <label className="label">Cost Price</label>
+          <input className="field font-mono" type="number" min="0" step="any" value={costPrice} onChange={(e) => setCostPrice(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">M.R.P.</label>
+          <input className="field font-mono" type="number" min="0" step="any" value={mrp} onChange={(e) => setMrp(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Purchase Price</label>
+          <input className="field font-mono" type="number" min="0" step="any" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Sales Price</label>
+          <input className="field font-mono" type="number" min="0" step="any" value={salesPrice} onChange={(e) => setSalesPrice(e.target.value)} />
+        </div>
+      </div>
+      <button type="button" className="btn-primary btn-sm mt-3" disabled={update.isPending} onClick={handleSave}>
+        {update.isPending ? "Saving…" : "Save Pricing"}
+      </button>
     </div>
   );
 }

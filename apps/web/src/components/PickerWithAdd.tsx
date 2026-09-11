@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { UserPlus } from "lucide-react";
+import { UserPlus, type LucideIcon } from "lucide-react";
+import { ItemPicker } from "./ItemPicker";
 
-// A <select> that can grow its own option list inline — same "+ New"
-// toggle pattern as InventoryPage's item picker, generalized for any
-// named lookup list (Day Store, Plant, ...) where "add one if it's not
-// there yet" beats a separate admin screen. Optional — every caller
+// A searchable picker that can grow its own option list inline — same
+// "+ New" toggle pattern as InventoryPage's item picker, generalized for
+// any named lookup list (Day Store, Plant, ...) where "add one if it's
+// not there yet" beats a separate admin screen. Optional — every caller
 // treats an empty value as "not tagged", never a required field.
 export function PickerWithAdd({
   label,
@@ -14,6 +15,12 @@ export function PickerWithAdd({
   onChange,
   onCreate,
   disabled = false,
+  // Per-row icon in the open list (Brand, Product, ...) — a plain text
+  // list doesn't need one, a real named catalog reads better with one.
+  icon,
+  // UserPlus still fits "add a new customer/plant"; Plus reads better
+  // once the thing being added isn't a person (Brand, Product, ...).
+  addIcon: AddIcon = UserPlus,
 }: {
   label: string;
   placeholder: string;
@@ -22,6 +29,8 @@ export function PickerWithAdd({
   onChange: (id: string) => void;
   onCreate: (name: string) => Promise<{ id: string } | null>;
   disabled?: boolean;
+  icon?: LucideIcon;
+  addIcon?: LucideIcon;
 }) {
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
@@ -51,17 +60,12 @@ export function PickerWithAdd({
       <label className="label">{label}</label>
       {!showNew ? (
         <div className="flex flex-wrap gap-2">
-          <select className="field min-w-0 flex-1" value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
-            <option value="">{placeholder}</option>
-            {options.map((o) => (
-              <option key={o.id} value={o.id}>
-                {o.name}
-              </option>
-            ))}
-          </select>
+          <div className="min-w-0 flex-1">
+            <ItemPicker items={options} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled} icon={icon} />
+          </div>
           {!disabled && (
             <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNew(true)}>
-              <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New
+              <AddIcon className="h-3.5 w-3.5" strokeWidth={2.25} /> New
             </button>
           )}
         </div>

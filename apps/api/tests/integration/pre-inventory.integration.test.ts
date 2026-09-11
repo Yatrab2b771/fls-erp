@@ -99,7 +99,40 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     expect(shortOnly.body.map((r: { id: string }) => r.id)).toEqual([]); // both requirements are resolved: #1 has a PO, #2 is fully covered
   });
 
-  it("bulk-imports requirements (S1) and notifies Purchase in aggregate for whichever rows are short against live stock", async () => {
+  // Per the client: a shortfall existing isn't reason enough for the
+  // system to tell Purchase on its own — PPIC has to explicitly send it.
+  it("POST /:id/notify-purchase — PPIC-only, requires an actual live shortfall, and is the only way Purchase gets told now", async () => {
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: storeToken } = await createUser(["STORE"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Notify-Purchase Protein" });
+
+    const created = await request(app)
+      .post("/api/inventory/requirements")
+      .set(authHeader(ppicToken))
+      .send({ date: "2026-08-21", category: "RM", itemId: item.body.id, unit: "Kg", requiredQty: 50 });
+
+    // Creating it alone raised no notification at all.
+    const beforeSend = await request(app).get("/api/notifications").set(authHeader(purchaseToken));
+    expect(beforeSend.body.unreadCount).toBe(0);
+
+    const deniedRole = await request(app).post(`/api/inventory/requirements/${created.body.id}/notify-purchase`).set(authHeader(storeToken));
+    expect(deniedRole.status).toBe(403);
+
+    const sent = await request(app).post(`/api/inventory/requirements/${created.body.id}/notify-purchase`).set(authHeader(ppicToken));
+    expect(sent.status).toBe(200);
+
+    const afterSend = await request(app).get("/api/notifications").set(authHeader(purchaseToken));
+    expect(afterSend.body.notifications.some((n: { title: string }) => n.title.includes("Notify-Purchase Protein"))).toBe(true);
+
+    // A second send still works (no state change to block a repeat) —
+    // but once fully covered, it's refused.
+    await giveStock(storeToken, item.body.id, 100);
+    const nothingToSend = await request(app).post(`/api/inventory/requirements/${created.body.id}/notify-purchase`).set(authHeader(ppicToken));
+    expect(nothingToSend.status).toBe(400);
+  });
+
+  it("bulk-imports requirements (S1) — no auto-notify to Purchase any more, that's PPIC's own explicit call now", async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
@@ -127,7 +160,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     expect(imported.body).toEqual({ requirementsCreated: 2, itemsCreated: 1 });
 
     const purchaseInbox = await request(app).get("/api/notifications").set(authHeader(purchaseToken));
-    expect(purchaseInbox.body.notifications.some((n: { title: string }) => n.title.includes("1 shortfall"))).toBe(true);
+    expect(purchaseInbox.body.unreadCount).toBe(0);
 
     const shortOnly = await request(app).get("/api/inventory/requirements?short=true&category=RM").set(authHeader(storeToken));
     expect(shortOnly.body.length).toBe(1);
@@ -161,17 +194,74 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     expect(deleted.status).toBe(204);
   });
 
+  // Per the client: Purchase shouldn't have to wait on PPIC to raise a
+  // shortfall it already knows about — but logging the actual PO/Vendor/
+  // ETA stays Purchase-only; PPIC's role is planning (raising the
+  // requirement), not buying.
+  it("Purchase can log a requirement directly (not just react to one PPIC raised) — but logging the PO/Vendor/ETA stays Purchase-only, not PPIC's", async () => {
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const { token: storeToken } = await createUser(["STORE"]);
+    const { token: qaToken } = await createUser(["QA_QC"]);
+
+    const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Direct-Log Protein" });
+
+    // Purchase raises the requirement itself — no PPIC involved at all.
+    const deniedCreate = await request(app)
+      .post("/api/inventory/requirements")
+      .set(authHeader(qaToken))
+      .send({ date: "2026-08-21", category: "RM", itemId: item.body.id, unit: "Kg", requiredQty: 20 });
+    expect(deniedCreate.status).toBe(403);
+
+    const created = await request(app)
+      .post("/api/inventory/requirements")
+      .set(authHeader(purchaseToken))
+      .send({ date: "2026-08-21", category: "RM", itemId: item.body.id, unit: "Kg", requiredQty: 20 });
+    expect(created.status).toBe(201);
+
+    // Purchase can immediately follow up with the PO/Vendor/ETA on the
+    // same row it just raised.
+    const purchased = await request(app)
+      .patch(`/api/inventory/requirements/${created.body.id}/purchase`)
+      .set(authHeader(purchaseToken))
+      .send({ poNumber: "PO-DIRECT-1", vendorName: "Direct Vendor Co.", eta: "2026-09-15" });
+    expect(purchased.status).toBe(200);
+    expect(purchased.body.poNumber).toBe("PO-DIRECT-1");
+
+    // PPIC raises its own requirement (planning) but can't log the PO
+    // against it — that's Purchase's job.
+    const item2 = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "PPIC-Logged Protein" });
+    const raisedByPpic = await request(app)
+      .post("/api/inventory/requirements")
+      .set(authHeader(ppicToken))
+      .send({ date: "2026-08-21", category: "RM", itemId: item2.body.id, unit: "Kg", requiredQty: 10 });
+    expect(raisedByPpic.status).toBe(201);
+
+    const deniedPurchaseByPpic = await request(app)
+      .patch(`/api/inventory/requirements/${raisedByPpic.body.id}/purchase`)
+      .set(authHeader(ppicToken))
+      .send({ poNumber: "PO-DIRECT-2", vendorName: "PPIC's Own Vendor", eta: "2026-09-20" });
+    expect(deniedPurchaseByPpic.status).toBe(403);
+  });
+
   it("bulk-logs POs (S3), matching rows to open requirements by item + category, oldest first, skipping what's already covered or unmatched", async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
     const { token: accountsToken } = await createUser(["ACCOUNTS"]);
 
+    // Logging a PO is Purchase-only — Store (and PPIC, planning only) are
+    // both denied here.
     const denied = await request(app)
+      .post("/api/inventory/requirements/purchase/import")
+      .set(authHeader(storeToken))
+      .send({ rows: [{ itemName: "Whey Protein", category: "RM", poNumber: "PO-1", vendorName: "Acme", eta: "2026-09-01" }] });
+    expect(denied.status).toBe(403);
+    const deniedPpic = await request(app)
       .post("/api/inventory/requirements/purchase/import")
       .set(authHeader(ppicToken))
       .send({ rows: [{ itemName: "Whey Protein", category: "RM", poNumber: "PO-1", vendorName: "Acme", eta: "2026-09-01" }] });
-    expect(denied.status).toBe(403);
+    expect(deniedPpic.status).toBe(403);
 
     // Two separate open requirements for the same item — the import
     // should claim them in FIFO order, not double-book the first one.
@@ -291,6 +381,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: qaToken } = await createUser(["QA_QC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
     await request(app)
@@ -307,8 +398,12 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
       .set(authHeader(purchaseToken))
       .send({ poNumber: "PO-1", vendorName: "PureCreatine Traders", eta: "2026-09-01" });
 
-    const deniedRole = await request(app).get("/api/inventory/vendors").set(authHeader(ppicToken));
+    const deniedRole = await request(app).get("/api/inventory/vendors").set(authHeader(qaToken));
     expect(deniedRole.status).toBe(403);
+
+    // PPIC plans, doesn't buy — no reason to see the vendor picker either.
+    const deniedPpic = await request(app).get("/api/inventory/vendors").set(authHeader(ppicToken));
+    expect(deniedPpic.status).toBe(403);
 
     const asPurchase = await request(app).get("/api/inventory/vendors").set(authHeader(purchaseToken));
     expect(asPurchase.status).toBe(200);

@@ -22,7 +22,7 @@ export function LoadingScreen() {
           </div>
         </div>
         <div className="text-center">
-          <p className="text-sm font-black tracking-tight text-slate-900">FLS ERP</p>
+          <p className="text-sm font-black tracking-tight text-slate-900">FLS Mitr</p>
           <p className="mt-0.5 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
         </div>
       </div>

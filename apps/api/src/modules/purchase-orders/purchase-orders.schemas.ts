@@ -1,8 +1,13 @@
 import { z } from "zod";
 
 const dateField = z.coerce.date().optional();
-const REGULATORY_BODIES = ["FSSAI", "AYUSH"] as const;
+// FSSAI/AYUSH are the two the form suggests, but a PO can be tagged
+// against any regulatory body — free text, not a closed enum, so a new
+// one (state-specific, export-market, ...) isn't rejected outright. The
+// Prisma column itself is a plain String for the same reason.
+const regulatoryBodyField = z.string().max(60).optional();
 const REGULATORY_STATUSES = ["Applied", "Not Applied", "Issued"] as const;
+const PRODUCT_TYPES = ["EXISTING", "NEW"] as const;
 
 export const purchaseOrderItemSchema = z.object({
   productName: z.string().min(1).max(200),
@@ -13,6 +18,11 @@ export const purchaseOrderItemSchema = z.object({
   packSize: z.string().max(120).optional(),
   packType: z.string().max(120).optional(),
   bomRef: z.string().max(200).optional(),
+  // Defaults to EXISTING — a bulk-imported row or any caller that
+  // doesn't set this explicitly keeps today's behavior. The manual PO
+  // form makes this a required choice; the schema itself stays lenient
+  // so imports don't need updating just for this.
+  productType: z.enum(PRODUCT_TYPES).default("EXISTING"),
 });
 
 // PO header + at least one product line item — the "Add More" repeating
@@ -20,9 +30,9 @@ export const purchaseOrderItemSchema = z.object({
 export const createPurchaseOrderSchema = z.object({
   customerId: z.string().uuid(),
   poNumber: z.string().max(120).optional(),
-  brandName: z.string().max(200).optional(),
   orderDate: dateField,
-  regulatoryBody: z.enum(REGULATORY_BODIES).optional(),
+  expectedDeliveryDate: dateField,
+  regulatoryBody: regulatoryBodyField,
   regulatoryStatus: z.enum(REGULATORY_STATUSES).optional(),
   items: z.array(purchaseOrderItemSchema).min(1, "A PO needs at least one product line item"),
 });
@@ -60,9 +70,9 @@ export const importPurchaseOrdersSchema = z.object({
       z.object({
         poNumber: z.string().min(1).max(120),
         customerName: z.string().min(1).max(200),
-        brandName: z.string().max(200).optional(),
         orderDate: dateField,
-        regulatoryBody: z.enum(REGULATORY_BODIES).optional(),
+        expectedDeliveryDate: dateField,
+        regulatoryBody: regulatoryBodyField,
         regulatoryStatus: z.enum(REGULATORY_STATUSES).optional(),
         productName: z.string().min(1).max(200),
         dosageForm: z.string().max(120).optional(),
@@ -77,7 +87,17 @@ export const importPurchaseOrdersSchema = z.object({
     .max(2000),
 });
 
+// Generating the PO-level invoice — both fields optional so Accounts can
+// preview/save the computed total first and fill in the paperwork
+// numbers after, same "not everything has to be typed up front" pattern
+// as the Batch stage forms.
+export const generatePoInvoiceSchema = z.object({
+  invoiceNo: z.string().max(120).optional(),
+  invoiceDate: dateField,
+});
+
 export type PurchaseOrderItemInput = z.infer<typeof purchaseOrderItemSchema>;
+export type GeneratePoInvoiceInput = z.infer<typeof generatePoInvoiceSchema>;
 export type ImportPurchaseOrdersInput = z.infer<typeof importPurchaseOrdersSchema>;
 export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>;
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;

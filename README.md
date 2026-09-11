@@ -1,4 +1,4 @@
-# FLS ERP
+# FLS Mitr
 
 - **[`server/`](server/README.md)** — the real application: Express +
   TypeScript API backed by PostgreSQL/Prisma. Auth & RBAC, Packaging BOM,

@@ -15,7 +15,7 @@ export function buildMasterBomPdf(
 ): PDFKit.PDFDocument {
   const doc = new PDFDocument({ layout: "landscape", size: "A3", margin: 30 });
 
-  doc.font("Helvetica-Bold").fontSize(18).text("FLS ERP — Master Packaging BOM");
+  doc.font("Helvetica-Bold").fontSize(18).text("FLS Mitr — Master Packaging BOM");
   doc
     .font("Helvetica")
     .fontSize(11)

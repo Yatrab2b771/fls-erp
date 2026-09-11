@@ -11,6 +11,21 @@
   body {
     @apply bg-slate-50 text-slate-800;
   }
+  /* Every figure in this app sits in a column someone compares down —
+     stock on hand, required vs. issued, batch quantities. Proportional
+     digits make those columns ragged; tabular ones line the decimals up
+     without needing a monospace face everywhere. */
+  table,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+  /* Keyboard focus is a real operator path here (Store logs entries all
+     day through a form), and the default outline disappears against the
+     brand palette — this is the one focus treatment, applied only to
+     keyboard focus so a mouse click doesn't leave a ring behind. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500/40 ring-offset-2 ring-offset-white;
+  }
   ::-webkit-scrollbar {
     @apply h-2 w-2;
   }
@@ -82,8 +97,12 @@
   }
 
   /* --- Tables --- */
+  /* Sticky header: these tables genuinely run long (800+ inventory items,
+     every PO's batches), and a header that scrolls away turns column 6
+     into a guess. Sticks to the top of its own scroll container, so a
+     table inside a card still behaves. */
   .table-modern thead {
-    @apply bg-slate-50/80 text-[10px] font-bold uppercase tracking-wider text-slate-400;
+    @apply sticky top-0 z-10 bg-slate-50/95 text-[10px] font-bold uppercase tracking-wider text-slate-400 backdrop-blur-sm;
   }
   .table-modern th {
     @apply px-4 py-3 text-left;
@@ -92,7 +111,20 @@
     @apply px-4 py-3 text-[13px];
   }
   .table-modern tbody tr {
-    @apply border-t border-slate-100 transition-colors hover:bg-slate-50/60;
+    @apply border-t border-slate-100 transition-colors hover:bg-brand-50/40;
+  }
+
+  /* --- Section heading — the label above a group of cards/fields, so a
+     long page reads as sections instead of one undifferentiated column. --- */
+  .section-title {
+    @apply flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.12em] text-slate-400;
+  }
+
+  /* --- Key figure — the one number a tile exists to show. Tabular by
+     inheritance (see the base layer), tightened so a 6-digit quantity
+     doesn't sprawl. --- */
+  .metric {
+    @apply text-2xl font-black leading-none tracking-tight text-slate-900;
   }
 
   /* --- Loading skeleton --- */

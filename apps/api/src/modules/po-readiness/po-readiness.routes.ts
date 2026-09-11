@@ -5,9 +5,8 @@ import { notifyRoles } from "../../common/lib/notify";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
-import { getTotalAvailableByItemId } from "../inventory/stock";
 import { createPoRequirementSchema, importPoRequirementsSchema, type CreatePoRequirementInput, type ImportPoRequirementsInput } from "./po-readiness.schemas";
-import type { Prisma } from "@prisma/client";
+import { computeReadiness } from "./readiness-engine";
 
 // --- PO Material Readiness — from the PPIC requirement conversation
 // (2026-08-25). PPIC bulk-uploads, per PO, exactly which RM/PM items and
@@ -134,77 +133,60 @@ poReadinessRouter.post("/import", requireRole("PPIC"), validateBody(importPoRequ
   }
 });
 
-// --- Shared readiness computation — one PO is "ready" once every one of
-// its requirement rows has enough live stock. Computed on read, never
-// stored, same rule as every other derived number in this app. ---
-
-const poSummaryInclude = {
-  customer: { select: { id: true, companyName: true } },
-} satisfies Prisma.PurchaseOrderInclude;
-
-interface PoReadinessRow {
-  purchaseOrder: { id: string; poNumber: string | null; brandName: string | null; status: string; customer: { id: string; companyName: string } };
-  items: { itemId: string; itemName: string; category: string; requiredQty: number; unit: string; onHand: number; covered: boolean }[];
-  totalItems: number;
-  readyItems: number;
-  isReady: boolean;
+// --- Reusable by other modules — Packaging BOM / RM Costing's own
+// "Send to Pre-Inventory" button calls this too, when the plan being sent
+// is linked to a real PO (BomPlan.purchaseOrderItemId /
+// RmPlan.purchaseOrderItemId): if the system already knows which PO this
+// packaging/formulation is for, PPIC shouldn't have to separately
+// re-enter the exact same (item, quantity) pairs here by hand — same
+// "Generate already knows the PO" reasoning as the PO detail page's
+// Generate button. Same upsert-on-(PO, item) pattern as the manual-add
+// and bulk-import routes above, including the same soft-delete
+// resurrection handling. ---
+export interface PoRequirementSourceRow {
+  category: "RM" | "PM";
+  itemName: string;
+  unit: string;
+  requiredQty: number;
 }
 
-// `filterPoIds`, when given, only trims which POs come back in the
-// *result* — the allocation itself always runs over every PO in the
-// system that has requirements. Two POs both needing 10 Kg of an item
-// the Warehouse only has 10 Kg of can't both be "covered" against the
-// same physical units; whichever requirement row was recorded first
-// (createdAt — the confirmed priority rule: first requirement entered,
-// first served, an upload/manual-add's timestamp survives a later
-// correction since upsert only touches requiredQty/unit/category) gets
-// first claim, and it decrements a running per-item balance that every
-// later-recorded requirement for that same item then checks against.
-// Running this allocation over only a filtered subset (e.g. just one
-// PO) would silently ignore other POs' earlier claims on the same item
-// and over-report coverage — same bug this whole thing exists to fix,
-// just reintroduced at the query level instead of the math level.
-async function computeReadiness(filterPoIds?: string[]): Promise<PoReadinessRow[]> {
-  const requirements = await prisma.poMaterialRequirement.findMany({
-    where: { deletedAt: null },
-    include: { item: true, purchaseOrder: { include: poSummaryInclude } },
-    orderBy: { createdAt: "asc" },
-  });
-  if (requirements.length === 0) return [];
+export async function createPoMaterialRequirements(
+  purchaseOrderId: string,
+  rows: PoRequirementSourceRow[],
+  actorId: string,
+): Promise<{ rowsCreated: number; itemsCreated: number }> {
+  const uniqueItems = new Map<string, { category: "RM" | "PM"; name: string }>();
+  for (const row of rows) uniqueItems.set(`${row.category}::${row.itemName}`, { category: row.category, name: row.itemName });
 
-  // Total across Warehouse + every Day Store + every Plant — see
-  // getTotalAvailableByItemId's own comment for why Warehouse alone
-  // isn't the right figure for "can this PO run."
-  const totalOnHand = await getTotalAvailableByItemId([...new Set(requirements.map((r) => r.itemId))]);
-  // Decreases as earlier-recorded requirements claim their share —
-  // what's actually left for the *next* PO in line to draw against,
-  // not the item's raw total.
-  const remaining = new Map(totalOnHand);
-
-  const byPo = new Map<string, PoReadinessRow>();
-  for (const r of requirements) {
-    const available = remaining.get(r.itemId) ?? 0;
-    const covered = available >= r.requiredQty;
-    if (covered) remaining.set(r.itemId, available - r.requiredQty);
-
-    let row = byPo.get(r.purchaseOrderId);
-    if (!row) {
-      row = { purchaseOrder: r.purchaseOrder as PoReadinessRow["purchaseOrder"], items: [], totalItems: 0, readyItems: 0, isReady: true };
-      byPo.set(r.purchaseOrderId, row);
+  const itemIds = new Map<string, string>();
+  let itemsCreated = 0;
+  for (const [key, { category, name }] of uniqueItems) {
+    const existing = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name } } });
+    if (existing) {
+      itemIds.set(key, existing.id);
+    } else {
+      const created = await prisma.inventoryItem.create({ data: { category, name } });
+      itemIds.set(key, created.id);
+      itemsCreated += 1;
     }
-    // onHand here is "available to *this* PO at its place in the queue"
-    // — deliberately not the item's raw total, so two POs competing for
-    // the same scarce item visibly show different numbers explaining
-    // why one is covered and the other isn't.
-    row.items.push({ itemId: r.itemId, itemName: r.item.name, category: r.category, requiredQty: r.requiredQty, unit: r.unit, onHand: available, covered });
-    row.totalItems += 1;
-    if (covered) row.readyItems += 1;
-    if (!covered) row.isReady = false;
   }
 
-  const all = [...byPo.values()];
-  return filterPoIds ? all.filter((row) => filterPoIds.includes(row.purchaseOrder.id)) : all;
+  let rowsCreated = 0;
+  for (const row of rows) {
+    const itemId = itemIds.get(`${row.category}::${row.itemName}`)!;
+    await prisma.poMaterialRequirement.upsert({
+      where: { purchaseOrderId_itemId: { purchaseOrderId, itemId } },
+      create: { purchaseOrderId, itemId, category: row.category, requiredQty: row.requiredQty, unit: row.unit, createdById: actorId },
+      update: { requiredQty: row.requiredQty, unit: row.unit, category: row.category, deletedAt: null, deletedById: null },
+    });
+    rowsCreated += 1;
+  }
+  return { rowsCreated, itemsCreated };
 }
+
+// --- Readiness computation itself lives in ./readiness-engine (computeReadiness) —
+// pulled out so the Batch pipeline's creation gate can reuse it without
+// importing a route file. ---
 
 // GET /?ready=true — every PO with at least one requirement row, live
 // readiness attached. ?ready=true narrows to only the ones fully

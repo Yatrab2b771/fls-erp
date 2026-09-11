@@ -13,11 +13,16 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 type Db = Pick<PrismaClient, "inventoryTransaction" | "batchMaterialConsumption">;
 
 // The one place stock-on-hand math lives — sum(RECEIVED, accepted) −
-// sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION), per item. Used by
-// GET /inventory/stock (the full ledger view) and by Pre-Inventory's
-// live shortfall computation (Part 2 — no more manual "Confirm
-// Availability" step; PPIC's requirement is compared against this same
-// number, live, every time it's read).
+// sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) − sum(ISSUED_RND), per
+// item. Used by GET /inventory/stock (the full ledger view) and by
+// Pre-Inventory's live shortfall computation (Part 2 — no more manual
+// "Confirm Availability" step; PPIC's requirement is compared against
+// this same number, live, every time it's read). ISSUED_RND (a sample
+// sent to the R&D Store — see rnd-store.routes.ts) is an outflow here
+// same as the other two ISSUED_* types; a RECEIVED row with
+// isRndReturn=true (R&D's leftover coming back) needs no special-casing
+// — it's already ACCEPTED at creation and counted by the RECEIVED sum
+// above, same as Opening Stock.
 export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Promise<Map<string, number>> {
   // deletedAt: null everywhere in this file — a soft-deleted transaction
   // (Recycle Bin) stops counting toward stock the instant it's removed,
@@ -25,7 +30,7 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
   // the instant an Admin restores it.
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
-  const [receivedTotals, issuedDayStoreTotals, issuedProductionTotals] = await Promise.all([
+  const [receivedTotals, issuedDayStoreTotals, issuedProductionTotals, issuedRndTotals] = await Promise.all([
     // Only ACCEPTED counts — a delivery still sitting in QC, or one QC
     // rejected, hasn't actually become usable stock yet. Opening Stock
     // rows are ACCEPTED at creation (see schema.prisma), so they're
@@ -35,16 +40,18 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "RECEIVED", receiptStatus: "ACCEPTED" }, _sum: { quantity: true, rejectedQty: true } }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
+    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_RND" }, _sum: { quantity: true } }),
   ]);
 
   const received = new Map(receivedTotals.map((r) => [r.itemId, (r._sum.quantity ?? 0) - (r._sum.rejectedQty ?? 0)]));
   const issuedDayStore = new Map(issuedDayStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
   const issuedProduction = new Map(issuedProductionTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  const issuedRnd = new Map(issuedRndTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
-  const allItemIds = new Set([...received.keys(), ...issuedDayStore.keys(), ...issuedProduction.keys(), ...(itemIds ?? [])]);
+  const allItemIds = new Set([...received.keys(), ...issuedDayStore.keys(), ...issuedProduction.keys(), ...issuedRnd.keys(), ...(itemIds ?? [])]);
   const onHand = new Map<string, number>();
   for (const id of allItemIds) {
-    onHand.set(id, (received.get(id) ?? 0) - (issuedDayStore.get(id) ?? 0) - (issuedProduction.get(id) ?? 0));
+    onHand.set(id, (received.get(id) ?? 0) - (issuedDayStore.get(id) ?? 0) - (issuedProduction.get(id) ?? 0) - (issuedRnd.get(id) ?? 0));
   }
   return onHand;
 }
@@ -73,7 +80,17 @@ export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: s
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
   const [issuedToStoreTotals, issuedFromStoreTotals] = await Promise.all([
-    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE", dayStoreId }, _sum: { quantity: true } }),
+    // deliveredAt: not null — excludes a still-open transit-tracked row
+    // (isTransitTracked=true, awaiting the Day Store's own confirm).
+    // Every other row already has deliveredAt stamped at creation (see
+    // schema.prisma), so this is a no-op filter for anything that isn't
+    // currently in transit.
+    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE", dayStoreId, deliveredAt: { not: null } }, _sum: { quantity: true } }),
+    // No deliveredAt filter here on purpose — this is the Day Store's own
+    // outflow (issued onward to Production), which leaves this store's
+    // balance the instant it's logged, same "source drops immediately"
+    // rule as everywhere else, regardless of whether that onward leg is
+    // itself transit-tracked.
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION", dayStoreId }, _sum: { quantity: true } }),
   ]);
 
@@ -94,17 +111,20 @@ export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: s
 // above, but the "outflow" side is different: a Plant's inflow is
 // ISSUED_PRODUCTION tagged with plantId (Inventory's existing tag,
 // unchanged), while its outflow is BatchMaterialConsumption — real RM/PM
-// usage Store logs at a batch's Dispensing stage (apps/api/src/modules/
-// batches/batches.routes.ts). Unlike Day Store, there's no ledger row on
-// the Inventory side for the outflow; it lives entirely in the Batches
-// module, joined here through Batch.plantId.
+// usage Store logs at a PreProduction run's Dispensing stage (apps/api/
+// src/modules/batches/pre-production.routes.ts). Unlike Day Store,
+// there's no ledger row on the Inventory side for the outflow; it lives
+// entirely in the Batches module, joined here through
+// PreProduction.plantId.
 export async function getOnHandByPlantAndItem(plantId: string, itemIds?: string[], db: Db = prisma): Promise<Map<string, number>> {
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
   const consumptionItemFilter: Prisma.BatchMaterialConsumptionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
 
   const [issuedToPlantTotals, consumedTotals] = await Promise.all([
-    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION", plantId }, _sum: { quantity: true } }),
-    db.batchMaterialConsumption.groupBy({ by: ["itemId"], where: { ...consumptionItemFilter, batch: { plantId } }, _sum: { quantity: true } }),
+    // deliveredAt: not null — same open-transit exclusion as the Day
+    // Store inflow above; a no-op for anything not currently in transit.
+    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION", plantId, deliveredAt: { not: null } }, _sum: { quantity: true } }),
+    db.batchMaterialConsumption.groupBy({ by: ["itemId"], where: { ...consumptionItemFilter, preProduction: { plantId } }, _sum: { quantity: true } }),
   ]);
 
   const issuedToPlant = new Map(issuedToPlantTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));

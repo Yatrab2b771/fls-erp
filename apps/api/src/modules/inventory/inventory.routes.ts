@@ -11,6 +11,8 @@ import { assertDayStoreAccess } from "./day-store-access";
 import { getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem, notifyIfNewlyAvailable } from "./stock";
 import { notifyIfPoNewlyReady } from "../po-readiness/po-readiness.routes";
 import {
+  confirmDeliverySchema,
+  createDebitNoteSchema,
   createDispatchTransferSchema,
   createInventoryItemSchema,
   createInventoryRequestSchema,
@@ -19,12 +21,17 @@ import {
   importDispatchTransfersSchema,
   importInventoryRequestsSchema,
   importInventoryTransactionsSchema,
+  importItemMasterSchema,
   inwardQcReviewSchema,
   invoiceSchema,
   issueInventoryRequestSchema,
   qcReviewSchema,
   reviewInventoryRequestSchema,
   updateInventoryItemSchema,
+  updateInventoryItemPricingSchema,
+  updateInventoryTransactionSchema,
+  type ConfirmDeliveryInput,
+  type CreateDebitNoteInput,
   type CreateDispatchTransferInput,
   type CreateInventoryItemInput,
   type CreateInventoryRequestInput,
@@ -33,13 +40,17 @@ import {
   type ImportDispatchTransfersInput,
   type ImportInventoryRequestsInput,
   type ImportInventoryTransactionsInput,
+  type ImportItemMasterInput,
   type InwardQcReviewInput,
   type InvoiceInput,
   type IssueInventoryRequestInput,
   type QcReviewInput,
   type ReviewInventoryRequestInput,
   type UpdateInventoryItemInput,
+  type UpdateInventoryItemPricingInput,
+  type UpdateInventoryTransactionInput,
 } from "./inventory.schemas";
+import { stripPricing, stripPricingFromAll } from "./item-pricing";
 import type { DispatchQcStatus, DispatchTransferType, InventoryCategory, InventoryReceiptStatus, InventoryRequestStatus, Prisma } from "@prisma/client";
 
 export const inventoryRouter = Router();
@@ -54,6 +65,35 @@ function notifyFailed(req: AuthedRequest, label: string) {
   return (err: unknown) => req.log?.error({ err }, `notify failed: ${label}`);
 }
 
+// "It's on its way" — fired once, at dispatch time, for a transit-tracked
+// entry (isTransitTracked=true — see schema.prisma). Destination-shaped:
+// a Day Store's own assigned users if it has any (falls back to the
+// whole STORE department otherwise, same "no rows = unrestricted"
+// default assertDayStoreAccess already uses), or the PRODUCTION
+// department for a Plant-bound one. Closed by the symmetric "confirmed
+// delivered" notification back to the dispatcher in POST
+// /transactions/:id/confirm-delivery.
+async function notifyTransitDispatched(params: {
+  txn: { item: { name: string }; quantity: number; unit: string; dayStoreId: string | null; dayStore: { name: string } | null; plant: { name: string } | null };
+  actorId: string;
+  onFail: (label: string) => (err: unknown) => void;
+}): Promise<void> {
+  const { txn, actorId, onFail } = params;
+  const title = `${txn.item.name} on its way`;
+  const body = `${txn.quantity} ${txn.unit} dispatched${txn.dayStore ? ` to ${txn.dayStore.name}` : txn.plant ? ` to ${txn.plant.name}` : ""} — confirm once it arrives.`;
+
+  if (txn.dayStoreId) {
+    const assignments = await prisma.dayStoreAssignment.findMany({ where: { dayStoreId: txn.dayStoreId }, select: { userId: true } });
+    if (assignments.length > 0) {
+      await Promise.all(assignments.map((a) => notifyUser(a.userId, { title, body, link: "/inventory" }).catch(onFail(`inventory.transit_dispatched.user.${a.userId}`))));
+    } else {
+      await notifyRoles(["STORE"], { title, body, link: "/inventory" }, actorId).catch(onFail("inventory.transit_dispatched.store"));
+    }
+  } else if (txn.plant) {
+    await notifyRoles(["PRODUCTION"], { title, body, link: "/inventory" }, actorId).catch(onFail("inventory.transit_dispatched.production"));
+  }
+}
+
 // Unlike Order Tracking/BOM/RM Costing, this module is NOT open to every
 // authenticated user by default. Store owns the Warehouse tool this
 // ports, so the ledger (transactions, dispatch transfers) and item
@@ -64,14 +104,18 @@ function notifyFailed(req: AuthedRequest, label: string) {
 
 // --- Item catalog — "List from Sanjay & naveen. Option to add item" ---
 
-inventoryRouter.get("/items", requireRole("STORE", "PPIC"), async (req, res, next) => {
+// RND included — R&D Store's request form needs to browse the catalog
+// to ask Store for material (see rnd-store.routes.ts), same read-only
+// need PPIC already has here. PURCHASE/ACCOUNTS included too — they can't
+// price what they can't see (see item-pricing.ts's own role list).
+inventoryRouter.get("/items", requireRole("STORE", "PPIC", "RND", "PURCHASE", "ACCOUNTS"), async (req: AuthedRequest, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
     const items = await prisma.inventoryItem.findMany({
       where: category ? { category } : undefined,
       orderBy: [{ category: "asc" }, { name: "asc" }],
     });
-    res.json(items);
+    res.json(stripPricingFromAll(items, req.user!.roles));
   } catch (err) {
     next(err);
   }
@@ -88,7 +132,7 @@ inventoryRouter.post("/items", requireRole("STORE"), validateBody(createInventor
 
     await recordAudit({ actorId: req.user!.id, action: "inventory_item.created", entityType: "InventoryItem", entityId: item.id });
 
-    res.status(201).json(item);
+    res.status(201).json(stripPricing(item, req.user!.roles));
   } catch (err) {
     next(err);
   }
@@ -104,7 +148,87 @@ inventoryRouter.patch("/items/:id", requireRole("STORE"), validateBody(updateInv
 
     await recordAudit({ actorId: req.user!.id, action: "inventory_item.updated", entityType: "InventoryItem", entityId: updated.id });
 
+    res.json(stripPricing(updated, req.user!.roles));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Pricing/costing — Purchase/Accounts only, both to edit and to read
+// back (GET /items strips these fields for every other role — see
+// item-pricing.ts). Its own endpoint rather than folded into PATCH
+// /items/:id above so the two write paths stay separately auditable and
+// separately role-gated, matching "Store owns the catalog entry,
+// Purchase/Accounts own the price" from the client's own department
+// split.
+inventoryRouter.patch("/items/:id/pricing", requireRole("PURCHASE", "ACCOUNTS"), validateBody(updateInventoryItemPricingSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryItem.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Inventory item not found" });
+
+    const data = req.body as UpdateInventoryItemPricingInput;
+    const updated = await prisma.inventoryItem.update({ where: { id: req.params.id }, data });
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory_item.pricing_updated", entityType: "InventoryItem", entityId: updated.id, metadata: data });
+
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Item Master import ("SKU Namkaran") — real code, plus every name a
+// different department calls this item by (Store Name, Name from Lab),
+// resolved down to one standardized name. Reference data only, no stock
+// touched — same "author the catalog, not a transaction" shape as
+// createInventoryItemSchema above. A code already imported once is
+// matched by that code (a re-run of the same sheet updates, never
+// duplicates); a code seen for the first time is matched by (category,
+// name) against an item some other module already created ad hoc — that
+// row just gets its code attached — and only creates a brand-new row
+// once neither matches.
+inventoryRouter.post("/items/import-master", requireRole("STORE"), validateBody(importItemMasterSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { rows } = req.body as ImportItemMasterInput;
+
+    let itemsCreated = 0;
+    let itemsUpdated = 0;
+    const skippedCodes: string[] = [];
+
+    for (const row of rows) {
+      // Correct Name first — that's the whole point of this sheet — then
+      // Name from Lab, then Store Name, so a row missing the standardized
+      // name still lands under *some* real, human-typed name instead of
+      // being silently dropped.
+      const name = row.correctName?.trim() || row.labName?.trim() || row.storeName?.trim();
+      if (!name) {
+        skippedCodes.push(row.code);
+        continue;
+      }
+
+      const make = row.make?.trim();
+
+      const existingByCode = await prisma.inventoryItem.findUnique({ where: { code: row.code } });
+      if (existingByCode) {
+        if (existingByCode.name !== name || existingByCode.category !== row.category || (make && existingByCode.preferredVendor !== make)) {
+          await prisma.inventoryItem.update({ where: { id: existingByCode.id }, data: { name, category: row.category, ...(make ? { preferredVendor: make } : {}) } });
+        }
+        itemsUpdated += 1;
+        continue;
+      }
+
+      const existingByName = await prisma.inventoryItem.findUnique({ where: { category_name: { category: row.category, name } } });
+      if (existingByName) {
+        await prisma.inventoryItem.update({ where: { id: existingByName.id }, data: { code: row.code, ...(make ? { preferredVendor: make } : {}) } });
+        itemsUpdated += 1;
+        continue;
+      }
+
+      await prisma.inventoryItem.create({ data: { category: row.category, name, code: row.code, preferredVendor: make || undefined } });
+      itemsCreated += 1;
+    }
+
+    res.status(201).json({ itemsCreated, itemsUpdated, skipped: skippedCodes.length, skippedCodes });
   } catch (err) {
     next(err);
   }
@@ -112,11 +236,11 @@ inventoryRouter.patch("/items/:id", requireRole("STORE"), validateBody(updateInv
 
 // --- Stock on hand — sum(RECEIVED) − sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) per item ---
 
-inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, next) => {
+inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req: AuthedRequest, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
 
-    const [items, receivedTotals, issuedDayStoreTotals, issuedProductionTotals] = await Promise.all([
+    const [items, receivedTotals, issuedDayStoreTotals, issuedProductionTotals, issuedRndTotals] = await Promise.all([
       prisma.inventoryItem.findMany({ where: category ? { category } : undefined, orderBy: [{ category: "asc" }, { name: "asc" }] }),
       // Only ACCEPTED counts — a delivery still sitting in QC, or one QC
       // rejected, hasn't actually become usable stock yet. rejectedQty
@@ -125,17 +249,23 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, nex
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null }, _sum: { quantity: true, rejectedQty: true } }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE", deletedAt: null }, _sum: { quantity: true } }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION", deletedAt: null }, _sum: { quantity: true } }),
+      // Sample sent to the R&D Store (see rnd-store.routes.ts) — an
+      // outflow here same as the two ISSUED_* types above, kept in its
+      // own bucket so this view can show it distinctly rather than
+      // folding it into Day Store/Production.
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_RND", deletedAt: null }, _sum: { quantity: true } }),
     ]);
 
     // Kept as one bulk breakdown (received/issued-day-store/
-    // issued-production separately) for this full-ledger view, not
-    // routed through getOnHandByItemId's collapsed onHand-only map —
+    // issued-production/issued-rnd separately) for this full-ledger view,
+    // not routed through getOnHandByItemId's collapsed onHand-only map —
     // that shared helper is for callers (like Pre-Inventory) that only
     // need the final number.
     const receivedGross = new Map(receivedTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
     const rejected = new Map(receivedTotals.map((r) => [r.itemId, r._sum.rejectedQty ?? 0]));
     const issuedDayStore = new Map(issuedDayStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
     const issuedProduction = new Map(issuedProductionTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+    const issuedRnd = new Map(issuedRndTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
     const stock = items.map((item) => {
       const rejectedQty = rejected.get(item.id) ?? 0;
@@ -143,8 +273,9 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req, res, nex
       const receivedQty = (receivedGross.get(item.id) ?? 0) - rejectedQty;
       const issuedDayStoreQty = issuedDayStore.get(item.id) ?? 0;
       const issuedProductionQty = issuedProduction.get(item.id) ?? 0;
-      const issuedQty = issuedDayStoreQty + issuedProductionQty;
-      return { item, receivedQty, rejectedQty, issuedDayStoreQty, issuedProductionQty, issuedQty, onHand: receivedQty - issuedQty };
+      const issuedRndQty = issuedRnd.get(item.id) ?? 0;
+      const issuedQty = issuedDayStoreQty + issuedProductionQty + issuedRndQty;
+      return { item: stripPricing(item, req.user!.roles), receivedQty, rejectedQty, issuedDayStoreQty, issuedProductionQty, issuedRndQty, issuedQty, onHand: receivedQty - issuedQty };
     });
 
     res.json(stock);
@@ -174,11 +305,136 @@ inventoryRouter.get("/items/:id/stock-by-location", requireRole("STORE", "PPIC")
     ]);
 
     res.json({
-      item,
+      item: stripPricing(item, req.user!.roles),
       warehouse: warehouseOnHand.get(item.id) ?? 0,
       dayStores: dayStores.map((ds, i) => ({ id: ds.id, name: ds.name, ...(dayStoreBalances[i]!.get(item.id) ?? { receivedFromWarehouse: 0, issuedToProduction: 0, onHand: 0 }) })),
       plants: plants.map((p, i) => ({ id: p.id, name: p.name, onHand: plantBalances[i]!.get(item.id) ?? 0 })),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Material Reconciliation — "of everything ever received, where did
+// it all actually go?" per item. The client's own example: ₹100 received,
+// ₹95 billed to a customer, ₹3 wastage/rejection, ₹2 unaccounted for —
+// that ₹2 usually turns out to be R&D sampling that was never tracked
+// anywhere, and it compounds year over year into a Tally suspense
+// account. This can't fully close that gap on the Warehouse/Production
+// side yet (RM/PM consumed in a batch isn't itself broken into used-vs-
+// wasted the way R&D's own ledger already is — Batch only tracks FG-
+// level wastage/rejection, not a per-raw-material figure), so
+// `consumedProduction` is one number, not a further split — but every
+// other leg (on hand at every location, and R&D's own full breakdown,
+// which already has that split) is real, live data, not an estimate.
+// variance is what SHOULD be ~0 for a clean item; a nonzero one is
+// exactly the kind of gap this report exists to surface early, per item,
+// instead of a lump sum discovered a year later. ---
+
+inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, next) => {
+  try {
+    const category = req.query.category as InventoryCategory | undefined;
+
+    const [items, dayStores, plants] = await Promise.all([
+      prisma.inventoryItem.findMany({ where: category ? { category } : undefined, orderBy: [{ category: "asc" }, { name: "asc" }] }),
+      prisma.dayStore.findMany({ select: { id: true } }),
+      prisma.plant.findMany({ select: { id: true } }),
+    ]);
+    const itemIds = items.map((i) => i.id);
+
+    const [receivedTotals, warehouseOnHand, dayStoreBalances, plantBalances, consumedTotals, rndTotals] = await Promise.all([
+      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null }, _sum: { quantity: true, rejectedQty: true } }),
+      getOnHandByItemId(itemIds),
+      Promise.all(dayStores.map((ds) => getOnHandByDayStoreAndItem(ds.id, itemIds))),
+      Promise.all(plants.map((p) => getOnHandByPlantAndItem(p.id, itemIds))),
+      // Split by purpose, not just summed — the client asked to see how
+      // much of what left a Plant went into the real batch vs was pulled
+      // aside as a QC sample vs was lost at dispensing (see
+      // BatchConsumptionPurpose in schema.prisma). All three still leave
+      // the Plant's own balance the same way (see stock.ts
+      // getOnHandByPlantAndItem, unfiltered by purpose), so onHandPlants
+      // above already nets all of them out — this split is purely a
+      // reporting breakdown of the same total, not a second deduction.
+      prisma.batchMaterialConsumption.groupBy({ by: ["itemId", "purpose"], where: { itemId: { in: itemIds } }, _sum: { quantity: true } }),
+      prisma.rndStoreTransaction.groupBy({ by: ["itemId", "type", "consumeReason"], where: { itemId: { in: itemIds }, deletedAt: null }, _sum: { quantity: true } }),
+    ]);
+
+    const receivedByItem = new Map(receivedTotals.map((r) => [r.itemId, (r._sum.quantity ?? 0) - (r._sum.rejectedQty ?? 0)]));
+    const consumedProductionByItem = new Map<string, number>();
+    const consumedSampleByItem = new Map<string, number>();
+    const consumedWasteByItem = new Map<string, number>();
+    for (const r of consumedTotals) {
+      const qty = r._sum.quantity ?? 0;
+      const target = r.purpose === "SAMPLE" ? consumedSampleByItem : r.purpose === "WASTE" ? consumedWasteByItem : consumedProductionByItem;
+      target.set(r.itemId, (target.get(r.itemId) ?? 0) + qty);
+    }
+
+    const dayStoreTotalByItem = new Map<string, number>();
+    for (const balances of dayStoreBalances) for (const [itemId, b] of balances) dayStoreTotalByItem.set(itemId, (dayStoreTotalByItem.get(itemId) ?? 0) + b.onHand);
+    const plantTotalByItem = new Map<string, number>();
+    for (const balances of plantBalances) for (const [itemId, onHand] of balances) plantTotalByItem.set(itemId, (plantTotalByItem.get(itemId) ?? 0) + onHand);
+
+    // Mirrors rnd-store.routes.ts GET /report's own aggregation — same
+    // four CONSUMED reasons plus DISPATCHED/RETURNED, just keyed by every
+    // item in this list rather than every item R&D has ever touched.
+    const rndByItem = new Map<string, { testing: number; formulationTrial: number; wastage: number; rejected: number; dispatched: number; returned: number }>();
+    const emptyRnd = () => ({ testing: 0, formulationTrial: 0, wastage: 0, rejected: 0, dispatched: 0, returned: 0 });
+    for (const r of rndTotals) {
+      const row = rndByItem.get(r.itemId) ?? emptyRnd();
+      const qty = r._sum.quantity ?? 0;
+      if (r.type === "CONSUMED") {
+        if (r.consumeReason === "TESTING") row.testing += qty;
+        else if (r.consumeReason === "FORMULATION_TRIAL") row.formulationTrial += qty;
+        else if (r.consumeReason === "WASTAGE") row.wastage += qty;
+        else if (r.consumeReason === "REJECTED") row.rejected += qty;
+      } else if (r.type === "DISPATCHED") row.dispatched += qty;
+      else if (r.type === "RETURNED") row.returned += qty;
+      rndByItem.set(r.itemId, row);
+    }
+
+    // Summing many float additions/subtractions across several groupBy
+    // calls accumulates binary floating-point noise (e.g. 1e-14) on a
+    // value that's mathematically exactly 0 — round everything to 3dp
+    // (this app's own real precision — see the Kg quantities throughout)
+    // so a clean item reads as a clean 0, not a false alarm.
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+
+    const rows = items
+      .map((item) => {
+        const receivedQty = round(receivedByItem.get(item.id) ?? 0);
+        const onHandWarehouse = round(warehouseOnHand.get(item.id) ?? 0);
+        const onHandDayStores = round(dayStoreTotalByItem.get(item.id) ?? 0);
+        const onHandPlants = round(plantTotalByItem.get(item.id) ?? 0);
+        const consumedProduction = round(consumedProductionByItem.get(item.id) ?? 0);
+        const consumedSample = round(consumedSampleByItem.get(item.id) ?? 0);
+        const consumedWaste = round(consumedWasteByItem.get(item.id) ?? 0);
+        const rnd = rndByItem.get(item.id) ?? emptyRnd();
+        const rndOutflow = rnd.testing + rnd.formulationTrial + rnd.wastage + rnd.rejected + rnd.dispatched;
+        const accountedFor = round(onHandWarehouse + onHandDayStores + onHandPlants + consumedProduction + consumedSample + consumedWaste + rndOutflow);
+        return {
+          item: { id: item.id, name: item.name, category: item.category, unit: item.unit },
+          receivedQty,
+          onHandWarehouse,
+          onHandDayStores,
+          onHandPlants,
+          consumedProduction,
+          consumedSample,
+          consumedWaste,
+          rndTesting: round(rnd.testing),
+          rndFormulationTrial: round(rnd.formulationTrial),
+          rndWastage: round(rnd.wastage),
+          rndRejected: round(rnd.rejected),
+          rndDispatchedCustomer: round(rnd.dispatched),
+          rndReturnedToWarehouse: round(rnd.returned), // info only — already folded back into receivedQty, not into accountedFor
+          accountedFor,
+          variance: round(receivedQty - accountedFor),
+        };
+      })
+      // Nothing ever received for this item — not a reconciliation
+      // candidate, just noise (most of the catalog, on any given day).
+      .filter((r) => r.receivedQty !== 0);
+
+    res.json(rows);
   } catch (err) {
     next(err);
   }
@@ -229,13 +485,26 @@ inventoryRouter.get("/vendors", requireRole("STORE", "PURCHASE"), async (req, re
 // Issued to day store" / "MATERIAL Issued to Production"), told apart by
 // `type`, on one endpoint ---
 
-const txnInclude = {
+// Shared by both QC gates below, and by the qc module's dashboard summary
+// (which imports these two constants + nextQcStatus rather than
+// redefining the same shape a third time).
+const QC_REVIEWABLE_STATUSES = ["PENDING_QC", "ON_HOLD"] as const;
+function nextQcStatus(action: "APPROVE" | "REJECT" | "HOLD") {
+  return action === "APPROVE" ? "QC_APPROVED" : action === "REJECT" ? "QC_REJECTED" : "ON_HOLD";
+}
+
+export const txnInclude = {
   item: true,
   createdBy: { select: { id: true, employeeId: true, fullName: true } },
   qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
   acceptedBy: { select: { id: true, employeeId: true, fullName: true } },
+  deliveredBy: { select: { id: true, employeeId: true, fullName: true } },
   dayStore: true,
   plant: true,
+  // The ERP Diagram doc's incoming-QC reject branch — see DebitNote's
+  // own schema.prisma comment. Embedded here so any read of a rejected
+  // Received row also shows whether Accounts has already raised one.
+  debitNotes: { orderBy: { createdAt: "desc" as const }, include: { createdBy: { select: { fullName: true, email: true } } } },
 } satisfies Prisma.InventoryTransactionInclude;
 
 // QA_QC needs to see the Received log (to know what's awaiting inward
@@ -279,7 +548,7 @@ inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC"), async (req, 
 
 inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
   try {
-    const { type, rows, isOpeningStock, dayStoreId } = req.body as ImportInventoryTransactionsInput;
+    const { type, rows, isOpeningStock, dayStoreId, isTransitTracked } = req.body as ImportInventoryTransactionsInput;
 
     if (type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
       return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
@@ -289,6 +558,9 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
     }
     if (dayStoreId && type !== "ISSUED_DAY_STORE") {
       return res.status(400).json({ error: "Day Store only applies to Issued to Day Store rows." });
+    }
+    if (isTransitTracked && type !== "ISSUED_DAY_STORE") {
+      return res.status(400).json({ error: "Transit tracking only applies to Issued to Day Store rows in a bulk import." });
     }
     if (dayStoreId) {
       const dayStore = await prisma.dayStore.findUnique({ where: { id: dayStoreId } });
@@ -376,6 +648,12 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
       isOpeningStock: !!isOpeningStock,
       acceptedById: isOpeningStock ? req.user!.id : undefined,
       acceptedAt: isOpeningStock ? new Date() : undefined,
+      // Transit gate — same batch-level flag as isOpeningStock, applied
+      // to every row in this sheet. See POST /transactions above for the
+      // per-row equivalent.
+      isTransitTracked: !!isTransitTracked,
+      deliveredAt: isTransitTracked ? null : new Date(),
+      deliveredById: isTransitTracked ? null : req.user!.id,
     }));
 
     // Same live-stock gate as the single-entry POST /transactions above
@@ -411,7 +689,7 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
       actorId: req.user!.id,
       action: isOpeningStock ? "inventory.opening_stock_imported" : "inventory.transactions_imported",
       entityType: "InventoryTransaction",
-      metadata: { type, rowCount: result.count, itemsCreated, dayStoreId, dayStoresCreated },
+      metadata: { type, rowCount: result.count, itemsCreated, dayStoreId, dayStoresCreated, isTransitTracked: !!isTransitTracked },
     });
 
     if (type === "RECEIVED" && !isOpeningStock && result.count > 0) {
@@ -460,6 +738,9 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     if (rest.isOpeningStock && rest.type !== "RECEIVED") {
       return res.status(400).json({ error: "Opening Stock only applies to Material Received rows." });
     }
+    if (rest.isTransitTracked && rest.type === "RECEIVED") {
+      return res.status(400).json({ error: "Transit tracking only applies to Issued to Store / Issued to Production rows — a Material Received entry already has its own inward QC gate." });
+    }
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
@@ -480,6 +761,13 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       receiptStatus: rest.type === "RECEIVED" ? (rest.isOpeningStock ? "ACCEPTED" : "PENDING_QC") : undefined,
       acceptedById: rest.isOpeningStock ? req.user!.id : undefined,
       acceptedAt: rest.isOpeningStock ? new Date() : undefined,
+      // Transit gate: tracked rows stay un-delivered until confirmed at
+      // the destination (see POST /transactions/:id/confirm-delivery);
+      // everything else is "delivered" the same instant it's created,
+      // exactly today's behavior (see schema.prisma comment).
+      isTransitTracked: !!rest.isTransitTracked,
+      deliveredAt: rest.isTransitTracked ? null : new Date(),
+      deliveredById: rest.isTransitTracked ? null : req.user!.id,
     };
 
     // Same live-stock gate as /requests/:id/issue — a direct Day Store
@@ -534,8 +822,196 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       await notifyIfNewlyAvailable({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
       await notifyIfPoNewlyReady({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
+    if (rest.isTransitTracked) {
+      await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
+    }
 
     res.status(201).json(txn);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- Transit — confirming a tracked ISSUED_DAY_STORE/ISSUED_PRODUCTION
+// entry has actually arrived. See schema.prisma's isTransitTracked
+// comment: until this fires, the item has already left the source (its
+// on-hand dropped the instant the entry was logged) but doesn't count at
+// the destination yet — GET /transit lists everything still waiting on
+// this. One tap, no form: the whole action is "I have it now, as me,
+// right now" — an optional note is the only extra input. ---
+
+inventoryRouter.post("/transactions/:id/confirm-delivery", requireRole("STORE", "PRODUCTION"), validateBody(confirmDeliverySchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transaction not found" });
+    if (!existing.isTransitTracked) return res.status(400).json({ error: "This entry isn't transit-tracked." });
+    if (existing.deliveredAt) return res.status(409).json({ error: "Already confirmed as delivered." });
+
+    // Same store-scoping as everywhere else that acts on a Day-Store-
+    // tagged entry — a Store user restricted to specific store(s) can
+    // only confirm arrivals at one they actually manage.
+    if (existing.dayStoreId) await assertDayStoreAccess(req.user!.id, req.user!.roles, existing.dayStoreId);
+
+    const { note } = req.body as ConfirmDeliveryInput;
+    const updated = await prisma.inventoryTransaction.update({
+      where: { id: existing.id },
+      data: {
+        deliveredAt: new Date(),
+        deliveredById: req.user!.id,
+        remark: note ? [existing.remark, note].filter(Boolean).join(" — ") : existing.remark,
+      },
+      include: txnInclude,
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory.transit_delivered",
+      entityType: "InventoryTransaction",
+      entityId: updated.id,
+      metadata: { itemId: existing.itemId, quantity: existing.quantity, unit: existing.unit, dispatchedAt: existing.createdAt },
+    });
+
+    // Closes the loop back to whoever dispatched it — symmetric to the
+    // "it's on its way" notification sent at dispatch time above.
+    await notifyUser(existing.createdById, {
+      title: `${updated.item.name} confirmed delivered`,
+      body: `${existing.quantity} ${existing.unit} arrived${updated.dayStore ? ` at ${updated.dayStore.name}` : updated.plant ? ` at ${updated.plant.name}` : ""}.`,
+      link: "/inventory",
+    }).catch(notifyFailed(req, "inventory.transit_delivered"));
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// One open shipment across every kind of internal movement, normalized
+// into one shape — Day Store/Plant transit-tracked entries (this
+// module), R&D transfers still awaiting confirmation (rnd-store.routes.ts
+// already owns that lifecycle — read here, not re-implemented), QC
+// Sample transfers still awaiting confirmation (qc-sample.routes.ts —
+// same reasoning, the Batch pipeline's Sample QC Approval gate already
+// owns that lifecycle), and Material Received rows still sitting in the
+// inward QC queue (the vendor -> Warehouse leg: it already has a "not
+// counted until accepted" gate, just not one that's ever been shown
+// alongside the others). Not every row is actionable from here —
+// QC/RND/QC-Sample rows link back to their own existing screens rather
+// than duplicating those actions.
+inventoryRouter.get("/transit", requireRole("STORE", "PPIC", "PRODUCTION", "QA_QC", "RND"), async (_req, res, next) => {
+  try {
+    const [dayStoreAndPlantRows, vendorRows, rndRows, qcSampleRows] = await Promise.all([
+      prisma.inventoryTransaction.findMany({
+        where: { deletedAt: null, isTransitTracked: true, deliveredAt: null, type: { in: ["ISSUED_DAY_STORE", "ISSUED_PRODUCTION"] } },
+        include: txnInclude,
+        orderBy: { createdAt: "asc" },
+      }),
+      // QC_APPROVED included on purpose, not just PENDING_QC/ON_HOLD — a
+      // QC-approved delivery still doesn't count toward stock until Store
+      // separately Accepts it (POST /transactions/:id/accept), so it's
+      // still genuinely "not yet arrived as real stock" the same way the
+      // other two statuses are.
+      prisma.inventoryTransaction.findMany({
+        where: { deletedAt: null, type: "RECEIVED", receiptStatus: { in: ["PENDING_QC", "ON_HOLD", "QC_APPROVED"] } },
+        include: txnInclude,
+        orderBy: { createdAt: "asc" },
+      }),
+      prisma.rndTransfer.findMany({
+        where: { deletedAt: null, confirmedAt: null },
+        include: { item: true, sentBy: { select: { id: true, employeeId: true, fullName: true } } },
+        orderBy: { sentAt: "asc" },
+      }),
+      prisma.qcSampleTransfer.findMany({
+        where: { deletedAt: null, confirmedAt: null },
+        include: {
+          item: true,
+          sentBy: { select: { id: true, employeeId: true, fullName: true } },
+          preProduction: { select: { id: true, purchaseOrderItem: { select: { productName: true } } } },
+        },
+        orderBy: { sentAt: "asc" },
+      }),
+    ]);
+
+    const transit = [
+      ...dayStoreAndPlantRows.map((t) => ({
+        kind: t.type === "ISSUED_DAY_STORE" ? ("day_store" as const) : ("plant" as const),
+        id: t.id,
+        item: { id: t.item.id, name: t.item.name, category: t.item.category, unit: t.item.unit },
+        quantity: t.quantity,
+        unit: t.unit,
+        from: "Warehouse",
+        to: t.dayStore?.name ?? t.plant?.name ?? "—",
+        dispatchedAt: t.createdAt,
+        dispatchedBy: t.createdBy,
+        confirmPath: `/inventory/transactions/${t.id}/confirm-delivery`,
+        linkPath: "/inventory",
+      })),
+      ...vendorRows.map((t) => ({
+        kind: "vendor_qc" as const,
+        id: t.id,
+        item: { id: t.item.id, name: t.item.name, category: t.item.category, unit: t.item.unit },
+        quantity: t.quantity,
+        unit: t.unit,
+        from: t.vendorName ?? "Vendor",
+        to: t.receiptStatus === "QC_APPROVED" ? "Warehouse (awaiting Accept)" : t.receiptStatus === "ON_HOLD" ? "Warehouse (QC on hold)" : "Warehouse (awaiting QC)",
+        dispatchedAt: t.createdAt,
+        dispatchedBy: t.createdBy,
+        confirmPath: null, // acted on via the existing inward QC screen, not this endpoint
+        linkPath: "/inventory",
+      })),
+      ...rndRows.map((t) => ({
+        kind: "rnd" as const,
+        id: t.id,
+        item: { id: t.item.id, name: t.item.name, category: t.item.category, unit: t.item.unit },
+        quantity: t.quantity,
+        unit: t.unit,
+        from: t.direction === "TO_RND" ? "Warehouse" : "R&D Store",
+        to: t.direction === "TO_RND" ? "R&D Store" : "Warehouse",
+        dispatchedAt: t.sentAt,
+        dispatchedBy: t.sentBy,
+        confirmPath: null, // acted on via the existing R&D Store screen, not this endpoint
+        linkPath: "/rnd-store",
+      })),
+      ...qcSampleRows.map((t) => ({
+        kind: "qc_sample" as const,
+        id: t.id,
+        item: { id: t.item.id, name: t.item.name, category: t.item.category, unit: t.item.unit },
+        quantity: t.quantity,
+        unit: t.unit,
+        from: t.direction === "TO_QC" ? "Plant" : "QC",
+        to: t.direction === "TO_QC" ? "QC" : "Plant",
+        dispatchedAt: t.sentAt,
+        dispatchedBy: t.sentBy,
+        confirmPath: null, // acted on via the pre-production run's own Sample QC Approval screen, not this endpoint
+        linkPath: `/pre-productions/${t.preProduction.id}`,
+        // Extra context the other kinds don't need — which run/product
+        // this sample belongs to, so the row is identifiable without
+        // following the link first.
+        productName: t.preProduction.purchaseOrderItem.productName,
+      })),
+    ].sort((a, b) => a.dispatchedAt.getTime() - b.dispatchedAt.getTime());
+
+    res.json(transit);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Editing an existing entry's paperwork — a GRN number that wasn't
+// available yet when this was first logged is the common case. Narrow on
+// purpose: only the fields updateInventoryTransactionSchema actually
+// allows (never quantity/item/date/type), and no QC-status restriction —
+// filling in a GRN No. after the entry's already been accepted is normal.
+inventoryRouter.patch("/transactions/:id", requireRole("STORE"), validateBody(updateInventoryTransactionSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transaction not found" });
+
+    const data = req.body as UpdateInventoryTransactionInput;
+    const updated = await prisma.inventoryTransaction.update({ where: { id: req.params.id }, data, include: txnInclude });
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_updated", entityType: "InventoryTransaction", entityId: updated.id, metadata: data });
+
+    res.json(updated);
   } catch (err) {
     next(err);
   }
@@ -611,35 +1087,38 @@ inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: Au
 
 // --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA/QC checks it
 // (this route), then Store accepts it (the next route) before it counts
-// toward stock. QC_REJECTED is terminal. ---
+// toward stock. HOLD parks it (QA/QC can come back and re-review a held
+// or still-pending row into either final state, or hold it again);
+// QC_REJECTED is the only terminal outcome. RND has the same access —
+// Production Process Flow.docx tags QC Sampling/Testing on incoming
+// material as R&D's own work, not generic QA, added alongside QA_QC
+// rather than replacing it. ---
 
-inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC"), validateBody(inwardQcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC", "RND"), validateBody(inwardQcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Transaction not found" });
     if (existing.type !== "RECEIVED") return res.status(400).json({ error: "Only a Material Received entry goes through inward QC" });
-    if (existing.receiptStatus !== "PENDING_QC") return res.status(409).json({ error: `This entry is already ${existing.receiptStatus?.toLowerCase().replace("_", " ")}` });
-
-    const { action, note, rejectedQty } = req.body as InwardQcReviewInput;
-    if (action === "APPROVE" && rejectedQty !== undefined && rejectedQty >= existing.quantity) {
-      return res.status(400).json({ error: "That's the whole delivery — use Reject instead of a partial rejection." });
+    if (!QC_REVIEWABLE_STATUSES.includes(existing.receiptStatus as (typeof QC_REVIEWABLE_STATUSES)[number])) {
+      return res.status(409).json({ error: `This entry is already ${existing.receiptStatus?.toLowerCase().replace("_", " ")}` });
     }
+
+    const { action, note } = req.body as InwardQcReviewInput;
 
     // Guarding receiptStatus in the WHERE clause (not just the read
     // above) makes this one atomic conditional update instead of a
-    // check-then-write — two QA_QC users reviewing the same PENDING_QC
-    // row at once can't both succeed and silently overwrite each
-    // other's call; the database's own row lock on the UPDATE settles
-    // who wins, and the loser's write matches zero rows instead of
-    // quietly clobbering the first review.
+    // check-then-write — two QA_QC users reviewing the same reviewable
+    // (pending or held) row at once can't both succeed and silently
+    // overwrite each other's call; the database's own row lock on the
+    // UPDATE settles who wins, and the loser's write matches zero rows
+    // instead of quietly clobbering the first review.
     const result = await prisma.inventoryTransaction.updateMany({
-      where: { id: req.params.id, receiptStatus: "PENDING_QC" },
+      where: { id: req.params.id, receiptStatus: { in: [...QC_REVIEWABLE_STATUSES] } },
       data: {
-        receiptStatus: action === "APPROVE" ? "QC_APPROVED" : "QC_REJECTED",
+        receiptStatus: nextQcStatus(action),
         qcCheckedById: req.user!.id,
         qcCheckedAt: new Date(),
         qcNote: note,
-        rejectedQty: action === "APPROVE" ? (rejectedQty ?? 0) : null,
       },
     });
     if (result.count === 0) {
@@ -649,25 +1128,71 @@ inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC"), validateBody
 
     await recordAudit({
       actorId: req.user!.id,
-      action: action === "APPROVE" ? "inventory.receipt_qc_approved" : "inventory.receipt_qc_rejected",
+      action: action === "APPROVE" ? "inventory.receipt_qc_approved" : action === "REJECT" ? "inventory.receipt_qc_rejected" : "inventory.receipt_qc_held",
       entityType: "InventoryTransaction",
       entityId: updated.id,
-      metadata: { note, rejectedQty: action === "APPROVE" ? (rejectedQty ?? 0) : existing.quantity },
+      metadata: { note },
     });
 
     await notifyRoles(
       ["STORE"],
       action === "APPROVE"
-        ? {
-            title: `${updated.item.name} QC-approved`,
-            body: rejectedQty ? `${existing.quantity - rejectedQty} ${existing.unit} accepted, ${rejectedQty} ${existing.unit} rejected — ready to accept into stock.` : "Ready to accept into stock.",
-            link: "/inventory",
-          }
-        : { title: `${updated.item.name} QC-rejected`, body: note, link: "/inventory" },
+        ? { title: `${updated.item.name} QC-approved`, body: "Ready to accept into stock.", link: "/inventory" }
+        : action === "REJECT"
+          ? { title: `${updated.item.name} QC-rejected`, body: note, link: "/inventory" }
+          : { title: `${updated.item.name} on hold`, body: note, link: "/inventory" },
       req.user!.id,
     ).catch(notifyFailed(req, "inventory.receipt_qc_reviewed"));
 
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Debit Note Issue — the ERP Diagram doc's reject branch off incoming QC
+// ("Approved/Rejected (QC)" -> Reject -> "Debit Note Issue (Accounts)").
+// Accounts-only, raised against a RECEIVED row that's actually come back
+// QC_REJECTED (a full reject) or carries a positive rejectedQty (a
+// partial reject on an otherwise-approved delivery) — the vendor-facing
+// record of "we're debiting you for the rejected portion." Not a gate on
+// anything else in the pipeline; a batch can already move on with
+// whatever wasn't rejected, this is purely Accounts' own paper trail.
+inventoryRouter.post("/transactions/:id/debit-notes", requireRole("ACCOUNTS"), validateBody(createDebitNoteSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Transaction not found" });
+    if (existing.type !== "RECEIVED") return res.status(400).json({ error: "A Debit Note only applies to a Material Received entry" });
+    if (existing.receiptStatus !== "QC_REJECTED" && !(existing.rejectedQty && existing.rejectedQty > 0)) {
+      return res.status(400).json({ error: "This entry has no QC rejection (full or partial) to raise a Debit Note against." });
+    }
+
+    const data = req.body as CreateDebitNoteInput;
+    const debitNote = await prisma.debitNote.create({
+      data: {
+        transactionId: existing.id,
+        itemId: existing.itemId,
+        vendorName: existing.vendorName,
+        debitNoteNo: data.debitNoteNo,
+        date: data.date ?? new Date(),
+        quantity: data.quantity,
+        unit: data.unit,
+        amount: data.amount,
+        reason: data.reason,
+        createdById: req.user!.id,
+      },
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "inventory.debit_note_raised",
+      entityType: "InventoryTransaction",
+      entityId: existing.id,
+      metadata: { debitNoteId: debitNote.id, quantity: data.quantity, amount: data.amount },
+    });
+
+    const updated = await prisma.inventoryTransaction.findUniqueOrThrow({ where: { id: existing.id }, include: txnInclude });
+    res.status(201).json(updated);
   } catch (err) {
     next(err);
   }
@@ -737,6 +1262,55 @@ type RequestRow = Prisma.InventoryRequestGetPayload<{ include: typeof requestInc
 function withIssuedQty<T extends RequestRow>(request: T) {
   const issuedQty = request.fulfillments.reduce((sum, f) => sum + f.quantity, 0);
   return { ...request, issuedQty, remainingQty: Math.max(0, request.requestedQty - issuedQty) };
+}
+
+export interface MaterialRequestSourceRow {
+  category: "RM" | "PM";
+  itemName: string;
+  requiredQty: number;
+}
+
+// Called from BOM/RM Costing's "Send to Pre-Inventory" click, for
+// PO-linked plans only — folds Material Request creation into that same
+// action instead of making PPIC re-pick and re-type the exact same items
+// a second time in this module's own form. One InventoryRequest per plan
+// item, purpose ISSUED_PRODUCTION since it's this PO's own production run
+// that needs it. Store still reviews/approves/issues each one — this only
+// removes the redundant data entry, not the approval gate. Safe against
+// the repeat-click duplication PreInventoryRequirement had, because the
+// caller only reaches this once per plan result (same sentToPreInventoryAt
+// guard that protects the Pre-Inventory send).
+export async function createMaterialRequestsFromPlan(rows: MaterialRequestSourceRow[], actorId: string, note: string): Promise<{ rowsCreated: number }> {
+  const uniqueItems = new Map<string, { category: "RM" | "PM"; name: string }>();
+  for (const row of rows) uniqueItems.set(`${row.category}::${row.itemName}`, { category: row.category, name: row.itemName });
+
+  const itemIds = new Map<string, string>();
+  for (const [key, { category, name }] of uniqueItems) {
+    const existing = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name } } });
+    if (existing) {
+      itemIds.set(key, existing.id);
+    } else {
+      const created = await prisma.inventoryItem.create({ data: { category, name } });
+      itemIds.set(key, created.id);
+    }
+  }
+
+  const result = await prisma.inventoryRequest.createMany({
+    data: rows.map((row) => ({
+      itemId: itemIds.get(`${row.category}::${row.itemName}`)!,
+      category: row.category,
+      requestedQty: row.requiredQty,
+      purpose: "ISSUED_PRODUCTION" as const,
+      note,
+      requestedById: actorId,
+    })),
+  });
+
+  if (result.count > 0) {
+    await notifyRoles(["STORE"], { title: `${result.count} material request(s) raised`, body: note, link: "/inventory" }, actorId).catch(() => {});
+  }
+
+  return { rowsCreated: result.count };
 }
 
 inventoryRouter.get("/requests", requireRole("STORE", "PPIC"), async (req: AuthedRequest, res, next) => {
@@ -976,6 +1550,11 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
           // carried straight off the request PPIC raised it against.
           dayStoreId: data.dayStoreId,
           plantId: existing.plantId,
+          // Transit gate — same as a direct POST /transactions entry;
+          // see createInventoryTransactionSchema's isTransitTracked.
+          isTransitTracked: !!data.isTransitTracked,
+          deliveredAt: data.isTransitTracked ? null : new Date(),
+          deliveredById: data.isTransitTracked ? null : req.user!.id,
         },
         include: txnInclude,
       });
@@ -999,6 +1578,10 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         ? { title: `Issued: ${txn.item.name}`, body: `${data.quantity} ${data.unit} — request complete.`, link: "/inventory" }
         : { title: `Partially issued: ${txn.item.name}`, body: `${data.quantity} ${data.unit} now, ${remainingAfter} ${data.unit} still remaining.`, link: "/inventory" },
     ).catch(notifyFailed(req, "inventory_request.issued"));
+
+    if (data.isTransitTracked) {
+      await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
+    }
 
     res.status(201).json(txn);
   } catch (err) {
@@ -1032,7 +1615,7 @@ inventoryRouter.delete("/requests/:id", requireRole("STORE", "PPIC"), async (req
 // "Bill transfer to Dispatch from Accounts"), told apart by `type`, on one
 // endpoint. Customer links to the Order Tracking customer master. ---
 
-const dispatchTransferInclude = {
+export const dispatchTransferInclude = {
   customer: { select: { id: true, companyName: true } },
   createdBy: { select: { id: true, employeeId: true, fullName: true } },
   qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
@@ -1201,15 +1784,17 @@ inventoryRouter.post("/dispatch-transfers/import", requireRole("STORE"), validat
 });
 
 // --- Outward QC gate — FG rows only; BILL rows have no qcStatus and
-// this route rejects them outright. QC_REJECTED is terminal, same as
-// the inward gate. ---
+// this route rejects them outright. HOLD parks it (re-reviewable later,
+// same as the inward gate); QC_REJECTED is the only terminal outcome. ---
 
 inventoryRouter.patch("/dispatch-transfers/:id/qc", requireRole("QA_QC"), validateBody(qcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Dispatch transfer not found" });
     if (existing.type !== "FG") return res.status(400).json({ error: "Only an FG transfer goes through outward QC" });
-    if (existing.qcStatus !== "PENDING_QC") return res.status(409).json({ error: `This transfer is already ${existing.qcStatus?.toLowerCase().replace("_", " ")}` });
+    if (!QC_REVIEWABLE_STATUSES.includes(existing.qcStatus as (typeof QC_REVIEWABLE_STATUSES)[number])) {
+      return res.status(409).json({ error: `This transfer is already ${existing.qcStatus?.toLowerCase().replace("_", " ")}` });
+    }
 
     const { action, note } = req.body as QcReviewInput;
 
@@ -1217,8 +1802,8 @@ inventoryRouter.patch("/dispatch-transfers/:id/qc", requireRole("QA_QC"), valida
     // two QA_QC users reviewing the same transfer at once can't both
     // land a write.
     const result = await prisma.dispatchTransfer.updateMany({
-      where: { id: req.params.id, qcStatus: "PENDING_QC" },
-      data: { qcStatus: action === "APPROVE" ? "QC_APPROVED" : "QC_REJECTED", qcCheckedById: req.user!.id, qcCheckedAt: new Date(), qcNote: note },
+      where: { id: req.params.id, qcStatus: { in: [...QC_REVIEWABLE_STATUSES] } },
+      data: { qcStatus: nextQcStatus(action), qcCheckedById: req.user!.id, qcCheckedAt: new Date(), qcNote: note },
     });
     if (result.count === 0) {
       return res.status(409).json({ error: "This transfer was just reviewed by someone else." });
@@ -1227,7 +1812,7 @@ inventoryRouter.patch("/dispatch-transfers/:id/qc", requireRole("QA_QC"), valida
 
     await recordAudit({
       actorId: req.user!.id,
-      action: action === "APPROVE" ? "inventory.dispatch_qc_approved" : "inventory.dispatch_qc_rejected",
+      action: action === "APPROVE" ? "inventory.dispatch_qc_approved" : action === "REJECT" ? "inventory.dispatch_qc_rejected" : "inventory.dispatch_qc_held",
       entityType: "DispatchTransfer",
       entityId: updated.id,
       metadata: { note },
@@ -1237,7 +1822,9 @@ inventoryRouter.patch("/dispatch-transfers/:id/qc", requireRole("QA_QC"), valida
       ["STORE"],
       action === "APPROVE"
         ? { title: `${updated.productName} outward QC-approved`, body: "Ready to dispatch.", link: "/inventory" }
-        : { title: `${updated.productName} outward QC-rejected`, body: note, link: "/inventory" },
+        : action === "REJECT"
+          ? { title: `${updated.productName} outward QC-rejected`, body: note, link: "/inventory" }
+          : { title: `${updated.productName} on hold`, body: note, link: "/inventory" },
       req.user!.id,
     ).catch(notifyFailed(req, "inventory.dispatch_qc_reviewed"));
 
@@ -1299,7 +1886,18 @@ inventoryRouter.patch("/dispatch-transfers/:id/invoice", requireRole("ACCOUNTS")
   try {
     const existing = await prisma.dispatchTransfer.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Dispatch transfer not found" });
-    if (!existing.dispatchedAt) return res.status(409).json({ error: "Dispatch hasn't confirmed this shipment has gone out yet" });
+    // FG is real goods leaving the building — it has to have actually gone
+    // out (Dispatch's own confirm step, gated on outward QC) before it's
+    // honest to invoice it. BILL is a billing document, not goods: same
+    // reasoning schema.prisma already applies to skip it past QC entirely
+    // (see DispatchQcStatus) applies here too — there's nothing for
+    // Dispatch to confirm, so requiring dispatchedAt on a BILL row would
+    // just be requiring a fact that can never become true (PATCH
+    // /:id/dispatch itself refuses any non-FG transfer), permanently
+    // blocking every BILL row from ever being invoiced.
+    if (existing.type === "FG" && !existing.dispatchedAt) {
+      return res.status(409).json({ error: "Dispatch hasn't confirmed this shipment has gone out yet" });
+    }
     if (existing.invoicedAt) return res.status(409).json({ error: "This transfer is already invoiced" });
 
     const { invoiceNumber } = req.body as InvoiceInput;
@@ -1308,7 +1906,7 @@ inventoryRouter.patch("/dispatch-transfers/:id/invoice", requireRole("ACCOUNTS")
     // users invoicing the same transfer at once can't both land a write
     // and silently overwrite each other's invoice number.
     const result = await prisma.dispatchTransfer.updateMany({
-      where: { id: req.params.id, dispatchedAt: { not: null }, invoicedAt: null },
+      where: { id: req.params.id, invoicedAt: null, ...(existing.type === "FG" ? { dispatchedAt: { not: null } } : {}) },
       data: { invoiceNumber, invoicedById: req.user!.id, invoicedAt: new Date() },
     });
     if (result.count === 0) {

@@ -10,7 +10,7 @@ import type { RmMasterResult } from "./rm-costing-engine";
  */
 export async function buildRmMasterWorkbook(result: RmMasterResult): Promise<ExcelJS.Buffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "FLS ERP";
+  workbook.creator = "FLS Mitr";
   workbook.created = new Date();
 
   const colWidths = [10, 35, 15, 10, 8, 12, 10, 15, 8, 15, 12];

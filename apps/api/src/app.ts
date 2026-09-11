@@ -11,7 +11,9 @@ import { authRouter } from "./modules/auth/auth.routes";
 import { usersRouter } from "./modules/users/users.routes";
 import { customersRouter } from "./modules/customers/customers.routes";
 import { purchaseOrdersRouter } from "./modules/purchase-orders/purchase-orders.routes";
-import { batchesRouter } from "./modules/batches/batches.routes";
+import { preProductionRouter } from "./modules/batches/pre-production.routes";
+import { productionBatchesRouter } from "./modules/batches/production-batches.routes";
+import { combinedLotRouter } from "./modules/batches/combined-lot.routes";
 import { catalogRouter } from "./modules/packaging-bom/catalog.routes";
 import { bomPlanRouter } from "./modules/packaging-bom/bom-plan.routes";
 import { recipeCatalogRouter } from "./modules/rm-costing/recipe-catalog.routes";
@@ -19,9 +21,16 @@ import { rmPlanRouter } from "./modules/rm-costing/rm-plan.routes";
 import { inventoryRouter } from "./modules/inventory/inventory.routes";
 import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
 import { dayStoresRouter, plantsRouter } from "./modules/inventory/locations.routes";
+import { warehousesRouter } from "./modules/inventory/warehouses.routes";
 import { notificationsRouter } from "./modules/notifications/notifications.routes";
 import { poReadinessRouter } from "./modules/po-readiness/po-readiness.routes";
 import { recycleBinRouter } from "./modules/recycle-bin/recycle-bin.routes";
+import { systemRouter } from "./modules/system/system.routes";
+import { qcRouter } from "./modules/qc/qc.routes";
+import { recipeRequestRouter } from "./modules/recipe-requests/recipe-request.routes";
+import { rndStoreRouter } from "./modules/rnd-store/rnd-store.routes";
+import { qcSampleRouter } from "./modules/batches/qc-sample.routes";
+import { recycleStoreRouter } from "./modules/recycle-store/recycle-store.routes";
 
 export function createApp() {
   const app = express();
@@ -41,7 +50,11 @@ export function createApp() {
   // vestigial like it was when one Express app served both.
   app.use(helmet());
   app.use(cors({ origin: env.FRONTEND_URL ? env.FRONTEND_URL.split(",").map((s) => s.trim()) : true }));
-  app.use(express.json());
+  // Default 100kb is fine for almost everything, but a full-catalog Excel
+  // import (Packaging Material: 78 brands/customers, 800+ SKU rows) is a
+  // single JSON POST well past that — same reasoning as any other bulk
+  // import endpoint in this app.
+  app.use(express.json({ limit: "10mb" }));
 
   app.use(
     pinoHttp({
@@ -62,7 +75,14 @@ export function createApp() {
   app.use("/api/users", usersRouter);
   app.use("/api/customers", customersRouter);
   app.use("/api/purchase-orders", purchaseOrdersRouter);
-  app.use("/api/batches", batchesRouter);
+  // Three-tier pipeline — see schema.prisma's own comment blocks above
+  // PreProduction/ProductionBatch/CombinedLot. productionBatchesRouter
+  // carries both a "/pre-productions/:id/production-batches" collection
+  // path and its own "/production-batches/:id" resource path, so it's
+  // mounted at the bare "/api" prefix rather than nested under one tier.
+  app.use("/api/pre-productions", preProductionRouter);
+  app.use("/api", productionBatchesRouter);
+  app.use("/api/combined-lots", combinedLotRouter);
   app.use("/api/catalog", catalogRouter);
   app.use("/api/bom", bomPlanRouter);
   app.use("/api/rm-costing", recipeCatalogRouter);
@@ -71,9 +91,16 @@ export function createApp() {
   app.use("/api/inventory/requirements", preInventoryRouter);
   app.use("/api/inventory/day-stores", dayStoresRouter);
   app.use("/api/inventory/plants", plantsRouter);
+  app.use("/api/inventory/warehouses", warehousesRouter);
   app.use("/api/notifications", notificationsRouter);
   app.use("/api/po-readiness", poReadinessRouter);
   app.use("/api/recycle-bin", recycleBinRouter);
+  app.use("/api/system", systemRouter);
+  app.use("/api/qc", qcRouter);
+  app.use("/api/recipe-requests", recipeRequestRouter);
+  app.use("/api/rnd-store", rndStoreRouter);
+  app.use("/api/qc-sample", qcSampleRouter);
+  app.use("/api/recycle-store", recycleStoreRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

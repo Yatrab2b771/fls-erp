@@ -114,34 +114,48 @@ describe("Notification wiring — Purchase Orders", () => {
   });
 });
 
-describe("Notification wiring — Batches", () => {
+describe("Notification wiring — Pre-Production / Combined Lot", () => {
   it("forwarding notifies the next stage's role, excluding the actor, and DISPATCH_PLAN's self-forward doesn't re-notify", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const itemId = await createApprovedPoItem(bdToken);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
-    const batchId = batch.body.id;
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
+    const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
+    const runId = run.body.id;
 
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: dispatchToken } = await createUser(["DISPATCH"]);
 
-    // PO_RELEASE -> MATERIAL_RECEIVED: Store should be notified, Purchase (the actor) should not.
-    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(purchaseToken)).send({ action: "FORWARD", rmStatus: "Available", pmStatus: "Available" });
-    const storeInbox = await notifsFor(storeToken);
-    expect(storeInbox.notifications.some((n) => n.title.includes("Material Received"))).toBe(true);
+    // MATERIAL_RECEIVED -> INDENT_ISSUE: PPIC should be notified, Store (the actor) should not.
+    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD", grnNo: "GRN-9001" });
+    const ppicInbox = await notifsFor(ppicToken);
+    expect(ppicInbox.notifications.some((n) => n.title.includes("Indent Issue"))).toBe(true);
+    // Purchase is unrelated to this pipeline any more (PO_RELEASE is
+    // retired) — never notified at all.
     const purchaseInbox = await notifsFor(purchaseToken);
     expect(purchaseInbox.unreadCount).toBe(0);
 
-    // Admin jump straight to DISPATCH_PLAN — Dispatch should be notified.
+    // Admin jump the run to its own terminal stage, produce it fully, then
+    // jump the resulting CombinedLot straight to DISPATCH_PLAN — Dispatch
+    // should be notified.
     const { token: adminToken } = await createUser(["ADMIN"]);
-    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
+    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
+    // JUMP only moves currentStageId — Production can't start until
+    // sampleQcStatus is literally "Approved" too (see
+    // production-batches.routes.ts's own gate).
+    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(adminToken)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
+    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ plannedQty: 100 })).body;
+    await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(productionToken)).send({ outputQty: 100 });
+    const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
+    const lotId = completed.body.combinedLot.id as string;
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
     const dispatchInboxBefore = await notifsFor(dispatchToken);
     expect(dispatchInboxBefore.unreadCount).toBeGreaterThan(0);
     await request(app).post("/api/notifications/read-all").set(authHeader(dispatchToken));
 
     // DISPATCH_PLAN forwards to itself (terminal) — no repeat notification on save.
-    await request(app).patch(`/api/batches/${batchId}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD" });
     const dispatchInboxAfter = await notifsFor(dispatchToken);
     expect(dispatchInboxAfter.unreadCount).toBe(0);
   });

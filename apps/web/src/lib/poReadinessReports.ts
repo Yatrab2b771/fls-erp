@@ -29,7 +29,6 @@ export function exportCustomerShortfallReport(rows: PoReadinessRow[], customerId
       .map((item) => ({
         Customer: r.purchaseOrder.customer.companyName,
         "PO Number": r.purchaseOrder.poNumber ?? r.purchaseOrder.id.slice(0, 8),
-        Brand: r.purchaseOrder.brandName ?? "",
         Item: item.itemName,
         Category: CATEGORY_LABEL[item.category] ?? item.category,
         "Required Qty": item.requiredQty,

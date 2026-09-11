@@ -11,9 +11,15 @@ import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
+import { ItemPicker } from "../components/ItemPicker";
 import { useToast } from "../components/Toast";
 
 const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
+const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
+const CATEGORY_ITEMS = [
+  { id: "RM", name: "Raw Material" },
+  { id: "PM", name: "Packaging Material" },
+];
 
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
@@ -37,7 +43,7 @@ export function PoReadinessPage() {
 
   const q = search.trim().toLowerCase();
   const filtered = rows?.filter(
-    (r) => !q || (r.purchaseOrder.poNumber ?? "").toLowerCase().includes(q) || r.purchaseOrder.customer.companyName.toLowerCase().includes(q) || (r.purchaseOrder.brandName ?? "").toLowerCase().includes(q),
+    (r) => !q || (r.purchaseOrder.poNumber ?? "").toLowerCase().includes(q) || r.purchaseOrder.customer.companyName.toLowerCase().includes(q),
   );
 
   const readyCount = allRows?.filter((r) => r.isReady).length ?? 0;
@@ -277,32 +283,20 @@ function ManualAddForm({ onDone }: { onDone: () => void }) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="sm:col-span-2 lg:col-span-2">
           <label className="label">Purchase Order</label>
-          <select className="field" value={purchaseOrderId} onChange={(e) => setPurchaseOrderId(e.target.value)}>
-            <option value="">— Select a PO —</option>
-            {(purchaseOrders ?? []).map((po) => (
-              <option key={po.id} value={po.id}>
-                {po.poNumber ?? po.id.slice(0, 8)} — {po.customer.companyName}
-              </option>
-            ))}
-          </select>
+          <ItemPicker
+            items={(purchaseOrders ?? []).map((po) => ({ id: po.id, name: `${po.poNumber ?? po.id.slice(0, 8)} — ${po.customer.companyName}` }))}
+            value={purchaseOrderId}
+            onChange={setPurchaseOrderId}
+            placeholder="— Select a PO —"
+          />
         </div>
         <div>
           <label className="label">Category</label>
-          <select className="field" value={category} onChange={(e) => switchCategory(e.target.value as InventoryCategory)}>
-            <option value="RM">Raw Material</option>
-            <option value="PM">Packaging Material</option>
-          </select>
+          <ItemPicker items={CATEGORY_ITEMS} value={category} onChange={(v) => switchCategory(v as InventoryCategory)} clearable={false} />
         </div>
         <div>
           <label className="label">Item</label>
-          <select className="field" value={itemId} onChange={(e) => setItemId(e.target.value)}>
-            <option value="">— Select an item —</option>
-            {(items ?? []).map((i) => (
-              <option key={i.id} value={i.id}>
-                {i.name}
-              </option>
-            ))}
-          </select>
+          <ItemPicker items={items ?? []} value={itemId} onChange={setItemId} />
         </div>
         <div>
           <label className="label">Required Qty</label>
@@ -310,13 +304,7 @@ function ManualAddForm({ onDone }: { onDone: () => void }) {
         </div>
         <div>
           <label className="label">Unit</label>
-          <select className="field" value={unit} onChange={(e) => setUnit(e.target.value)}>
-            {UNIT_OPTIONS.map((u) => (
-              <option key={u} value={u}>
-                {u}
-              </option>
-            ))}
-          </select>
+          <ItemPicker items={UNIT_ITEMS} value={unit} onChange={setUnit} clearable={false} />
         </div>
       </div>
       {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
@@ -358,10 +346,7 @@ function PoReadinessCard({
           </span>
           <div className="min-w-0">
             <p className="truncate font-bold text-slate-800">{purchaseOrder.poNumber ?? purchaseOrder.id.slice(0, 8)}</p>
-            <p className="truncate text-xs text-slate-500">
-              {purchaseOrder.customer.companyName}
-              {purchaseOrder.brandName ? ` · ${purchaseOrder.brandName}` : ""}
-            </p>
+            <p className="truncate text-xs text-slate-500">{purchaseOrder.customer.companyName}</p>
           </div>
         </button>
         <div className="flex shrink-0 items-center gap-2">

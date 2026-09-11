@@ -1,44 +1,47 @@
 import PDFDocument from "pdfkit";
 import { drawTable } from "../../common/lib/pdf-table";
 import { computeWastage } from "./batch.engine";
-import { BATCH_STAGE_LABEL, type BatchStageId } from "./batch-stage";
-import type { BatchWithRelations } from "./batches.routes";
+import { PRE_PRODUCTION_STAGE_LABEL, type PreProductionStageId } from "./pre-production-stage";
+import { COMBINED_LOT_STAGE_LABEL, type CombinedLotStageId } from "./combined-lot-stage";
+import type { PreProductionWithRelations } from "./batch-include";
+import type { CombinedLotWithRelations } from "./batch-include";
 
 /**
- * The admin's "full report" export — every field the batch collected
- * across its whole lifecycle, stage by stage, plus the complete
- * forward/reject/jump history. Available once a batch reaches Dispatch
- * Plan (see the route gate), so it reads as the batch's closing record
- * rather than a snapshot of a still-moving pipeline.
+ * The admin's "full report" export — every field the pipeline collected
+ * across a PO item's whole run, tier by tier, plus the complete
+ * forward/reject/jump history of both the PreProduction run and its
+ * CombinedLot. Available once the CombinedLot reaches Dispatch Plan (see
+ * the route gate), so it reads as the run's closing record rather than a
+ * snapshot of a still-moving pipeline. Individual ProductionBatch runs
+ * (Tier 2) get their own short table since there can be several.
  */
 
-type FieldRow = { key: keyof BatchWithRelations; label: string };
+type PreProductionFieldRow = { key: keyof PreProductionWithRelations; label: string };
+type CombinedLotFieldRow = { key: keyof CombinedLotWithRelations; label: string };
 
-// One group per stage that actually collects data — mirrors
-// BATCH_STAGE_FIELD_SCHEMA in batch.schemas.ts, but as display labels
-// rather than validators.
-const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
+const PRE_PRODUCTION_SECTIONS: { stage: PreProductionStageId; fields: PreProductionFieldRow[] }[] = [
   {
-    stage: "PO_RELEASE",
+    stage: "MATERIAL_RECEIVED",
     fields: [
-      { key: "rmPoDate", label: "RM PO Date" },
-      { key: "rmExpectedDate", label: "RM Expected Date" },
-      { key: "rmStatus", label: "RM Status" },
-      { key: "rmRemarks", label: "RM Remarks" },
-      { key: "pmPoDate", label: "PM PO Date" },
-      { key: "pmExpectedDate", label: "PM Expected Date" },
-      { key: "pmStatus", label: "PM Status" },
-      { key: "pmRemarks", label: "PM Remarks" },
+      { key: "grnNo", label: "GRN No." },
+      { key: "grnDate", label: "GRN Date" },
+      { key: "materialReceivedRemarks", label: "Remarks" },
     ],
   },
   {
     stage: "INDENT_ISSUE",
     fields: [
-      { key: "batchNo", label: "Batch No." },
       { key: "prodIndentSlipSign", label: "Production Indent Slip Sign" },
       { key: "productionPlanDate", label: "Production Plan Date" },
       { key: "unit", label: "Manufacturing Unit" },
       { key: "dispatchPlanDate", label: "Dispatch Plan Date" },
+    ],
+  },
+  {
+    stage: "LINE_CLEARANCE",
+    fields: [
+      { key: "lineClearanceStatus", label: "Line Clearance Status" },
+      { key: "lineClearanceRemarks", label: "Remarks" },
     ],
   },
   {
@@ -51,14 +54,24 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
     ],
   },
   {
-    stage: "PRODUCTION_EXECUTION",
+    stage: "SAMPLE_QC_APPROVAL",
     fields: [
-      { key: "manufacturingStartDate", label: "Manufacturing Start" },
-      { key: "manufacturingStatus", label: "Manufacturing Status" },
-      { key: "manufacturingEndDate", label: "Manufacturing End" },
-      { key: "manufacturingRemarks", label: "Manufacturing Remarks" },
-      { key: "inputQty", label: "Input Qty" },
-      { key: "outputQty", label: "Output Qty" },
+      { key: "sampleQcStatus", label: "Sample QC Status" },
+      { key: "sampleQcRemarks", label: "Remarks" },
+    ],
+  },
+];
+
+const COMBINED_LOT_SECTIONS: { stage: CombinedLotStageId; fields: CombinedLotFieldRow[] }[] = [
+  {
+    stage: "IPQC",
+    fields: [
+      { key: "ipqcStatus", label: "IPQC Status" },
+      { key: "ipqcRemarks", label: "Remarks" },
+      { key: "bulkTheoreticalWeight", label: "Bulk Theoretical Weight" },
+      { key: "bulkActualWeight", label: "Bulk Actual Weight" },
+      { key: "bulkQcSampleWeight", label: "Bulk QC Sample Weight" },
+      { key: "bulkTransferToPackingQty", label: "Bulk Transfer to Packing Qty" },
     ],
   },
   {
@@ -67,7 +80,16 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
       { key: "mfgQaStatus", label: "QA Status" },
       { key: "mfgQcStatus", label: "QC Status" },
       { key: "mfgRemarks", label: "Remarks" },
+      { key: "mfgApprovedQty", label: "Approved Qty" },
       { key: "mfgRejectedQty", label: "Rejected Qty (quality)" },
+      { key: "mfgWastageQty", label: "Wastage Qty" },
+    ],
+  },
+  {
+    stage: "BULK_QC",
+    fields: [
+      { key: "bulkQcStatus", label: "Bulk QC Status" },
+      { key: "bulkQcRemarks", label: "Remarks" },
     ],
   },
   {
@@ -88,6 +110,15 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
     ],
   },
   {
+    stage: "BILLING_EWAY_BILL",
+    fields: [
+      { key: "invoiceNo", label: "Invoice No." },
+      { key: "invoiceDate", label: "Invoice Date" },
+      { key: "ewayBillNo", label: "E-Way Bill No." },
+      { key: "ewayBillDate", label: "E-Way Bill Date" },
+    ],
+  },
+  {
     stage: "DISPATCH_PLAN",
     fields: [
       { key: "dispatchDate", label: "Dispatch Date" },
@@ -96,7 +127,6 @@ const REPORT_SECTIONS: { stage: BatchStageId; fields: FieldRow[] }[] = [
       { key: "totalShipperWeight", label: "Total Shipper Weight" },
       { key: "transportType", label: "Transport Type" },
       { key: "remainingQty", label: "Remaining Qty" },
-      { key: "customerConfirmation", label: "Customer Confirmation" },
       { key: "anyRemarks", label: "Any Remarks" },
     ],
   },
@@ -108,66 +138,88 @@ function formatValue(v: unknown): string {
   return String(v);
 }
 
-export function buildBatchReportPdf(batch: BatchWithRelations): PDFKit.PDFDocument {
+export function buildBatchReportPdf(preProduction: PreProductionWithRelations, lot: CombinedLotWithRelations): PDFKit.PDFDocument {
   const doc = new PDFDocument({ size: "A4", margin: 40 });
-  const po = batch.purchaseOrderItem.purchaseOrder;
+  const po = preProduction.purchaseOrderItem.purchaseOrder;
 
-  doc.font("Helvetica-Bold").fontSize(18).text("FLS ERP — Batch Report");
+  doc.font("Helvetica-Bold").fontSize(18).text("FLS Mitr — Production Report");
   doc
     .font("Helvetica")
     .fontSize(11)
     .fillColor("#475569")
-    .text(`${batch.batchNo ?? batch.id.slice(0, 8)} · ${batch.purchaseOrderItem.productName} · ${po.customer.companyName}${po.poNumber ? ` · PO ${po.poNumber}` : ""}`);
+    .text(`${preProduction.purchaseOrderItem.productName} · ${po.customer.companyName}${po.poNumber ? ` · PO ${po.poNumber}` : ""} · Planned ${preProduction.plannedQty} ${preProduction.purchaseOrderItem.unit}`);
   doc.fillColor("#000000");
   doc.moveDown(1);
 
-  for (const section of REPORT_SECTIONS) {
-    // Every field is shown, filled or not ("—") — this is the batch's
-    // closing record, not a progress view, so a blank field is itself
-    // information (nobody recorded it).
-    const rows = section.fields.map((f) => [f.label, formatValue((batch as unknown as Record<string, unknown>)[f.key])]);
-
-    // Wastage is derived (inputQty - outputQty), never a raw field —
-    // append it as its own row right after the two numbers it comes from.
-    if (section.stage === "PRODUCTION_EXECUTION") {
-      const { wastageQty, wastagePct } = computeWastage(batch);
-      rows.push(["Wastage", wastageQty === null ? "—" : `${wastageQty} (${wastagePct}%)`]);
-    }
-
+  for (const section of PRE_PRODUCTION_SECTIONS) {
+    const rows = section.fields.map((f) => [f.label, formatValue((preProduction as unknown as Record<string, unknown>)[f.key])]);
     if (doc.y + 40 > doc.page.height - doc.page.margins.bottom) doc.addPage();
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(11)
-      .fillColor("#334155")
-      .text(BATCH_STAGE_LABEL[section.stage], doc.x, doc.y + 8);
+    doc.font("Helvetica-Bold").fontSize(11).fillColor("#334155").text(PRE_PRODUCTION_STAGE_LABEL[section.stage], doc.x, doc.y + 8);
     doc.fillColor("#000000");
+    const y = drawTable(doc, { x: doc.page.margins.left, startY: doc.y + 4, columns: [{ header: "Field", width: 220 }, { header: "Value", width: 300 }], rows });
+    doc.y = y + 6;
+  }
 
-    const y = drawTable(doc, {
+  // Tier 2 — every small manufacturing run that pooled into this lot.
+  if (doc.y + 40 > doc.page.height - doc.page.margins.bottom) doc.addPage();
+  doc.font("Helvetica-Bold").fontSize(11).fillColor("#334155").text("Production Execution Runs", doc.x, doc.y + 10);
+  doc.fillColor("#000000");
+  const batchRows = preProduction.productionBatches.map((b) => {
+    const { wastageQty } = computeWastage(b);
+    return [b.batchNo ?? b.id.slice(0, 8), formatValue(b.manufacturingStartDate), formatValue(b.manufacturingEndDate), formatValue(b.inputQty), formatValue(b.outputQty), formatValue(wastageQty)];
+  });
+  if (batchRows.length === 0) {
+    doc.font("Helvetica-Oblique").fontSize(9).fillColor("#94a3b8").text("No production runs recorded.", doc.x, doc.y + 2);
+    doc.fillColor("#000000");
+  } else {
+    drawTable(doc, {
       x: doc.page.margins.left,
       startY: doc.y + 4,
       columns: [
-        { header: "Field", width: 220 },
-        { header: "Value", width: 300 },
+        { header: "Batch No.", width: 80 },
+        { header: "Start", width: 80 },
+        { header: "End", width: 80 },
+        { header: "Input", width: 65 },
+        { header: "Output", width: 65 },
+        { header: "Wastage", width: 65 },
       ],
-      rows,
+      rows: batchRows,
     });
+  }
+
+  for (const section of COMBINED_LOT_SECTIONS) {
+    const rows = section.fields.map((f) => [f.label, formatValue((lot as unknown as Record<string, unknown>)[f.key])]);
+    if (doc.y + 40 > doc.page.height - doc.page.margins.bottom) doc.addPage();
+    doc.font("Helvetica-Bold").fontSize(11).fillColor("#334155").text(COMBINED_LOT_STAGE_LABEL[section.stage], doc.x, doc.y + 8);
+    doc.fillColor("#000000");
+    const y = drawTable(doc, { x: doc.page.margins.left, startY: doc.y + 4, columns: [{ header: "Field", width: 220 }, { header: "Value", width: 300 }], rows });
     doc.y = y + 6;
   }
 
   // History — the full audit trail: every forward, send-back and admin
-  // jump this batch went through.
+  // jump both the PreProduction run and its CombinedLot went through.
   if (doc.y + 40 > doc.page.height - doc.page.margins.bottom) doc.addPage();
   doc.font("Helvetica-Bold").fontSize(11).fillColor("#334155").text("Stage History", doc.x, doc.y + 10);
   doc.fillColor("#000000");
 
-  const historyRows = batch.stageEvents.map((e) => [
-    e.action,
-    BATCH_STAGE_LABEL[e.fromStageId as BatchStageId] ?? e.fromStageId,
-    BATCH_STAGE_LABEL[e.toStageId as BatchStageId] ?? e.toStageId,
-    e.actor.fullName || e.actor.email,
-    new Date(e.createdAt).toISOString().slice(0, 16).replace("T", " "),
-    e.note ?? "—",
-  ]);
+  const historyRows = [
+    ...preProduction.stageEvents.map((e) => [
+      e.action,
+      PRE_PRODUCTION_STAGE_LABEL[e.fromStageId as PreProductionStageId] ?? e.fromStageId,
+      PRE_PRODUCTION_STAGE_LABEL[e.toStageId as PreProductionStageId] ?? e.toStageId,
+      e.actor.fullName || e.actor.email,
+      new Date(e.createdAt).toISOString().slice(0, 16).replace("T", " "),
+      e.note ?? "—",
+    ]),
+    ...lot.stageEvents.map((e) => [
+      e.action,
+      COMBINED_LOT_STAGE_LABEL[e.fromStageId as CombinedLotStageId] ?? e.fromStageId,
+      COMBINED_LOT_STAGE_LABEL[e.toStageId as CombinedLotStageId] ?? e.toStageId,
+      e.actor.fullName || e.actor.email,
+      new Date(e.createdAt).toISOString().slice(0, 16).replace("T", " "),
+      e.note ?? "—",
+    ]),
+  ];
 
   if (historyRows.length === 0) {
     doc.font("Helvetica-Oblique").fontSize(9).fillColor("#94a3b8").text("No stage transitions recorded.", doc.x, doc.y + 2);

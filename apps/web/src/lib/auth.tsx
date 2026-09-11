@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api, clearToken, getToken, setToken, setUnauthorizedHandler } from "./api";
 import type { CurrentUser, RoleName } from "./types";
 
@@ -15,13 +16,19 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
       clearToken();
       setUser(null);
+      // A 401 mid-session (expired/revoked token) means every cached
+      // response was fetched as the outgoing user — clear it so the next
+      // login (possibly a different person, same tab) starts from empty
+      // instead of briefly rendering stale data from the old session.
+      queryClient.clear();
     });
-  }, []);
+  }, [queryClient]);
 
   useEffect(() => {
     (async () => {
@@ -49,6 +56,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   function logout() {
     clearToken();
     setUser(null);
+    // Same reasoning as the 401 handler above — a fresh login in this tab
+    // (same person or a different one) must never render the previous
+    // session's cached inventory/batches/etc. before its own fetch lands.
+    queryClient.clear();
   }
 
   function hasRole(...roles: RoleName[]) {

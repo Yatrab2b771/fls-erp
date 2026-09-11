@@ -18,13 +18,19 @@ const RECIPE_IMPORT_BODY = {
 };
 
 describe("POST /api/rm-costing/recipes/import", () => {
-  it("is restricted to PPIC", async () => {
+  it("is restricted to RND", async () => {
     const { token: plainToken } = await createUser([]);
     const denied = await request(app).post("/api/rm-costing/recipes/import").set(authHeader(plainToken)).send(RECIPE_IMPORT_BODY);
     expect(denied.status).toBe(403);
 
+    // PPIC used to own this too — now it's R&D's job (PPIC requests what's
+    // missing, R&D delivers it — see recipe-request.routes.ts).
     const { token: ppicToken } = await createUser(["PPIC"]);
-    const allowed = await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
+    const stillDenied = await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
+    expect(stillDenied.status).toBe(403);
+
+    const { token: rndToken } = await createUser(["RND"]);
+    const allowed = await request(app).post("/api/rm-costing/recipes/import").set(authHeader(rndToken)).send(RECIPE_IMPORT_BODY);
     expect(allowed.status).toBe(201);
     expect(allowed.body.recipesUpserted).toBe(1);
   });
@@ -32,8 +38,9 @@ describe("POST /api/rm-costing/recipes/import", () => {
 
 describe("full RM plan lifecycle", () => {
   it("create plan -> queue batch -> update costing -> calculate -> export", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(rndToken)).send(RECIPE_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
     const recipes = await request(app).get("/api/rm-costing/recipes").set(authHeader(ppicToken));
     const recipeId = recipes.body[0].id;
 
@@ -42,9 +49,16 @@ describe("full RM plan lifecycle", () => {
     expect(plan.status).toBe(201);
     const planId = plan.body.id;
 
-    const patchCosting = await request(app)
+    // Costing profile updates are R&D-only — same split as catalog/recipe import.
+    const deniedCosting = await request(app)
       .patch(`/api/rm-costing/plans/${planId}/costing`)
       .set(authHeader(bearerToken))
+      .send({ costingParams: { mfgLossPct: 3, packSizeG: 400, testCost: 2000, jarCost: 25, scoopCost: 8, labelCost: 23, convCost: 25, ccbCost: 8, profitPct: 10, gstPct: 0 } });
+    expect(deniedCosting.status).toBe(403);
+
+    const patchCosting = await request(app)
+      .patch(`/api/rm-costing/plans/${planId}/costing`)
+      .set(authHeader(rndToken))
       .send({ costingParams: { mfgLossPct: 3, packSizeG: 400, testCost: 2000, jarCost: 25, scoopCost: 8, labelCost: 23, convCost: 25, ccbCost: 8, profitPct: 10, gstPct: 0 } });
     expect(patchCosting.status).toBe(200);
 
@@ -74,8 +88,9 @@ describe("full RM plan lifecycle", () => {
   });
 
   it("PPIC can send a calculated plan's procurement rollup straight into Pre-Inventory as RM requirements", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(rndToken)).send(RECIPE_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
     const recipeId = (await request(app).get("/api/rm-costing/recipes").set(authHeader(ppicToken))).body[0].id;
 
     const plan = await request(app).post("/api/rm-costing/plans").set(authHeader(ppicToken)).send({ name: "Send Test RM Plan" });
@@ -103,8 +118,9 @@ describe("full RM plan lifecycle", () => {
   });
 
   it("invalidates a calculated result — and blocks export again — after removing the batch that was queued when it was calculated", async () => {
+    const { token: rndToken } = await createUser(["RND"]);
+    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(rndToken)).send(RECIPE_IMPORT_BODY);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    await request(app).post("/api/rm-costing/recipes/import").set(authHeader(ppicToken)).send(RECIPE_IMPORT_BODY);
     const recipeId = (await request(app).get("/api/rm-costing/recipes").set(authHeader(ppicToken))).body[0].id;
 
     const { token } = await createUser([]);

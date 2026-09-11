@@ -11,7 +11,7 @@ export async function buildMasterBomWorkbook(
   meta: { planName: string; dateFrom?: string | null; dateTo?: string | null },
 ): Promise<ExcelJS.Buffer> {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "FLS ERP";
+  workbook.creator = "FLS Mitr";
   workbook.created = new Date();
 
   const sheet = workbook.addWorksheet("Master BOM");

@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: fls-erp-api
+    runtime: node
+    plan: free
+    region: singapore
+    # npm workspaces monorepo — there's one lockfile at the repo root, so
+    # every command below runs from there (no rootDir), targeting
+    # apps/api explicitly instead. Prisma Client has to be generated
+    # before the TypeScript build (it types against the generated
+    # client), and migrate deploy applies any pending migrations to the
+    # real database as the very last build step, before the new code
+    # ever serves a request.
+    buildCommand: npm ci && npx prisma generate --schema apps/api/prisma/schema.prisma && npm run build --workspace apps/api && npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
+    startCommand: node apps/api/dist/index.js
+    healthCheckPath: /health
+    envVars:
+      # Set this to the Neon connection string once you have it — see
+      # DEPLOY.md step 1.
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 8h
+      - key: NODE_ENV
+        value: production
+      # The deployed web app's URL (e.g. the Netlify site) — locks down
+      # CORS to just that origin. Leave blank until you have it (see
+      # DEPLOY.md step 4), the API accepts any origin until it's set.
+      - key: FRONTEND_URL
+        sync: false
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: SEED_DEMO_PASSWORD
+        sync: false

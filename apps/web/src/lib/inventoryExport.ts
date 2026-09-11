@@ -1,6 +1,20 @@
 import * as XLSX from "xlsx";
 import { formatEmployeeId } from "./format";
-import type { CustomerReconciliationRow, DayStoreStockLine, DispatchTransfer, InventoryItem, InventoryRequest, InventoryStockLine, InventoryTransaction, ItemStockByLocation, PersonRef, PlantStockLine, PreInventoryRequirement } from "./types";
+import type {
+  CustomerReconciliationRow,
+  DayStoreStockLine,
+  DispatchTransfer,
+  InventoryItem,
+  InventoryRequest,
+  InventoryStockLine,
+  InventoryTransaction,
+  ItemStockByLocation,
+  MaterialReconciliationRow,
+  PersonRef,
+  PlantStockLine,
+  PreInventoryRequirement,
+  TransitItem,
+} from "./types";
 
 // Builds and downloads a single-sheet workbook straight from whatever the
 // page already has loaded — no round trip to the server. Each report is
@@ -52,6 +66,60 @@ export function exportStockReport(rows: InventoryStockLine[]) {
       "On Hand": r.onHand,
     })),
     `FLS_Inventory_Stock_${todayStamp()}.xlsx`,
+  );
+}
+
+// Every open shipment across every leg (Day Store/Plant transit-tracked,
+// vendor QC queue, R&D) — see GET /inventory/transit. "In Transit (h)"
+// is a decimal snapshot at export time, not a live-updating cell — an
+// Excel file can't tick the way the on-screen list does.
+export function exportTransitReport(rows: TransitItem[]) {
+  download(
+    "Transit",
+    rows.map((r) => ({
+      Item: r.item.name,
+      Category: CATEGORY_LABEL[r.item.category] ?? r.item.category,
+      Kind: r.kind,
+      From: r.from,
+      To: r.to,
+      Qty: r.quantity,
+      Unit: r.unit,
+      "Dispatched At": formatTimestamp(r.dispatchedAt),
+      "Dispatched By": formatPerson(r.dispatchedBy),
+      "In Transit (h)": Math.round(((Date.now() - new Date(r.dispatchedAt).getTime()) / 3_600_000) * 10) / 10,
+    })),
+    `FLS_Inventory_Transit_${todayStamp()}.xlsx`,
+  );
+}
+
+// Of everything ever received for each item, where it all actually went
+// — see GET /inventory/reconciliation. Same column set the on-screen
+// table shows, so the sheet is self-explanatory without this app open
+// next to it.
+export function exportMaterialReconciliationReport(rows: MaterialReconciliationRow[]) {
+  download(
+    "Reconciliation",
+    rows.map((r) => ({
+      Item: r.item.name,
+      Category: CATEGORY_LABEL[r.item.category] ?? r.item.category,
+      Unit: r.item.unit ?? "",
+      Received: r.receivedQty,
+      "On Hand — Warehouse": r.onHandWarehouse,
+      "On Hand — Stores": r.onHandDayStores,
+      "On Hand — Plants": r.onHandPlants,
+      "Consumed in Production": r.consumedProduction,
+      "Sent as QC Sample": r.consumedSample,
+      "Wastage at Dispensing": r.consumedWaste,
+      "R&D — Testing": r.rndTesting,
+      "R&D — Formulation Trial": r.rndFormulationTrial,
+      "R&D — Wastage": r.rndWastage,
+      "R&D — Rejected": r.rndRejected,
+      "R&D — To Customer": r.rndDispatchedCustomer,
+      "R&D — Returned to Warehouse (info)": r.rndReturnedToWarehouse,
+      "Accounted For": r.accountedFor,
+      Variance: r.variance,
+    })),
+    `FLS_Inventory_Reconciliation_${todayStamp()}.xlsx`,
   );
 }
 
@@ -322,6 +390,21 @@ export function exportItemStockByLocation(data: ItemStockByLocation) {
 // inventoryImport.ts looks for, plus one worked example, so a real sheet
 // built from this always parses cleanly on upload. ---
 
+// Item Master ("SKU Namkaran") — the naming-reconciliation sheet's own
+// shape: real code, plus every name a different department calls this
+// item by, resolved down to one standardized name. No Category column —
+// derived from the code's own RM.../PM... prefix on import.
+export function downloadItemMasterImportTemplate() {
+  download(
+    "Item Master",
+    [
+      { "SKU Code": "RM00001", "Store Name": "Zinc Sulphate - Dyanamic", "Name from Lab": "Zinc Sulphate", "Correct Name": "Zinc Sulphate Monohydrate", Make: "Dyanamic" },
+      { "SKU Code": "", "Store Name": "", "Name from Lab": "", "Correct Name": "", Make: "" },
+    ],
+    "FLS_Inventory_Item_Master_Template.xlsx",
+  );
+}
+
 export function downloadInventoryImportTemplate() {
   download(
     "Material Entries",
@@ -355,6 +438,18 @@ export function downloadInventoryRequestImportTemplate() {
       { Item: "", Category: "", "Requested Qty": "", Purpose: "", "Needed By": "", Note: "" },
     ],
     "FLS_Inventory_Request_Template.xlsx",
+  );
+}
+
+export function downloadRndSampleRequestImportTemplate() {
+  download(
+    "R&D Sample Requests",
+    [
+      { Item: "Whey Protein Concentrate", Category: "RM", Quantity: 10, Unit: "Kg", Note: "For new whey-isolate blend trial" },
+      { Item: "Jar 250g HDPE", Category: "PM", Quantity: 20, Unit: "Count", Note: "" },
+      { Item: "", Category: "", Quantity: "", Unit: "", Note: "" },
+    ],
+    "FLS_RndStore_Request_Template.xlsx",
   );
 }
 

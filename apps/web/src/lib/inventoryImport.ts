@@ -229,6 +229,56 @@ export function parseInventoryRequestWorkbook(buffer: ArrayBuffer, defaultCatego
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
 }
 
+// --- R&D Store sample requests bulk import — R&D asking Store for a
+// whole list of materials at once (see rnd-store.routes.ts POST
+// /requests/import) instead of one item at a time. Needs its own Unit
+// column (Material Requests don't — Store picks the unit when it
+// issues), otherwise the same shape. ---
+
+export interface ImportRndSampleRequestRow {
+  category: "RM" | "PM";
+  itemName: string;
+  quantity: number;
+  unit: string;
+  note?: string;
+}
+
+export interface ParsedRndSampleRequestImport {
+  rows: ImportRndSampleRequestRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parseRndSampleRequestWorkbook(buffer: ArrayBuffer, defaultCategory: "RM" | "PM"): ParsedRndSampleRequestImport {
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+  const rows: ImportRndSampleRequestRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const itemName = asText(row, ITEM_COLUMNS);
+      const unit = asText(row, UNIT_COLUMNS);
+      const quantityRaw = firstNonEmpty(row, REQUESTED_QTY_COLUMNS);
+      const quantity = quantityRaw === undefined ? NaN : Number(quantityRaw);
+
+      if (!itemName || !unit || !Number.isFinite(quantity) || quantity <= 0) {
+        skipped += 1;
+        continue;
+      }
+
+      const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
+
+      rows.push({ category, itemName, quantity, unit, note: asText(row, NOTE_COLUMNS) });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
+
 // --- Pre-Inventory requirement bulk import (S1) — one row per RM/PM
 // requirement, same resolve-or-create-item pattern as the transaction
 // log's import. Required Qty is a distinct column from the transaction
@@ -337,6 +387,73 @@ export function parsePurchaseLogWorkbook(buffer: ArrayBuffer, defaultCategory: "
       const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
 
       rows.push({ itemName, category, poNumber, vendorName, eta });
+    }
+  }
+
+  return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
+
+// --- Item Master import ("SKU Namkaran") — the naming-reconciliation
+// sheet: a real code, plus every name a different department calls the
+// same item by (Store's own label, what Lab calls it), resolved down to
+// one standardized name every other module's exact-name lookup can then
+// actually match. No Category column on the real sheet — derived from
+// the code's own prefix (RM.../PM...), same convention the rest of this
+// app's item codes already use. ---
+
+const CODE_COLUMNS = ["SKU Code", "Code", "Item Code"];
+const CORRECT_NAME_COLUMNS = ["Correct Name"];
+const LAB_NAME_COLUMNS = ["Name from Lab", "Lab Name"];
+const STORE_NAME_COLUMNS = ["Store Name"];
+const MAKE_COLUMNS = ["Make", "MAKE", "Manufacturer"];
+
+function categoryFromCode(code: string): "RM" | "PM" {
+  return code.trim().toUpperCase().startsWith("PM") ? "PM" : "RM";
+}
+
+export interface ImportItemMasterRow {
+  code: string;
+  category: "RM" | "PM";
+  correctName?: string;
+  labName?: string;
+  storeName?: string;
+  // A default vendor suggestion only — pre-fills Material Received's own
+  // Vendor Name field, never a fixed part of the item. See the
+  // schema.prisma comment on InventoryItem.preferredVendor.
+  make?: string;
+}
+
+export interface ParsedItemMasterImport {
+  rows: ImportItemMasterRow[];
+  skipped: number;
+  sheetNames: string[];
+  detectedHeaders: string[];
+}
+
+export function parseItemMasterWorkbook(buffer: ArrayBuffer): ParsedItemMasterImport {
+  const workbook = XLSX.read(buffer, { type: "array" });
+  const rows: ImportItemMasterRow[] = [];
+  const detectedHeaders = new Set<string>();
+  let skipped = 0;
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheetRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName]!, { defval: "" });
+    for (const row of sheetRows) {
+      for (const key of Object.keys(row)) detectedHeaders.add(key);
+      const code = asText(row, CODE_COLUMNS);
+      if (!code) {
+        skipped += 1;
+        continue;
+      }
+
+      rows.push({
+        code,
+        category: categoryFromCode(code),
+        correctName: asText(row, CORRECT_NAME_COLUMNS),
+        labName: asText(row, LAB_NAME_COLUMNS),
+        storeName: asText(row, STORE_NAME_COLUMNS),
+        make: asText(row, MAKE_COLUMNS),
+      });
     }
   }
 

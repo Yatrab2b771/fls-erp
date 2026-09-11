@@ -6,8 +6,8 @@ import { drawTable } from "../../common/lib/pdf-table";
 type PoForPdf = {
   id: string;
   poNumber: string | null;
-  brandName: string | null;
   orderDate: Date | null;
+  expectedDeliveryDate: Date | null;
   regulatoryBody: string | null;
   regulatoryStatus: string | null;
   status: string;
@@ -39,20 +39,20 @@ function fmtDate(d: Date | null): string {
 export function buildPurchaseOrderPdf(po: PoForPdf): PDFKit.PDFDocument {
   const doc = new PDFDocument({ size: "A4", margin: 40 });
 
-  doc.font("Helvetica-Bold").fontSize(18).text("FLS ERP — Purchase Order");
+  doc.font("Helvetica-Bold").fontSize(18).text("FLS Mitr — Purchase Order");
   doc
     .font("Helvetica")
     .fontSize(11)
     .fillColor("#475569")
-    .text(`${po.poNumber ?? po.id.slice(0, 8)} · ${po.customer.companyName}${po.brandName ? ` · ${po.brandName}` : ""}`);
+    .text(`${po.poNumber ?? po.id.slice(0, 8)} · ${po.customer.companyName}`);
   doc.fillColor("#000000");
   doc.moveDown(1);
 
   const headerRows: [string, string][] = [
     ["PO Number", po.poNumber ?? "—"],
     ["Customer", po.customer.companyName],
-    ["Brand Name", po.brandName ?? "—"],
     ["Order Date", fmtDate(po.orderDate)],
+    ["Expected Delivery Date", fmtDate(po.expectedDeliveryDate)],
     ["Regulatory Body", po.regulatoryBody ?? "—"],
     ["Regulatory Status", po.regulatoryStatus ?? "—"],
     ["Status", po.status.charAt(0) + po.status.slice(1).toLowerCase()],
