@@ -10,8 +10,12 @@ services:
     # before the TypeScript build (it types against the generated
     # client), and migrate deploy applies any pending migrations to the
     # real database as the very last build step, before the new code
-    # ever serves a request.
-    buildCommand: npm ci && npx prisma generate --schema apps/api/prisma/schema.prisma && npm run build --workspace apps/api && npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
+    # ever serves a request. --include=dev is required here: NODE_ENV is
+    # set to "production" below (for the running app), but that same var
+    # is also visible during the build — and npm silently skips
+    # devDependencies (typescript, @types/*) whenever NODE_ENV=production
+    # is set, which breaks the type-check build without this flag.
+    buildCommand: npm ci --include=dev && npx prisma generate --schema apps/api/prisma/schema.prisma && npm run build --workspace apps/api && npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
     startCommand: node apps/api/dist/index.js
     healthCheckPath: /health
     envVars:
