@@ -654,7 +654,7 @@ export function InventoryPage() {
     enabled: tabVisible.stock && !!stockWarehouseId,
   });
   const { data: transactions, isLoading: txnLoading } = useInventoryTransactions(materialTab ? { type: tab as InventoryTxnType } : undefined, {
-    enabled: materialTab && (tab === "RECEIVED" ? canWrite || canInwardQc : canWrite),
+    enabled: materialTab && tabVisible[tab],
   });
   const { data: dispatchTransfers, isLoading: dispatchLoading } = useDispatchTransfers(dispatchTab ? { type: tab } : undefined, {
     enabled: dispatchTab && (tab === "FG" ? canWrite || canQc || canDispatch || canInvoice : canWrite),
