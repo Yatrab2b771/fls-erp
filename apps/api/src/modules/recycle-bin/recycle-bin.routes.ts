@@ -84,7 +84,7 @@ async function collectAll(): Promise<BinRow[]> {
     }),
     prisma.bomPlanItem.findMany({
       where: { deletedAt: { not: null } },
-      include: { plan: { select: { name: true } }, sku: { include: { brand: true } }, deletedBy: personSelect },
+      include: { plan: { select: { name: true } }, sku: { include: { customer: true } }, deletedBy: personSelect },
       orderBy: { deletedAt: "desc" },
     }),
     prisma.rmPlanItem.findMany({
@@ -99,7 +99,7 @@ async function collectAll(): Promise<BinRow[]> {
     }),
   ]);
 
-  const TXN_TYPE_LABEL: Record<string, string> = { RECEIVED: "Received", ISSUED_DAY_STORE: "Issued to Store", ISSUED_PRODUCTION: "Issued to Production" };
+  const TXN_TYPE_LABEL: Record<string, string> = { RECEIVED: "Received", ISSUED_DAY_STORE: "Issued to Store", ISSUED_PRODUCTION: "Issued to Production", ISSUED_RND: "Sent to R&D Store" };
 
   const rows: BinRow[] = [
     ...txns.map((t) => ({
@@ -153,7 +153,7 @@ async function collectAll(): Promise<BinRow[]> {
     ...bomItems.map((b) => ({
       entityType: "bom-plan-item" as const,
       id: b.id,
-      label: `BOM Plan Item — ${b.sku.brand.name} ${b.sku.productName}`,
+      label: `BOM Plan Item — ${b.sku.customer.companyName} ${b.sku.productName}`,
       detail: `Target yield ${b.targetYield} on plan "${b.plan.name}"`,
       deletedAt: b.deletedAt!.toISOString(),
       deletedBy: b.deletedBy,

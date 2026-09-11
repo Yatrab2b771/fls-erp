@@ -5,6 +5,7 @@ import { parsePagination, setPaginationHeaders } from "../../common/lib/paginati
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { importRecipesSchema, type ImportRecipesInput } from "./recipe-catalog.schemas";
+import { resolveRmRequests } from "../recipe-requests/recipe-request.routes";
 
 export const recipeCatalogRouter = Router();
 
@@ -51,15 +52,13 @@ recipeCatalogRouter.get("/recipes/:id", async (req: AuthedRequest<{ id: string }
   }
 });
 
-// Import/maintenance is restricted to the roles who actually own
-// formulation data — everyone else gets read-only access above, same
-// split as packaging-bom's catalog import. The pre-rebuild version also
-// gated this to RND, but that role isn't in this rebuild's scope (nothing
-// in the re-derived requirements names an R&D approval step) — PPIC
-// alone owns this here.
+// Import/maintenance is R&D-only — PPIC used to own this, but per the
+// client, authoring new formulations is R&D's job now: PPIC requests
+// what's missing (see recipe-request.routes.ts), R&D delivers it here.
+// Everyone else keeps read-only access above.
 recipeCatalogRouter.post(
   "/recipes/import",
-  requireRole("PPIC"),
+  requireRole("RND"),
   validateBody(importRecipesSchema),
   async (req: AuthedRequest, res, next) => {
     try {
@@ -97,6 +96,10 @@ recipeCatalogRouter.post(
 
         recipesUpserted += 1;
         ingredientsUpserted += ingredients.length;
+
+        // Fulfils any PPIC request that was waiting on exactly this
+        // recipe name — see recipe-request.routes.ts.
+        await resolveRmRequests(recipeInput.name).catch((err) => req.log?.error({ err }, "resolveRmRequests failed"));
       }
 
       await recordAudit({

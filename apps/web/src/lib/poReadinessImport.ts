@@ -94,7 +94,6 @@ export function exportPoReadinessReport(rows: PoReadinessRow[]) {
   const sheetRows = rows.flatMap((r) =>
     r.items.map((it) => ({
       "PO Number": r.purchaseOrder.poNumber ?? r.purchaseOrder.id.slice(0, 8),
-      Brand: r.purchaseOrder.brandName ?? "",
       Customer: r.purchaseOrder.customer.companyName,
       "PO Status": r.isReady ? "Ready to Execute" : "Short",
       Item: it.itemName,

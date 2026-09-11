@@ -11,9 +11,71 @@ export const createInventoryItemSchema = z.object({
   category: z.enum(CATEGORIES),
   name: z.string().min(1).max(200),
   unit: z.string().max(40).optional(), // Kg | Ltr | Count | other free-text, per the tool's Unit column
+  code: z.string().max(60).optional(), // the item master's own code (e.g. "RM00951"), when known
+  preferredVendor: z.string().max(200).optional(), // a default suggestion only — see the schema.prisma comment
 });
 
 export const updateInventoryItemSchema = createInventoryItemSchema.omit({ category: true }).partial();
+
+// Pricing/costing — matches the client's own stock-report format (Cost
+// Price, M.R.P., Purchase Price, Sales Price), separate from
+// updateInventoryItemSchema above since it's Purchase/Accounts-only —
+// see inventory.routes.ts's PATCH /items/:id/pricing and
+// schema.prisma's comment on these fields.
+export const updateInventoryItemPricingSchema = z.object({
+  costPrice: z.coerce.number().nonnegative().optional().nullable(),
+  mrp: z.coerce.number().nonnegative().optional().nullable(),
+  purchasePrice: z.coerce.number().nonnegative().optional().nullable(),
+  salesPrice: z.coerce.number().nonnegative().optional().nullable(),
+});
+
+// Debit Note Issue — the ERP Diagram doc's incoming-QC reject branch,
+// raised by Accounts against a RECEIVED row that's come back
+// QC_REJECTED (or partially rejected). quantity/unit default to the
+// rejected portion client-side but are still explicit here — Accounts
+// might debit a different figure than the raw rejected qty (e.g. a
+// negotiated partial credit).
+export const createDebitNoteSchema = z.object({
+  debitNoteNo: z.string().max(120).optional(),
+  date: z.coerce.date().optional(),
+  quantity: z.coerce.number().positive(),
+  unit: z.string().min(1).max(40),
+  amount: z.coerce.number().nonnegative().optional(),
+  reason: z.string().max(1000).optional(),
+});
+
+// --- Item Master import ("SKU Namkaran") — a one-time (or periodic)
+// naming-reconciliation upload: real code, plus every name a different
+// department calls this item by, resolved down to one standardized
+// `name` every other module's exact (category, name) lookup can then
+// actually match. Doesn't touch stock — this only authors the item
+// catalog itself, same "reference data, not a transaction" shape as
+// createInventoryItemSchema above. ---
+
+export const importItemMasterSchema = z.object({
+  rows: z
+    .array(
+      z.object({
+        code: z.string().min(1).max(60),
+        category: z.enum(CATEGORIES),
+        // The standardized name to seed/attach to this item — Correct
+        // Name when the sheet has one; the row is rejected only if every
+        // one of these three is blank (nothing to name the item at all).
+        correctName: z.string().max(200).optional(),
+        labName: z.string().max(200).optional(),
+        storeName: z.string().max(200).optional(),
+        // The sheet's "Make" column — a default vendor suggestion only,
+        // never a fixed part of the item the way RecipeIngredient.brand
+        // is for a formulation. Blank leaves any existing value alone
+        // (doesn't clear it) — a re-run of an older, Make-less version
+        // of the sheet shouldn't wipe out a value a newer row elsewhere
+        // already set.
+        make: z.string().max(200).optional(),
+      }),
+    )
+    .min(1)
+    .max(5000),
+});
 
 // One "Material Received" / "Material Issued to day store" / "Material
 // Issued to Production" row — same field set for all three, `type` picks
@@ -31,6 +93,11 @@ export const createInventoryTransactionSchema = z.object({
   // One-time go-live migration flag — RECEIVED rows only. Skips inward
   // QC entirely (see schema.prisma comment on InventoryTransaction).
   isOpeningStock: z.boolean().optional(),
+  // Transit tracking — ISSUED_DAY_STORE/ISSUED_PRODUCTION rows only (see
+  // schema.prisma comment on InventoryTransaction). When set, this entry
+  // doesn't count as arrived at its destination until someone there
+  // calls POST /transactions/:id/confirm-delivery.
+  isTransitTracked: z.boolean().optional(),
   // Traceability off the physical stock sheet — batch/GRN/mfg/expiry —
   // all optional, any transaction type (a batch can matter on an issue
   // too, not just on receipt).
@@ -40,6 +107,26 @@ export const createInventoryTransactionSchema = z.object({
   expiryDate: z.coerce.date().optional(),
   remark: z.string().max(500).optional(),
 });
+
+// Editing an existing transaction — deliberately narrow: only the
+// descriptive paperwork fields (a GRN number that wasn't available yet
+// when Store first logged the delivery is the common case), never
+// itemId/type/date/quantity/unit/dayStoreId/plantId. Those drive stock
+// math and QC state directly — changing them after the fact would mean
+// silently rewriting a number PO Readiness/Pre-Inventory/QC may have
+// already acted on. No QC-status restriction either: a GRN No. showing
+// up after acceptance is normal, not a reason to block the edit.
+export const updateInventoryTransactionSchema = z
+  .object({
+    batchNo: z.string().max(100).optional(),
+    grnNo: z.string().max(100).optional(),
+    mfgDate: z.coerce.date().optional(),
+    expiryDate: z.coerce.date().optional(),
+    vendorName: z.string().max(200).optional(),
+    size: z.string().max(120).optional(),
+    remark: z.string().max(500).optional(),
+  })
+  .refine((v) => Object.values(v).some((val) => val !== undefined), { message: "Provide at least one field to update" });
 
 // One "FG transfer to Dispatch" / "Bill transfer to Dispatch from Accounts"
 // row — same field set for both, `type` picks the sheet it belongs to.
@@ -82,6 +169,11 @@ export const importInventoryTransactionsSchema = z.object({
   // Any row with its own dayStoreName overrides this. ISSUED_DAY_STORE
   // only, enforced at the route.
   dayStoreId: z.string().uuid().optional(),
+  // Transit tracking — applies to the whole sheet, same as isOpeningStock
+  // above. ISSUED_DAY_STORE only, enforced at the route (a bulk sheet has
+  // no per-row Plant column to gate ISSUED_PRODUCTION rows against
+  // anyway — those never come through this import, see the route).
+  isTransitTracked: z.boolean().optional(),
   rows: z
     .array(
       z.object({
@@ -191,36 +283,49 @@ export const issueInventoryRequestSchema = z.object({
   // Warehouse stock on purpose, a uuid means a specific Day Store — the
   // key itself is required either way.
   dayStoreId: z.string().uuid().nullable(),
+  // Transit tracking — this fulfillment doesn't count as arrived at its
+  // destination (that Day Store, or the request's Plant) until confirmed.
+  // See createInventoryTransactionSchema's own isTransitTracked.
+  isTransitTracked: z.boolean().optional(),
+});
+
+// POST /transactions/:id/confirm-delivery — no required fields, this is
+// purely "I received it, right now, as me." Optional note in case
+// something's worth recording about the actual handoff (condition,
+// partial mismatch noticed on arrival, etc.) — appended onto the row's
+// existing remark, not a new column.
+export const confirmDeliverySchema = z.object({
+  note: z.string().max(500).optional(),
 });
 
 // --- Quality Check gates — QA/QC checks, Store/Dispatch acts on the
-// result. Reject requires a note both times, same "why" requirement as
-// rejecting a Material Request. ---
+// result. HOLD parks the entry without a final call either way (QC comes
+// back to it later); REJECT is the only terminal outcome. Both HOLD and
+// REJECT require a note — same "why" requirement as rejecting a Material
+// Request, and Hold arguably needs it even more since "parked" isn't
+// self-explanatory the way "rejected" is. ---
 
 export const qcReviewSchema = z
   .object({
-    action: z.enum(["APPROVE", "REJECT"]),
+    action: z.enum(["APPROVE", "REJECT", "HOLD"]),
     note: z.string().max(500).optional(),
   })
-  .refine((v) => v.action !== "REJECT" || !!v.note, { message: "A note is required when rejecting QC", path: ["note"] });
+  .refine((v) => (v.action !== "REJECT" && v.action !== "HOLD") || !!v.note, { message: "A note is required when rejecting or holding QC", path: ["note"] });
 
-// Inward QC only — an Approve can carry an optional partial-rejection
-// quantity, e.g. 5 of 50 Kg damaged: the delivery as a whole clears QC,
-// but part of it doesn't count toward stock. Outward QC (FG dispatch
-// transfers) has no such split — a shipment either clears or it
-// doesn't — so that route keeps using the plain qcReviewSchema above.
-export const inwardQcReviewSchema = z
-  .object({
-    action: z.enum(["APPROVE", "REJECT"]),
-    note: z.string().max(500).optional(),
-    rejectedQty: z.coerce.number().min(0).optional(),
-  })
-  .refine((v) => v.action !== "REJECT" || !!v.note, { message: "A note is required when rejecting QC", path: ["note"] })
-  .refine((v) => !(v.action === "APPROVE" && v.rejectedQty && !v.note), { message: "A note is required when partially rejecting quality", path: ["note"] });
+// Inward QC — same three-option gate as outward QC below (Approve,
+// Reject, or Hold). Used to also accept a partial-rejection quantity on
+// Approve (e.g. 5 of 50 Kg damaged, the rest still clears); that split
+// was dropped — QC is a clean call, not a quantity negotiation, so this
+// now just aliases the plain schema.
+export const inwardQcReviewSchema = qcReviewSchema;
 
 export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>;
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;
+export type UpdateInventoryItemPricingInput = z.infer<typeof updateInventoryItemPricingSchema>;
+export type CreateDebitNoteInput = z.infer<typeof createDebitNoteSchema>;
+export type ImportItemMasterInput = z.infer<typeof importItemMasterSchema>;
 export type CreateInventoryTransactionInput = z.infer<typeof createInventoryTransactionSchema>;
+export type UpdateInventoryTransactionInput = z.infer<typeof updateInventoryTransactionSchema>;
 export type CreateDispatchTransferInput = z.infer<typeof createDispatchTransferSchema>;
 export type ImportDispatchTransfersInput = z.infer<typeof importDispatchTransfersSchema>;
 export type ImportInventoryTransactionsInput = z.infer<typeof importInventoryTransactionsSchema>;
@@ -231,4 +336,5 @@ export type IssueInventoryRequestInput = z.infer<typeof issueInventoryRequestSch
 export type QcReviewInput = z.infer<typeof qcReviewSchema>;
 export type InwardQcReviewInput = z.infer<typeof inwardQcReviewSchema>;
 export type DispatchConfirmInput = z.infer<typeof dispatchConfirmSchema>;
+export type ConfirmDeliveryInput = z.infer<typeof confirmDeliverySchema>;
 export type InvoiceInput = z.infer<typeof invoiceSchema>;

@@ -4,11 +4,15 @@ import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
+import { findSimilar } from "../../common/lib/fuzzy-match";
+import { ensureRecipeRequest } from "../recipe-requests/recipe-request.routes";
 import { addRmPlanItemSchema, costingParamsSchema, createRmPlanSchema, updateCostingParamsSchema } from "./rm-plan.schemas";
 import { calculateMasterRMBOM, type CostingParams, type RmBatchLineInput, type RmMasterResult } from "./rm-costing-engine";
 import { buildRmMasterWorkbook } from "./rm-export";
 import { buildBatchDispensingPdf, buildMasterProcurementPdf } from "./rm-pdf";
 import { bulkCreateRequirements, type RequirementSourceRow } from "../inventory/pre-inventory.routes";
+import { createPoMaterialRequirements } from "../po-readiness/po-readiness.routes";
+import { createMaterialRequestsFromPlan } from "../inventory/inventory.routes";
 import { Prisma } from "@prisma/client";
 
 export const rmPlanRouter = Router();
@@ -19,24 +23,35 @@ rmPlanRouter.use(requireAuth);
 // prototype's costing panel inputs (cost-mfg-loss=3, cost-pack-size=400, ...).
 const defaultCostingParams: CostingParams = costingParamsSchema.parse({});
 
-function serializePlan(plan: {
-  id: string;
-  name: string;
-  dateFrom: Date | null;
-  dateTo: Date | null;
-  status: string;
-  costingParams: unknown;
-  calculatedAt: Date | null;
-  createdAt: Date;
-  // Included so reopening an already-calculated plan can render its last
-  // result immediately, instead of showing an empty table until Calculate
-  // is clicked again — same snapshot POST /calculate and the export
-  // endpoints already read, just also exposed on GET.
-  resultSnapshot: unknown;
-  items: { id: string; batchSizeKg: number; recipe: { id: string; name: string; totalServing: number } }[];
-  purchaseOrderItemId: string | null;
-  purchaseOrderItem: { id: string; productName: string; purchaseOrder: { id: string; poNumber: string | null } } | null;
-}) {
+function serializePlan(
+  plan: {
+    id: string;
+    name: string;
+    dateFrom: Date | null;
+    dateTo: Date | null;
+    status: string;
+    costingParams: unknown;
+    calculatedAt: Date | null;
+    createdAt: Date;
+    // Included so reopening an already-calculated plan can render its last
+    // result immediately, instead of showing an empty table until Calculate
+    // is clicked again — same snapshot POST /calculate and the export
+    // endpoints already read, just also exposed on GET.
+    resultSnapshot: unknown;
+    // Set once Send to Pre-Inventory succeeds — see BomPlan's identical
+    // field for why (no unique constraint on PreInventoryRequirement to
+    // fall back on, so a second send must be blocked explicitly).
+    sentToPreInventoryAt: Date | null;
+    items: { id: string; batchSizeKg: number; recipe: { id: string; name: string; totalServing: number } }[];
+    purchaseOrderItemId: string | null;
+    purchaseOrderItem: { id: string; productName: string; purchaseOrder: { id: string; poNumber: string | null } } | null;
+  },
+  // Populated only when this plan is linked to a PO item, still has no
+  // queued Recipe, and a near-name-match exists — see
+  // findRecipeSuggestions. Same "did you mean X?" idea as BomPlan's own
+  // suggestedSkus.
+  suggestions?: { recipeId: string; recipeName: string; score: number; defaultBatchSizeKg: number }[],
+) {
   return {
     id: plan.id,
     name: plan.name,
@@ -46,6 +61,7 @@ function serializePlan(plan: {
     costingParams: plan.costingParams,
     calculatedAt: plan.calculatedAt,
     createdAt: plan.createdAt,
+    sentToPreInventoryAt: plan.sentToPreInventoryAt,
     result: plan.resultSnapshot ?? null,
     items: plan.items.map((i) => ({
       id: i.id,
@@ -57,7 +73,25 @@ function serializePlan(plan: {
     linkedOrder: plan.purchaseOrderItem
       ? { productName: plan.purchaseOrderItem.productName, poNumber: plan.purchaseOrderItem.purchaseOrder.poNumber, purchaseOrderId: plan.purchaseOrderItem.purchaseOrder.id }
       : null,
+    suggestedRecipes: suggestions && suggestions.length > 0 ? suggestions : undefined,
   };
+}
+
+// Mirrors bom-plan.routes.ts's findSkuSuggestions. defaultBatchSizeKg is
+// always the PO line's raw quantity — even when its unit isn't Kg (so
+// the exact-match auto-calc above skips it), since fixing a typo is
+// still useful there; the frontend just needs to let the batch size be
+// edited before adding rather than treating it as a guaranteed-correct
+// number the way the Kg-unit case is.
+async function findRecipeSuggestions(poItem: { productName: string; quantity: number } | null) {
+  if (!poItem) return undefined;
+  const catalog = await prisma.recipe.findMany();
+  return findSimilar(poItem.productName, catalog, (r) => r.name).map((c) => ({
+    recipeId: c.item.id,
+    recipeName: c.item.name,
+    score: c.score,
+    defaultBatchSizeKg: poItem.quantity,
+  }));
 }
 
 const planInclude = {
@@ -81,7 +115,7 @@ rmPlanRouter.get("/plans", async (req, res, next) => {
       }),
     ]);
     setPaginationHeaders(res, total, pagination);
-    res.json(plans.map(serializePlan));
+    res.json(plans.map((p) => serializePlan(p)));
   } catch (err) {
     next(err);
   }
@@ -97,17 +131,19 @@ rmPlanRouter.post("/plans", validateBody(createRmPlanSchema), async (req: Authed
       purchaseOrderItemId?: string;
     };
 
+    let poItem: { productName: string; quantity: number; unit: string; productType: "EXISTING" | "NEW" } | null = null;
     if (purchaseOrderItemId) {
-      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId } });
-      if (!item) return res.status(400).json({ error: "Unknown purchase order item" });
+      poItem = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { productName: true, quantity: true, unit: true, productType: true } });
+      if (!poItem) return res.status(400).json({ error: "Unknown purchase order item" });
     }
 
+    const resolvedCostingParams = (costingParams ?? defaultCostingParams) as CostingParams;
     const plan = await prisma.rmPlan.create({
       data: {
         name,
         dateFrom: dateFrom ? new Date(dateFrom) : null,
         dateTo: dateTo ? new Date(dateTo) : null,
-        costingParams: (costingParams ?? defaultCostingParams) as unknown as Prisma.InputJsonValue,
+        costingParams: resolvedCostingParams as unknown as Prisma.InputJsonValue,
         createdById: req.user!.id,
         purchaseOrderItemId: purchaseOrderItemId ?? null,
       },
@@ -116,7 +152,71 @@ rmPlanRouter.post("/plans", validateBody(createRmPlanSchema), async (req: Authed
 
     await recordAudit({ actorId: req.user!.id, action: "rm_plan.created", entityType: "RmPlan", entityId: plan.id });
 
-    res.status(201).json(serializePlan(plan));
+    // "Generate" on the PO detail page — one click, both engines. Same
+    // auto-match reasoning as bom-plan.routes.ts's POST /plans: if the
+    // PO product's name matches exactly one Recipe, queue it (batch size
+    // = the PO line's own quantity, in Kg) and calculate immediately so
+    // this comes back already CALCULATED. No/ambiguous match falls back
+    // to today's empty-Draft behavior. Also requires the PO line's unit
+    // to actually be Kg — a batch size only makes sense in Kg, and a PO
+    // quantity recorded in "SKU" (pack count) or anything else isn't a
+    // batch size at all; auto-calculating against it would silently
+    // produce a nonsense number (a "500-SKU" line treated as a 500 Kg
+    // batch). Safer to leave those as an empty Draft for a human to size
+    // correctly than to hand back a confidently wrong total.
+    // productType NEW — same short-circuit as bom-plan.routes.ts's own:
+    // the gap is already known, so raise (or hand back the already-open)
+    // RecipeRequest immediately instead of attempting a match that can't
+    // succeed.
+    if (poItem && poItem.productType === "NEW") {
+      await ensureRecipeRequest(purchaseOrderItemId!, req.user!.id);
+    }
+
+    const isKgUnit = poItem ? /^kgs?$/i.test(poItem.unit.trim()) : false;
+    if (poItem && poItem.productType !== "NEW" && isKgUnit) {
+      const candidates = await prisma.recipe.findMany({ where: { name: { equals: poItem.productName, mode: "insensitive" } } });
+      const realMatch = candidates.length === 1 && poItem.quantity > 0 && candidates[0]!.totalServing > 0 ? candidates[0]! : null;
+      if (realMatch) {
+        const recipe = realMatch;
+        await prisma.rmPlanItem.create({ data: { planId: plan.id, recipeId: recipe.id, batchSizeKg: poItem.quantity, addedById: req.user!.id } });
+
+        const ingredients = await prisma.recipeIngredient.findMany({ where: { recipeId: recipe.id }, orderBy: { sortOrder: "asc" } });
+        const inputs: RmBatchLineInput[] = [
+          {
+            batchSizeKg: poItem.quantity,
+            recipe: {
+              name: recipe.name,
+              totalServing: recipe.totalServing,
+              ingredients: ingredients.map((ing) => ({ name: ing.name, brand: ing.brand, costPerKg: ing.costPerKg, gPerServing: ing.gPerServing, proteinPct: ing.proteinPct })),
+            },
+          },
+        ];
+        const result = calculateMasterRMBOM(inputs, resolvedCostingParams);
+
+        await prisma.rmPlan.update({
+          where: { id: plan.id },
+          data: { status: "CALCULATED", calculatedAt: new Date(), resultSnapshot: result as unknown as Prisma.InputJsonValue },
+        });
+        await recordAudit({
+          actorId: req.user!.id,
+          action: "rm_plan.calculated",
+          entityType: "RmPlan",
+          entityId: plan.id,
+          metadata: { batchCount: result.batches.length, autoGenerated: true },
+        });
+      } else {
+        // No real match — auto-raise the request instead of waiting on
+        // PPIC's own manual "Request from R&D" click, same as BOM's own
+        // Generate now does. Not fired at all when the unit isn't Kg —
+        // RM Costing was never going to apply here regardless of the
+        // catalog, so there's nothing for R&D to be asked for.
+        await ensureRecipeRequest(purchaseOrderItemId!, req.user!.id);
+      }
+    }
+
+    const finalPlan = await prisma.rmPlan.findUniqueOrThrow({ where: { id: plan.id }, include: planInclude });
+    const suggestions = finalPlan.items.length === 0 && poItem?.productType !== "NEW" ? await findRecipeSuggestions(poItem) : undefined;
+    res.status(201).json(serializePlan(finalPlan, suggestions));
   } catch (err) {
     next(err);
   }
@@ -126,16 +226,24 @@ rmPlanRouter.get("/plans/:id", async (req: AuthedRequest<{ id: string }>, res, n
   try {
     const plan = await prisma.rmPlan.findUnique({ where: { id: req.params.id }, include: planInclude });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
-    res.json(serializePlan(plan));
+    const poItem = plan.purchaseOrderItemId
+      ? await prisma.purchaseOrderItem.findUnique({ where: { id: plan.purchaseOrderItemId }, select: { productName: true, quantity: true, productType: true } })
+      : null;
+    const suggestions = plan.items.length === 0 && poItem?.productType !== "NEW" ? await findRecipeSuggestions(poItem) : undefined;
+    res.json(serializePlan(plan, suggestions));
   } catch (err) {
     next(err);
   }
 });
 
 // Updating the shared costing profile invalidates any prior calculation,
-// same as adding/removing a queued batch.
+// same as adding/removing a queued batch. R&D-only — the costing profile
+// (mfg loss %, jar/scoop/label/testing costs, ...) reflects the real
+// manufacturing/packaging costs the same way a Recipe's formulation does,
+// so it's R&D's call, not PPIC's — same split as catalog/recipe import.
 rmPlanRouter.patch(
   "/plans/:id/costing",
+  requireRole("RND"),
   validateBody(updateCostingParamsSchema),
   async (req: AuthedRequest<{ id: string }>, res, next) => {
     try {
@@ -249,7 +357,9 @@ rmPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: string
 
     const updated = await prisma.rmPlan.update({
       where: { id: plan.id },
-      data: { status: "CALCULATED", calculatedAt: new Date(), resultSnapshot: result as unknown as Prisma.InputJsonValue },
+      // sentToPreInventoryAt cleared — a recalculation re-opens Send to
+      // Pre-Inventory, same reasoning as BomPlan's own calculate route.
+      data: { status: "CALCULATED", calculatedAt: new Date(), resultSnapshot: result as unknown as Prisma.InputJsonValue, sentToPreInventoryAt: null },
       include: planInclude,
     });
 
@@ -277,6 +387,11 @@ rmPlanRouter.post("/plans/:id/send-to-pre-inventory", requireRole("PPIC"), async
     const plan = await prisma.rmPlan.findUnique({ where: { id: req.params.id } });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
     if (!plan.resultSnapshot) return res.status(400).json({ error: "Plan has not been calculated yet — POST /plans/:id/calculate first" });
+    // Server-side guard — see BomPlan's identical check for why this
+    // can't just be a disabled button on the frontend.
+    if (plan.sentToPreInventoryAt) {
+      return res.status(400).json({ error: "This plan's result was already sent to Pre-Inventory. Recalculate it first if you need to send an updated result." });
+    }
 
     const result = plan.resultSnapshot as unknown as RmMasterResult;
     const rows: RequirementSourceRow[] = result.procurement
@@ -294,9 +409,41 @@ rmPlanRouter.post("/plans/:id/send-to-pre-inventory", requireRole("PPIC"), async
 
     const outcome = await bulkCreateRequirements(rows, req.user!.id, req);
 
-    await recordAudit({ actorId: req.user!.id, action: "rm_plan.sent_to_pre_inventory", entityType: "RmPlan", entityId: plan.id, metadata: outcome });
+    // Also feed PO Readiness, and raise this PO's Material Requests, when
+    // this plan is linked to a real PO — see createPoMaterialRequirements'
+    // and createMaterialRequestsFromPlan's own comments for why.
+    let poReadiness: { rowsCreated: number; itemsCreated: number } | null = null;
+    let materialRequests: { rowsCreated: number } | null = null;
+    if (plan.purchaseOrderItemId) {
+      const poItem = await prisma.purchaseOrderItem.findUnique({
+        where: { id: plan.purchaseOrderItemId },
+        select: { purchaseOrderId: true, purchaseOrder: { select: { poNumber: true } } },
+      });
+      if (poItem) {
+        poReadiness = await createPoMaterialRequirements(
+          poItem.purchaseOrderId,
+          rows.map((r) => ({ category: r.category, itemName: r.itemName, unit: r.unit, requiredQty: r.requiredQty })),
+          req.user!.id,
+        );
+        materialRequests = await createMaterialRequestsFromPlan(
+          rows.map((r) => ({ category: r.category, itemName: r.itemName, requiredQty: r.requiredQty })),
+          req.user!.id,
+          `Auto-raised from RM Plan "${plan.name}" for PO ${poItem.purchaseOrder.poNumber ?? poItem.purchaseOrderId.slice(0, 8)}`,
+        );
+      }
+    }
 
-    res.status(201).json(outcome);
+    await prisma.rmPlan.update({ where: { id: plan.id }, data: { sentToPreInventoryAt: new Date() } });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "rm_plan.sent_to_pre_inventory",
+      entityType: "RmPlan",
+      entityId: plan.id,
+      metadata: { ...outcome, poReadiness, materialRequests },
+    });
+
+    res.status(201).json({ ...outcome, poReadiness, materialRequests });
   } catch (err) {
     next(err);
   }

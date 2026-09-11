@@ -1,4 +1,4 @@
-// FLS ERP v2 — rebuilt from scratch. Phase 1-2 schema: auth/RBAC + the
+// FLS Mitr v2 — rebuilt from scratch. Phase 1-2 schema: auth/RBAC + the
 // Order Tracking core (Customer / PurchaseOrder / PurchaseOrderItem /
 // Batch). Packaging BOM, RM Costing, and the MPS GMP pipeline land in
 // their own phases (see the plan report), each as its own migration —
@@ -30,6 +30,7 @@ enum RoleName {
   PRODUCTION
   QA_QC
   DISPATCH
+  RND
 }
 
 model User {
@@ -55,21 +56,31 @@ model User {
   customersCreated            Customer[]
   purchaseOrders              PurchaseOrder[]            @relation("PurchaseOrderCreatedBy")
   purchaseOrdersReviewed      PurchaseOrder[]            @relation("PurchaseOrderReviewedBy")
+  poInvoicesGenerated         PurchaseOrderInvoice[]
   uploadedDocuments           PurchaseOrderDocument[]
   bomPlans                    BomPlan[]
   rmPlans                     RmPlan[]
-  batchStageEvents            BatchStageEvent[]
+  preProductionStageEvents    PreProductionStageEvent[] @relation("PreProductionStageEventActor")
+  combinedLotStageEvents      CombinedLotStageEvent[]   @relation("CombinedLotStageEventActor")
+  productionBatchesCreated    ProductionBatch[]          @relation("ProductionBatchCreatedBy")
+  productionBatchesCompleted  ProductionBatch[]          @relation("ProductionBatchCompletedBy")
   inventoryTxns               InventoryTransaction[]
   dispatchTransfers           DispatchTransfer[]
   inventoryRequested          InventoryRequest[]         @relation("InventoryRequestRequestedBy")
   inventoryReviewed           InventoryRequest[]         @relation("InventoryRequestReviewedBy")
   inventoryQcChecked          InventoryTransaction[]     @relation("InventoryTxnQcCheckedBy")
   inventoryAccepted           InventoryTransaction[]     @relation("InventoryTxnAcceptedBy")
+  inventoryTxnDelivered       InventoryTransaction[]     @relation("InventoryTxnDeliveredBy")
   dispatchQcChecked           DispatchTransfer[]         @relation("DispatchTransferQcCheckedBy")
   notifications               Notification[]
   dayStoresCreated            DayStore[]                 @relation("DayStoreCreatedBy")
   plantsCreated               Plant[]                    @relation("PlantCreatedBy")
+  warehousesCreated           Warehouse[]                @relation("WarehouseCreatedBy")
   batchConsumptionsLogged     BatchMaterialConsumption[]
+  batchConsumptionsQaVerified BatchMaterialConsumption[] @relation("BatchMaterialConsumptionQaVerifiedBy")
+  combinedLotsCoaAnalyzed     CombinedLot[]              @relation("CombinedLotCoaAnalyzedBy")
+  combinedLotsCoaReviewed     CombinedLot[]              @relation("CombinedLotCoaReviewedBy")
+  combinedLotsCoaApproved     CombinedLot[]              @relation("CombinedLotCoaApprovedBy")
   preInventoryRequested       PreInventoryRequirement[]  @relation("PreInventoryRequirementRequestedBy")
   preInventoryPurchased       PreInventoryRequirement[]  @relation("PreInventoryRequirementPurchaseBy")
   dispatchTransfersSent       DispatchTransfer[]         @relation("DispatchTransferDispatchedBy")
@@ -77,6 +88,18 @@ model User {
   dayStoreAssignments         DayStoreAssignment[]       @relation("DayStoreAssignmentUser")
   dayStoreAssignmentsGranted  DayStoreAssignment[]       @relation("DayStoreAssignmentAssignedBy")
   poMaterialRequirementsAdded PoMaterialRequirement[]
+  recipeRequested             RecipeRequest[]            @relation("RecipeRequestRequestedBy")
+  recipeRequestsResponded     RecipeRequest[]            @relation("RecipeRequestRespondedBy")
+  rndTransfersSent            RndTransfer[]              @relation("RndTransferSentBy")
+  rndTransfersConfirmed       RndTransfer[]              @relation("RndTransferConfirmedBy")
+  rndStoreTransactionsCreated RndStoreTransaction[]
+  rndSampleRequestsRequested  RndSampleRequest[]         @relation("RndSampleRequestRequestedBy")
+  rndSampleRequestsReviewed   RndSampleRequest[]         @relation("RndSampleRequestReviewedBy")
+  debitNotesRaised            DebitNote[]
+  qcSampleTransfersSent       QcSampleTransfer[]         @relation("QcSampleTransferSentBy")
+  qcSampleTransfersConfirmed  QcSampleTransfer[]         @relation("QcSampleTransferConfirmedBy")
+  qcSampleTransactionsCreated QcSampleTransaction[]
+  batchRecycleLogsCreated     BatchRecycleLog[]
 
   // Recycle Bin — who soft-deleted what. See the model comments above
   // each of these ("Soft delete") and recycle-bin.routes.ts.
@@ -89,6 +112,10 @@ model User {
   inventoryRequestsDeleted        InventoryRequest[]        @relation("InventoryRequestDeletedBy")
   inventoryTxnsDeleted            InventoryTransaction[]    @relation("InventoryTransactionDeletedBy")
   dispatchTransfersDeleted        DispatchTransfer[]        @relation("DispatchTransferDeletedBy")
+  rndTransfersDeleted             RndTransfer[]             @relation("RndTransferDeletedBy")
+  rndStoreTransactionsDeleted     RndStoreTransaction[]     @relation("RndStoreTransactionDeletedBy")
+  qcSampleTransfersDeleted        QcSampleTransfer[]        @relation("QcSampleTransferDeletedBy")
+  qcSampleTransactionsDeleted     QcSampleTransaction[]     @relation("QcSampleTransactionDeletedBy")
 
   @@map("users")
 }
@@ -178,9 +205,14 @@ model Customer {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  createdBy         User               @relation(fields: [createdById], references: [id])
-  purchaseOrders    PurchaseOrder[]
-  dispatchTransfers DispatchTransfer[]
+  createdBy          User                  @relation(fields: [createdById], references: [id])
+  purchaseOrders     PurchaseOrder[]
+  dispatchTransfers  DispatchTransfer[]
+  rndStoreDispatches RndStoreTransaction[]
+  // The packaging-spec catalog (formerly a separate "Brand" entity) —
+  // in the real business a Brand and the Customer placing the PO are
+  // the same company, so the catalog hangs directly off Customer now.
+  skus               Sku[]
 
   @@map("customers")
 }
@@ -195,6 +227,16 @@ enum PurchaseOrderStatus {
   REJECTED
 }
 
+// EXISTING — already manufactured, a matching Sku/Recipe should already
+// be in the catalog. NEW — a brand-new product, or an existing one with
+// a changed formulation (even a single gram), per the client's own
+// definition — R&D needs to add it before BOM/RM Costing can run. See
+// PurchaseOrderItem.productType.
+enum ProductType {
+  EXISTING
+  NEW
+}
+
 // The PO *header* — BD receives this from a company/brand. Product-level
 // detail lives on PurchaseOrderItem, not here, because one PO can list
 // several distinct products (e.g. Medicine A, B, C) each needing its own
@@ -203,8 +245,8 @@ model PurchaseOrder {
   id               String              @id @default(uuid())
   customerId       String
   poNumber         String?
-  brandName        String?
   orderDate        DateTime?
+  expectedDeliveryDate DateTime? // BD's expected end/delivery date for this PO
   regulatoryBody   String? // FSSAI | AYUSH
   regulatoryStatus String? // Applied | Not Applied | Issued
   status           PurchaseOrderStatus @default(DRAFT)
@@ -221,8 +263,42 @@ model PurchaseOrder {
   items                PurchaseOrderItem[]
   documents            PurchaseOrderDocument[]
   materialRequirements PoMaterialRequirement[]
+  invoice              PurchaseOrderInvoice?
 
   @@map("purchase_orders")
+}
+
+// One consolidated commercial invoice per PO — separate from each Batch's
+// own Billing & E-Way Bill stage (invoiceNo/ewayBillNo there are the
+// per-shipment paperwork; this is the whole-PO amount Accounts actually
+// bills the customer for). Per the client: one PO can carry several
+// products/batches, and Accounts wants one number for the lot, not one
+// per batch. Computed from each item's linked RM Costing plan (Price per
+// Pouch) times how much of that item has actually shipped (summed
+// dispatchedQty across its batches, converted Kg -> pouches via the same
+// plan's packSizeG) — see purchase-orders.routes.ts's GET/POST
+// /:id/billing. A PO item with no CALCULATED RM Costing plan (a BOM-only
+// or pouch-unit product) just can't be priced this way yet — its line
+// carries amount: null and is left out of the total, not guessed at.
+// `lineItems` is a snapshot of that computation at generate time, same
+// "reproducible even if the underlying data changes later" reasoning as
+// RmPlan.resultSnapshot — a real invoice's total shouldn't drift out from
+// under it because someone recalculated a costing plan afterwards.
+model PurchaseOrderInvoice {
+  id              String    @id @default(uuid())
+  purchaseOrderId String    @unique
+  invoiceNo       String?
+  invoiceDate     DateTime?
+  totalAmount     Float
+  lineItems       Json
+  generatedById   String
+  generatedAt     DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  generatedBy   User          @relation(fields: [generatedById], references: [id])
+
+  @@map("purchase_order_invoices")
 }
 
 // ---------------------------------------------------------------------------
@@ -306,21 +382,31 @@ model PurchaseOrderItem {
   packSize        String?
   packType        String?
   bomRef          String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  // Soft delete — only reachable when no Batch exists against this item
+  // Explicit call at intake, instead of only discovering it reactively
+  // once Generate finds no catalog match (that reactive path still
+  // exists underneath — see bom-plan.routes.ts/rm-plan.routes.ts — this
+  // just lets BD/PPIC say it upfront). Defaults to EXISTING so every
+  // pre-existing row (and a bulk import row that doesn't set it) keeps
+  // today's behavior unchanged. NEW skips the catalog-match attempt
+  // entirely at Generate time and raises a RecipeRequest immediately,
+  // since the answer is already known rather than discovered.
+  productType ProductType @default(EXISTING)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  // Soft delete — only reachable when no PreProduction exists against this item
   // (see the route's own guard); a real production history is never at
   // risk of being hidden this way.
   deletedAt       DateTime?
   deletedById     String?
 
-  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  batches       Batch[]
+  purchaseOrder  PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  preProduction  PreProduction?
   // Optional read-only cross-links into the planning modules — see
   // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
-  bomPlans      BomPlan[]
-  rmPlans       RmPlan[]
-  deletedBy     User?         @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
+  bomPlans       BomPlan[]
+  rmPlans        RmPlan[]
+  recipeRequests RecipeRequest[]
+  deletedBy      User?           @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("purchase_order_items")
 }
@@ -350,52 +436,104 @@ model PurchaseOrderItem {
 // QC checkpoint and no billing checkpoint before Indent Issue anymore.
 // Production Plan's two fields (unit, dispatchPlanDate) move onto Indent
 // Issue below, since PPIC already owned both stages.
-enum BatchStageId {
-  PO_RELEASE // Purchase
+// ---------------------------------------------------------------------------
+// The three-tier pipeline (2026-09-10 rework) — per the client's own
+// walkthrough of how manufacturing actually works: material is received
+// and dispensed ONCE against a PO line item (there's no "batch" yet at
+// that point); manufacturing itself then happens in however many smaller
+// production runs the plant's own equipment capacity requires (e.g. a
+// 1000 Kg order run as five 200 Kg runs); those runs' bulk output is
+// pooled back together automatically as each one finishes; and
+// everything from IPQC onward — testing, packaging, billing, dispatch —
+// happens exactly once, against that one pooled/combined lot, not once
+// per small production run.
+//
+// Three models carry this, replacing the old single 13-stage Batch:
+//   PreProduction  — one per PO line item. Material Received -> Indent
+//                    Issue -> Line Clearance -> Dispensing -> Sample QC
+//                    Approval. Tracks plannedQty vs combinedQty (the
+//                    running total of every ProductionBatch that's
+//                    finished manufacturing so far).
+//   ProductionBatch — many per PreProduction. Just the manufacturing run
+//                    itself (Production Execution's own fields) — no
+//                    stage pipeline of its own, just IN_PROGRESS ->
+//                    COMPLETED. Completing one auto-adds its outputQty to
+//                    the parent PreProduction's combinedQty.
+//   CombinedLot    — one per PreProduction, created once combinedQty
+//                    reaches plannedQty (every planned production run has
+//                    finished and pooled in). IPQC -> QA Gate Mfg -> Bulk
+//                    QC -> Packaging -> QA Gate Packaging -> Billing &
+//                    E-Way Bill -> Dispatch Plan — the old Batch's
+//                    remaining 7 stages, unchanged in shape, just moved
+//                    to their own model since they're PO-item-level now,
+//                    not per-small-production-run.
+// ---------------------------------------------------------------------------
+
+enum PreProductionStageId {
   MATERIAL_RECEIVED // Store — covers both material receipt and GRN, same department back-to-back
   INDENT_ISSUE // PPIC — also carries former Production Plan fields (unit, dispatch plan date)
+  LINE_CLEARANCE // QA_QC — line clearance for the dispensing area, before Dispensing starts
   DISPENSING // Store — RM/PM dispensing & issue to Production
-  PRODUCTION_EXECUTION // Production
-  QA_GATE_MFG // QA_QC — post-manufacturing gate ("after approval of Quality, bulk is transferred to packing area")
-  PACKAGING // Production
-  QA_GATE_PACKAGING // QA_QC — post-packaging gate
-  BILLING_EWAY_BILL // Accounts
-  DISPATCH_PLAN // Dispatch — terminal
+  // Pre-production hard gate: a sample of what Dispensing just measured
+  // out goes to QC (see QcSampleTransfer/QcSampleTransaction below,
+  // same sent->confirm->consume shape as RndTransfer/RndStoreTransaction)
+  // and no ProductionBatch can be created until QC actually Approves it
+  // here — not just "not on Hold" like the two QA gates further down,
+  // a real Approved is required (see transition.ts).
+  SAMPLE_QC_APPROVAL // QA_QC
 }
 
-// One production batch against one PO line item, walking through the
-// stages above in order. Every section below is nullable and owned by the
+// One pre-production run per PO line item — the material-readiness half
+// of the old Batch pipeline, now separated out because it happens once
+// regardless of how many smaller production runs manufacturing itself
+// gets split into. Every section below is nullable and owned by the
 // department whose stage it belongs to — enforced by the single
 // PATCH /:id/stage endpoint, not one editable form.
-model Batch {
-  id                  String       @id @default(uuid())
-  purchaseOrderItemId String
-  batchNo             String?
-  currentStageId      BatchStageId @default(PO_RELEASE)
+model PreProduction {
+  id                  String               @id @default(uuid())
+  purchaseOrderItemId String               @unique
+  currentStageId      PreProductionStageId @default(MATERIAL_RECEIVED)
 
-  // Which physical production Plant this batch runs at — set by PPIC,
-  // usually at creation. Optional (existing batches predate this field),
-  // but required before Dispensing can log real RM/PM consumption
-  // against it (see BatchMaterialConsumption below and
-  // stock.ts getOnHandByPlantAndItem) — a consumption line has to
-  // reduce *some* plant's balance, and there's no sane default.
+  // How much of the PO item's own ordered quantity this pre-production
+  // run is for — normally the item's full quantity (one pre-production
+  // run per item). combinedQty is the running total of every
+  // ProductionBatch's outputQty once it completes manufacturing — see
+  // ProductionBatch.status below; a CombinedLot can only be created once
+  // combinedQty reaches plannedQty.
+  plannedQty  Float
+  combinedQty Float @default(0)
+
+  // Which physical production Plant this run's material is dispensed
+  // at — set by PPIC, usually at creation. Required before Dispensing
+  // can log real RM/PM consumption against it (see
+  // BatchMaterialConsumption below and stock.ts getOnHandByPlantAndItem)
+  // — a consumption line has to reduce *some* plant's balance, and
+  // there's no sane default.
   plantId String?
 
-  // PPIC — Indent Issue + Production Plan stages
+  // Material Received & GRN — Store.
+  grnNo                   String?
+  grnDate                 DateTime?
+  materialReceivedRemarks String?
+  // Optional traceability tag to the real Warehouse GRN — an
+  // InventoryTransaction(type: RECEIVED) — that this run's material
+  // actually arrived on. A manual link Store can set when they know it,
+  // not derived or enforced (a delivery can predate this row, or feed
+  // more than one PO item), so grnNo/grnDate above stay independently
+  // editable either way.
+  sourceReceiptId         String?
+
+  // PPIC — Indent Issue + former Production Plan stage
   prodIndentSlipSign String?
   productionPlanDate DateTime?
   unit               String? // manufacturing unit code, e.g. 22/41/48/59
   dispatchPlanDate   DateTime?
 
-  // PO Release — Purchase
-  rmPoDate       DateTime?
-  rmExpectedDate DateTime?
-  rmStatus       String? // Available | Partial Available
-  rmRemarks      String?
-  pmPoDate       DateTime?
-  pmExpectedDate DateTime?
-  pmStatus       String?
-  pmRemarks      String?
+  // Line Clearance — QA_QC. A hard gate: must literally read "Approved"
+  // to let FORWARD advance past it (see transition.ts) — Hold and Not
+  // Approved both keep this row here.
+  lineClearanceStatus  String? // Approved | Not Approved | Hold
+  lineClearanceRemarks String?
 
   // Dispensing — Store
   rmDispensingDate    DateTime?
@@ -403,27 +541,148 @@ model Batch {
   pmIssuedDate        DateTime?
   pmDispensingRemarks String?
 
-  // Production Execution
+  // Sample QC Approval — QA_QC. The stage's own sign-off fields, same
+  // "status + remarks" shape every other gate uses — the actual sample
+  // handoff/testing detail lives in QcSampleTransfer/QcSampleTransaction
+  // below, this is just the gate itself. Same hard-gate shape as
+  // lineClearanceStatus above.
+  sampleQcStatus  String? // Approved | Not Approved | Hold
+  sampleQcRemarks String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  purchaseOrderItem    PurchaseOrderItem          @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+  stageEvents          PreProductionStageEvent[]
+  plant                Plant?                     @relation(fields: [plantId], references: [id])
+  consumptions         BatchMaterialConsumption[]
+  indentRequests       InventoryRequest[]
+  sourceReceipt        InventoryTransaction?      @relation("PreProductionMaterialReceipt", fields: [sourceReceiptId], references: [id])
+  qcSampleTransfers    QcSampleTransfer[]
+  qcSampleTransactions QcSampleTransaction[]
+  recycleWasteTxns     InventoryTransaction[]     @relation("PreProductionRecycleWaste")
+  checklistItems       PreProductionChecklistItem[]
+  productionBatches    ProductionBatch[]
+  combinedLot          CombinedLot?
+
+  @@index([plantId])
+  @@index([sourceReceiptId])
+  @@map("pre_productions")
+}
+
+enum ProductionBatchStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+// One small manufacturing run against a PreProduction — just Production
+// Execution's own fields, nothing else; the pipeline stages before and
+// after this all live on PreProduction/CombinedLot instead, since they
+// happen once per PO item, not once per production run. plannedQty is
+// how much of PreProduction.plannedQty this specific run covers (see
+// batches.routes.ts POST / — the "how much left to plan" rollup the old
+// per-PO-item version of this already had, now scoped to the parent
+// PreProduction instead). Completing one (status -> COMPLETED) is what
+// actually adds outputQty to PreProduction.combinedQty — see
+// transition.ts's own combine logic.
+model ProductionBatch {
+  id              String                 @id @default(uuid())
+  preProductionId String
+  batchNo         String?
+  plannedQty      Float
+  status          ProductionBatchStatus  @default(IN_PROGRESS)
+
   manufacturingStartDate DateTime?
   manufacturingStatus    String?
   manufacturingEndDate   DateTime?
   manufacturingRemarks   String?
-  // Wastage — mechanical/process loss (e.g. sieving loss), Production's
-  // own entry. wastageQty is derived (inputQty - outputQty), never
-  // stored — see computeWastage in batch.engine.ts. Distinct from
-  // mfgRejectedQty below: this is material lost to the process itself,
-  // not a quality call.
-  inputQty               Float?
-  outputQty              Float?
+  // Wastage — mechanical/process loss (e.g. sieving loss). wastageQty is
+  // derived (inputQty - outputQty), never stored — see computeWastage in
+  // batch.engine.ts.
+  inputQty  Float?
+  outputQty Float?
 
-  // QA Gate — Manufacturing (includes "Hold")
+  completedById String?
+  completedAt   DateTime?
+
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  preProduction PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+  createdBy     User          @relation("ProductionBatchCreatedBy", fields: [createdById], references: [id])
+  completedBy   User?         @relation("ProductionBatchCompletedBy", fields: [completedById], references: [id])
+
+  @@index([preProductionId])
+  @@map("production_batches")
+}
+
+enum CombinedLotStageId {
+  IPQC // QA_QC — in-process QA, during/after manufacturing
+  QA_GATE_MFG // QA_QC — post-manufacturing gate ("after approval of Quality, bulk is transferred to packing area")
+  BULK_QC // QA_QC — bulk QC sampling & testing, before Packaging
+  PACKAGING // Production
+  QA_GATE_PACKAGING // QA_QC — post-packaging gate
+  BILLING_EWAY_BILL // Accounts
+  DISPATCH_PLAN // Dispatch — terminal
+}
+
+// The pooled lot every one of a PreProduction's ProductionBatches
+// combines into — created once combinedQty reaches plannedQty (see
+// transition.ts). Everything from here on (testing, packaging, billing,
+// dispatch) happens exactly once against the whole combined quantity,
+// same field shapes as the old single-Batch pipeline's back half.
+model CombinedLot {
+  id              String             @id @default(uuid())
+  preProductionId String             @unique
+  currentStageId  CombinedLotStageId @default(IPQC)
+
+  // Bulk Reconciliation — BMR-1.docx "8.0 BULK RECONCILATION". A
+  // distinct, more formal calculation from ProductionBatch's own simple
+  // in/out wastage (see computeBulkReconciliation in batch.engine.ts):
+  // the client's real yield formula, {(b+c)/a×100}%, weighs the finished
+  // *combined* bulk (b) and the QC sample pulled from it (c) against what
+  // the formulation predicted for the whole PreProduction (a) — done once
+  // on the pooled lot, not once per small production run.
+  bulkTheoreticalWeight    Float? // (a) Theoretical Weight of Bulk
+  bulkActualWeight         Float? // (b) Actual Weight of Bulk
+  bulkQcSampleWeight       Float? // (c) QC Sample
+  bulkTransferToPackingQty Float?
+
+  // IPQC — QA_QC. Hard gate, same shape as PreProduction's own gates.
+  ipqcStatus  String? // Approved | Not Approved | Hold
+  ipqcRemarks String?
+
+  // QA Gate — Manufacturing (includes "Hold"). approvedQty is what
+  // clears QC and moves on to Packaging; rejectedQty is held for
+  // disposition (a quality call — quarantined, not necessarily
+  // destroyed); wastageQty is the beyond-recovery portion, logged to the
+  // Recycle Store's own ledger the moment this gate actually clears (see
+  // BatchRecycleLog below and transition.ts).
   mfgQaStatus    String? // Approved | Not Approved | Hold
   mfgQcStatus    String?
   mfgRemarks     String?
-  // Quality rejection — QC's own entry, independent of wastage above
-  // (same input, two separate numbers, per the business rule: never
-  // derive one from the other).
+  mfgApprovedQty Float?
   mfgRejectedQty Float?
+  mfgWastageQty  Float?
+
+  // Bulk QC — QA_QC. Same hard-gate shape as ipqcStatus.
+  bulkQcStatus  String? // Approved | Not Approved | Hold
+  bulkQcRemarks String?
+
+  // Certificate of Analysis — matches "COA format.docx": a per-lot list
+  // of test parameters (BatchCoaTestResult below, since which tests
+  // apply varies by product) plus the doc's own final verdict and three
+  // sequential sign-offs (Analyzed -> Reviewed -> Approved), each
+  // settable once, in that order — see the coa/sign route.
+  coaResult       String? // Complies | Does Not Comply
+  coaRemark       String?
+  coaAnalyzedById String?
+  coaAnalyzedAt   DateTime?
+  coaReviewedById String?
+  coaReviewedAt   DateTime?
+  coaApprovedById String?
+  coaApprovedAt   DateTime?
 
   // Packaging
   packagingStartDate DateTime?
@@ -431,31 +690,51 @@ model Batch {
   packagingEndDate   DateTime?
   packagingRemarks   String?
 
-  // QA Gate — Packaging (narrower option list, no "Hold")
-  packQaStatus String? // Approved | Not approved
-  packQcStatus String?
-  packRemarks  String?
+  // QA Gate — Packaging (includes "Hold") — same Approved/Rejected/
+  // Wastage split as QA Gate Mfg.
+  packQaStatus    String? // Approved | Not approved | Hold
+  packQcStatus    String?
+  packRemarks     String?
+  packApprovedQty Float?
+  packRejectedQty Float?
+  packWastageQty  Float?
+
+  // Billing & E-Way Bill — Accounts.
+  invoiceNo      String?
+  invoiceDate    DateTime?
+  ewayBillNo     String?
+  ewayBillDate   DateTime?
+  billingRemarks String?
 
   // Dispatch Plan
-  dispatchDate         DateTime?
-  dispatchedQty        Float?
-  shipperQty           Float?
-  totalShipperWeight   Float?
-  transportType        String? // By Land | By Courier | By Air
-  remainingQty         Float?
-  customerConfirmation String? // Received | Not Received
-  anyRemarks           String?
+  dispatchDate       DateTime?
+  dispatchedQty      Float?
+  shipperQty         Float?
+  totalShipperWeight Float?
+  transportType      String? // By Land | By Courier | By Air
+  remainingQty       Float?
+  anyRemarks         String?
+
+  // Optional traceability tag to the real FG shipment + invoice record —
+  // a DispatchTransfer(type: FG) — settable from either Billing or
+  // Dispatch Plan since one DispatchTransfer row covers both.
+  dispatchTransferId String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  purchaseOrderItem PurchaseOrderItem          @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
-  stageEvents       BatchStageEvent[]
-  plant             Plant?                     @relation(fields: [plantId], references: [id])
-  consumptions      BatchMaterialConsumption[]
+  preProduction    PreProduction           @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+  stageEvents      CombinedLotStageEvent[]
+  dispatchTransfer DispatchTransfer?       @relation("CombinedLotDispatchTransfer", fields: [dispatchTransferId], references: [id])
+  recycleLogs      BatchRecycleLog[]
+  checklistItems   CombinedLotChecklistItem[]
+  coaResults       BatchCoaTestResult[]
+  coaAnalyzedBy    User?                   @relation("CombinedLotCoaAnalyzedBy", fields: [coaAnalyzedById], references: [id])
+  coaReviewedBy    User?                   @relation("CombinedLotCoaReviewedBy", fields: [coaReviewedById], references: [id])
+  coaApprovedBy    User?                   @relation("CombinedLotCoaApprovedBy", fields: [coaApprovedById], references: [id])
 
-  @@index([plantId])
-  @@map("batches")
+  @@index([dispatchTransferId])
+  @@map("combined_lots")
 }
 
 // One line per RM/PM item actually dispensed to a batch — logged by
@@ -466,49 +745,313 @@ model Batch {
 // these rows' quantity actually consumed there. Never edited/deleted —
 // same "it's a ledger entry, not a form field" reasoning as
 // InventoryTransaction.
+// The 3-way split the client asked for: of what Store actually dispensed,
+// how much went into the real batch vs was pulled aside as a QC sample
+// vs was lost right at dispensing time (weighing/handling spillage).
+// Defaults to PRODUCTION so every existing row (and any caller that
+// doesn't set it) keeps today's meaning unchanged. The formulation-
+// requirement gate in transition.ts (getRequiredDispensingItems) only
+// counts PRODUCTION rows — a sample or a spill was never really "used
+// in the batch", so it shouldn't count toward that requirement.
+enum BatchConsumptionPurpose {
+  PRODUCTION
+  SAMPLE
+  WASTE
+}
+
 model BatchMaterialConsumption {
-  id          String   @id @default(uuid())
-  batchId     String
-  itemId      String
-  quantity    Float
-  unit        String
+  id              String                  @id @default(uuid())
+  preProductionId String
+  itemId          String
+  quantity        Float
+  unit            String
+  purpose         BatchConsumptionPurpose @default(PRODUCTION)
+  createdById     String
+  createdAt       DateTime                @default(now())
+
+  // The Dispensing Sheet's own weighing fields (BMR-1.docx, "3.0
+  // DISPENSING SHEET OF RAW MATERIAL") — all optional, same carve-out as
+  // the rest of Dispensing: a line can still be logged with just
+  // quantity/unit, same as before these existed. Net weight is derived
+  // (gross - tare), never stored — same "computed, not entered" rule as
+  // ProductionBatch's own wastageQty.
+  grossWeight Float?
+  tareWeight  Float?
+  arNo        String? // Analytical Reference number, per the doc
+
+  // QA's own sign-off per line ("Verified By (QA)" on the paper form) —
+  // separate from the SAMPLE_QC_APPROVAL gate further down the pipeline,
+  // this is QC confirming the *weighing itself* was done correctly.
+  // Append-only: once verified, never unset (same "a ledger entry, not a
+  // form field" rule as the rest of this table).
+  qaVerifiedById String?
+  qaVerifiedAt   DateTime?
+
+  preProduction PreProduction @relation(fields: [preProductionId], references: [id])
+  item          InventoryItem @relation(fields: [itemId], references: [id])
+  createdBy     User          @relation(fields: [createdById], references: [id])
+  qaVerifiedBy  User?         @relation("BatchMaterialConsumptionQaVerifiedBy", fields: [qaVerifiedById], references: [id])
+
+  @@index([preProductionId])
+  @@index([itemId])
+  @@map("batch_material_consumptions")
+}
+
+// ---------------------------------------------------------------------------
+// QC Sample — the pre-production hard gate the client asked for, built
+// the same shape as the R&D sample lifecycle above (RndTransfer /
+// RndStoreTransaction): Production sends a sample of what Dispensing just
+// measured out, QC confirms receipt, then tests it and logs the result.
+// Unlike R&D, this is scoped to one PreProduction run (not a general item
+// ledger) — every row here is "this run's sample," never mixed across
+// runs — and there's no DISPATCHED-to-customer or FORMULATION_TRIAL leg;
+// a QC sample either gets used up in testing, wasted in the process, or
+// fails (rejected), and any leftover goes back to the Plant.
+// SAMPLE_QC_APPROVAL itself (the actual gate blocking a ProductionBatch
+// from being created) reads PreProduction.sampleQcStatus, not this table
+// directly — that field is the simple "status + remarks" every other
+// stage already uses; this table is the detailed how/when/how-much trail
+// behind that one decision.
+// ---------------------------------------------------------------------------
+
+enum QcSampleDirection {
+  TO_QC
+  TO_PLANT
+}
+
+// Step 1 / Step 4 — Production sends a sample to QC, or QC sends
+// leftover back to the Plant. `direction` picks which; the sending
+// side's own Plant-stock effect (ISSUED_PRODUCTION-style, see
+// qc-sample.routes.ts) lands immediately, the other side's own count
+// only once they confirm — same reasoning as RndTransfer.
+model QcSampleTransfer {
+  id              String            @id @default(uuid())
+  preProductionId String
+  direction       QcSampleDirection
+  itemId          String
+  quantity        Float
+  unit            String
+  note            String?
+
+  sentById String
+  sentAt   DateTime @default(now())
+
+  // Null = still pending the other side's confirmation — same "is this
+  // still in transit" shape as RndTransfer.confirmedAt.
+  confirmedById String?
+  confirmedAt   DateTime?
+
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
+
+  preProduction PreProduction        @relation(fields: [preProductionId], references: [id])
+  item          InventoryItem        @relation(fields: [itemId], references: [id])
+  sentBy        User                 @relation("QcSampleTransferSentBy", fields: [sentById], references: [id])
+  confirmedBy   User?                @relation("QcSampleTransferConfirmedBy", fields: [confirmedById], references: [id])
+  deletedBy     User?                @relation("QcSampleTransferDeletedBy", fields: [deletedById], references: [id])
+  transaction   QcSampleTransaction?
+
+  @@index([preProductionId])
+  @@map("qc_sample_transfers")
+}
+
+// Reporting split for CONSUMED rows — mirrors RndConsumeReason, minus
+// FORMULATION_TRIAL (not applicable here — this is testing an existing
+// product's dispensed material, not developing a new one).
+enum QcSampleConsumeReason {
+  TESTING
+  WASTAGE
+  REJECTED
+}
+
+enum QcSampleTxnType {
+  INBOUND // confirmed receipt from Production (step 2)
+  CONSUMED // used in testing — testing/wastage/rejected (step 3)
+  RETURNED // sent back to the Plant (step 4)
+}
+
+model QcSampleTransaction {
+  id            String                 @id @default(uuid())
+  preProductionId String
+  itemId        String
+  type          QcSampleTxnType
+  quantity      Float
+  unit          String
+  consumeReason QcSampleConsumeReason? // CONSUMED only
+  note          String?
+
+  // Set only on INBOUND/RETURNED rows created by confirming a
+  // QcSampleTransfer — links this leg back to the Plant-side leg of the
+  // same physical movement. Null for CONSUMED, which has no Plant-side
+  // counterpart at all.
+  transferId String? @unique
+
   createdById String
   createdAt   DateTime @default(now())
 
-  batch     Batch         @relation(fields: [batchId], references: [id])
-  item      InventoryItem @relation(fields: [itemId], references: [id])
-  createdBy User          @relation(fields: [createdById], references: [id])
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
 
-  @@index([batchId])
+  preProduction PreProduction     @relation(fields: [preProductionId], references: [id])
+  item          InventoryItem     @relation(fields: [itemId], references: [id])
+  transfer      QcSampleTransfer? @relation(fields: [transferId], references: [id])
+  createdBy     User              @relation(fields: [createdById], references: [id])
+  deletedBy     User?             @relation("QcSampleTransactionDeletedBy", fields: [deletedById], references: [id])
+
+  @@index([preProductionId])
   @@index([itemId])
-  @@map("batch_material_consumptions")
+  @@map("qc_sample_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Phase F — the QA gates' Wastage bucket, routed to the Recycle Store.
+// Unlike Dispensing's WASTE-purpose consumption (real RM/PM leaving a
+// Plant, InventoryItem-backed — see InventoryTxnType.ISSUED_RECYCLE),
+// what a QA gate wastes is the combined lot's own in-process/finished
+// product — bulk or packed output, not a catalog item — so it has no
+// InventoryItem to hang an InventoryTransaction off. This is that same
+// "permanent sink" concept, just for lot-level output instead of raw
+// material: one row per gate-clearing event that actually had a
+// wastageQty logged (see transition.ts), never edited/deleted, same
+// "it's a ledger entry" reasoning as everywhere else in this schema.
+// Aggregated together with the real ISSUED_RECYCLE rows wherever a "how
+// much has this company wasted, ever" number is shown (see
+// recycle-store.routes.ts).
+// ---------------------------------------------------------------------------
+
+enum QaGateStageId {
+  QA_GATE_MFG
+  QA_GATE_PACKAGING
+}
+
+model BatchRecycleLog {
+  id            String        @id @default(uuid())
+  combinedLotId String
+  stageId       QaGateStageId
+  quantity      Float
+  unit          String
+  note          String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  combinedLot CombinedLot @relation(fields: [combinedLotId], references: [id])
+  createdBy   User        @relation(fields: [createdById], references: [id])
+
+  @@index([combinedLotId])
+  @@map("batch_recycle_logs")
+}
+
+// The fixed Line Clearance checklist for the dispensing area (BMR-1.docx
+// 1.0) — Store's own column plus a QA column, one row per fixed checklist
+// item (see batch-checklists.ts). The overall gate (does this run
+// actually get to leave the stage) is still PreProduction's own
+// lineClearanceStatus field — this table is the itemized detail behind
+// that one QA sign-off, not a second gate.
+model PreProductionChecklistItem {
+  id              String  @id @default(uuid())
+  preProductionId String
+  itemKey         String
+
+  deptOk Boolean? // Store
+  qaOk   Boolean?
+
+  updatedAt DateTime @updatedAt
+
+  preProduction PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+
+  @@unique([preProductionId, itemKey])
+  @@map("pre_production_checklist_items")
+}
+
+// The fixed Line Clearance checklist for the bulk manufacturing area
+// (BMR-1.docx 4.0) — Production's own column plus a QA column, same
+// shape as PreProductionChecklistItem above, at the IPQC stage (per the
+// client's own placement call). Gate is CombinedLot.ipqcStatus.
+model CombinedLotChecklistItem {
+  id            String  @id @default(uuid())
+  combinedLotId String
+  itemKey       String
+
+  deptOk Boolean? // Production
+  qaOk   Boolean?
+
+  updatedAt DateTime @updatedAt
+
+  combinedLot CombinedLot @relation(fields: [combinedLotId], references: [id], onDelete: Cascade)
+
+  @@unique([combinedLotId, itemKey])
+  @@map("combined_lot_checklist_items")
+}
+
+// One row per test parameter on the Certificate of Analysis — matches
+// "COA format.docx" (S.No / Test Parameters / Observations /
+// Specification). Which tests apply varies by product, so this is a real
+// editable list, not a constant from batch-checklists.ts — QA types in
+// whatever this lot's product actually needs tested (Description,
+// Moisture, Sieve Test, pH, ...) with its spec and the observed result.
+// sortOrder keeps them in the order QA entered them, matching the paper
+// form's S.No column.
+model BatchCoaTestResult {
+  id            String  @id @default(uuid())
+  combinedLotId String
+  testName      String
+  specification String?
+  observation   String?
+  sortOrder     Int     @default(0)
+
+  combinedLot CombinedLot @relation(fields: [combinedLotId], references: [id], onDelete: Cascade)
+
+  @@index([combinedLotId])
+  @@map("batch_coa_test_results")
 }
 
 enum BatchStageAction {
   FORWARD
   REJECT
-  JUMP // Admin-only override — moves a batch straight to any stage, bypassing the normal forward/reject sequence
+  JUMP // Admin-only override — moves a run straight to any stage, bypassing the normal forward/reject sequence
 }
 
-// The persistent, append-only audit trail for every stage transition —
-// who moved it, from where to where, forward or sent back, and why (a
-// note is required on reject, matching the real "if not correct, send it
-// back" business rule). Replaces MpsStepEvent.
-model BatchStageEvent {
-  id          String           @id @default(uuid())
-  batchId     String
-  fromStageId BatchStageId
-  toStageId   BatchStageId
-  action      BatchStageAction
-  note        String?
-  actorId     String
-  createdAt   DateTime         @default(now())
+// The persistent, append-only audit trail for every PreProduction stage
+// transition — who moved it, from where to where, forward or sent back,
+// and why (a note is required on reject, matching the real "if not
+// correct, send it back" business rule).
+model PreProductionStageEvent {
+  id              String               @id @default(uuid())
+  preProductionId String
+  fromStageId     PreProductionStageId
+  toStageId       PreProductionStageId
+  action          BatchStageAction
+  note            String?
+  actorId         String
+  createdAt       DateTime             @default(now())
 
-  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
-  actor User  @relation(fields: [actorId], references: [id])
+  preProduction PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+  actor         User          @relation("PreProductionStageEventActor", fields: [actorId], references: [id])
 
-  @@index([batchId])
-  @@map("batch_stage_events")
+  @@index([preProductionId])
+  @@map("pre_production_stage_events")
+}
+
+// Same shape as PreProductionStageEvent, for a CombinedLot's own 7-stage
+// walk (IPQC through Dispatch Plan).
+model CombinedLotStageEvent {
+  id            String              @id @default(uuid())
+  combinedLotId String
+  fromStageId   CombinedLotStageId
+  toStageId     CombinedLotStageId
+  action        BatchStageAction
+  note          String?
+  actorId       String
+  createdAt     DateTime            @default(now())
+
+  combinedLot CombinedLot @relation(fields: [combinedLotId], references: [id], onDelete: Cascade)
+  actor       User        @relation("CombinedLotStageEventActor", fields: [actorId], references: [id])
+
+  @@index([combinedLotId])
+  @@map("combined_lot_stage_events")
 }
 
 // ---------------------------------------------------------------------------
@@ -518,23 +1061,19 @@ model BatchStageEvent {
 // existing, working calculator being carried into the new stack.
 // ---------------------------------------------------------------------------
 
-// One brand = one "sheet" in the old uploaded workbook this replaces.
-model Brand {
-  id        String   @id @default(uuid())
-  name      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  skus Sku[]
-
-  @@map("brands")
-}
-
 // One packaging-spec row per SKU. Field names mirror the source
 // spreadsheet columns 1:1 so the BOM engine logic ports unchanged.
+//
+// There used to be a separate Brand model here — one "sheet" in the old
+// uploaded workbook this replaces. In the real business, a Brand and the
+// Customer placing the PO are almost always the exact same company —
+// carrying them as two separate records was the actual source of the
+// spelling-mismatch bugs (a Customer typed one way on a PO, the "same"
+// thing saved a little differently as a Brand), not a real distinction
+// worth keeping. Sku now hangs directly off Customer instead.
 model Sku {
   id          String @id @default(uuid())
-  brandId     String
+  customerId  String
   productName String
 
   jar                   String?
@@ -560,11 +1099,42 @@ model Sku {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  brand     Brand         @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  customer  Customer      @relation(fields: [customerId], references: [id])
   planItems BomPlanItem[]
+  // The real per-product packaging BOM — a list, not the fixed set of
+  // fields above. Added because the real PM SHEET has 21 possible
+  // packaging types (Sachet, Tin Jar, Laminate, Zip Pouch, Monocarton,
+  // Poly Bag, a generic Cap/Label, two simultaneous Silica sizes, ...)
+  // that the flat fields above can't represent — a product needing both
+  // "Silica 5gm" and "Silica 2gm" at once has nowhere to put the second
+  // one in a single silicaGelGms field. This lives alongside the fields
+  // above rather than replacing them — the 826 SKUs already imported
+  // from Packaging Material keep working unchanged; this is where new
+  // packaging composition gets recorded going forward.
+  packagingComponents SkuPackagingComponent[]
 
-  @@unique([brandId, productName])
+  @@unique([customerId, productName])
   @@map("skus")
+}
+
+// One row per packaging component a Sku actually uses — the real BOM
+// checklist (Jar, Cap, Wad, Silica 5gm, Silica 2gm, ...), R&D-authored
+// the same way the rest of the catalog is. `type` is free text, not an
+// enum — the real PM SHEET's 21 known types are a starting checklist in
+// the UI, not a closed set (a new packaging type showing up later is a
+// new row here, not a schema migration).
+model SkuPackagingComponent {
+  id       String  @id @default(uuid())
+  skuId    String
+  type     String // e.g. "Jar", "Cap", "Silica 5gm" — matches PM SHEET's ITEM NAME( FIELDS)
+  quantity Float? // per finished unit — nullable since a newly-ticked type may not have a quantity yet
+  unit     String @default("Nos") // matches PM SHEET's UNIT column (Nos, KG, ...)
+  pmCode   String? // matches PM SHEET's PM CODE column, when known
+
+  sku Sku @relation(fields: [skuId], references: [id], onDelete: Cascade)
+
+  @@unique([skuId, type])
+  @@map("sku_packaging_components")
 }
 
 enum BomPlanStatus {
@@ -589,6 +1159,15 @@ model BomPlan {
   // changes afterwards.
   resultSnapshot Json?
   calculatedAt   DateTime?
+
+  // Set once "Send to Pre-Inventory" succeeds, cleared again the next
+  // time this plan is recalculated (see POST /calculate) — repeat-
+  // pressing Send with no unique constraint on PreInventoryRequirement
+  // would otherwise pile up an identical duplicate row per press, every
+  // press indistinguishable in the list from a genuinely new ask. A
+  // recalculation (new items, changed catalog) is a real reason to send
+  // again; an accidental second click on the same result isn't.
+  sentToPreInventoryAt DateTime?
 
   // Optional link to the specific PO product this plan's packaging is
   // for — same "link, don't merge" shape as Batch.mpsCycleId: a plan can
@@ -693,6 +1272,10 @@ model RmPlan {
   resultSnapshot Json?
   calculatedAt   DateTime?
 
+  // Same "disable Send after a successful send, re-enable on
+  // recalculation" reasoning as BomPlan.sentToPreInventoryAt above.
+  sentToPreInventoryAt DateTime?
+
   // Optional link to the specific PO product this plan's formulation
   // costing is for — same shape as BomPlan.purchaseOrderItemId above.
   purchaseOrderItemId String?
@@ -720,6 +1303,61 @@ model RmPlanItem {
   deletedBy User?  @relation("RmPlanItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("rm_plan_items")
+}
+
+enum RecipeRequestStatus {
+  PENDING // PPIC just raised it — R&D hasn't responded yet
+  ETA_GIVEN // R&D has committed to a date, still working on it
+  READY // the missing catalog piece(s) now exist — PPIC can Generate again
+}
+
+// PPIC's "we don't have a Recipe/SKU for this product yet" request to
+// R&D — raised explicitly (PPIC's own call, not automatic the moment
+// Generate finds no match), one combined request per PO product even
+// when BOTH the BOM catalog (Sku) and the RM Costing catalog (Recipe)
+// are missing, since it's the same underlying "this product's
+// formulation doesn't exist yet" gap. R&D owns Import Catalog / Import
+// Recipes now (moved off PPIC's Packaging BOM / RM Costing pages) —
+// uploading a matching Sku/Recipe is how a request actually gets
+// fulfilled, not a separate manual "mark ready" step (see
+// catalog.routes.ts / recipe-catalog.routes.ts's post-import check).
+// While unresolved, this PO item's Batch can't be created — see
+// batches.routes.ts's own guard — a production run can't start without
+// knowing what it's making.
+model RecipeRequest {
+  id                  String  @id @default(uuid())
+  purchaseOrderItemId String
+  productName         String // denormalized off the PO item at request time
+  customerName        String? // denormalized display only — matching itself uses the PO's real customerId
+
+  bomNeeded Boolean // Packaging BOM had no matching Sku when requested
+  rmNeeded  Boolean // RM Costing had no matching Recipe when requested
+
+  // Set independently as each missing piece actually shows up in the
+  // catalog — a request needing both isn't READY until both are.
+  bomFulfilledAt DateTime?
+  rmFulfilledAt  DateTime?
+
+  status RecipeRequestStatus @default(PENDING)
+
+  requestedById String
+  requestedAt   DateTime @default(now())
+
+  // R&D's commitment — set once, editable again if the date slips.
+  etaDate       DateTime?
+  etaNote       String?
+  respondedById String?
+  respondedAt   DateTime?
+
+  readyAt DateTime?
+
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+  requestedBy       User              @relation("RecipeRequestRequestedBy", fields: [requestedById], references: [id])
+  respondedBy       User?             @relation("RecipeRequestRespondedBy", fields: [respondedById], references: [id])
+
+  @@index([purchaseOrderItemId])
+  @@index([status])
+  @@map("recipe_requests")
 }
 
 // Phase 6's separate MPS GMP pipeline module (MpsCycle/MpsStepEvent/
@@ -761,14 +1399,32 @@ enum InventoryTxnType {
   RECEIVED
   ISSUED_DAY_STORE
   ISSUED_PRODUCTION
+  // Warehouse -> R&D Store, Step 1 of the R&D sample lifecycle — see the
+  // RndTransfer/RndStoreTransaction comment block near the bottom of this
+  // file. Counted as an outflow in stock.ts's Warehouse on-hand formula,
+  // same as the two ISSUED_* types above.
+  ISSUED_RND
+  // Plant -> Recycle Store — a Dispensing-time spill (see
+  // BatchMaterialConsumption.purpose = WASTE) or a QA Gate rejection
+  // marked as unrecoverable waste, not held for rework. Deliberately
+  // simpler than R&D's full transfer/confirm lifecycle: Recycle Store is
+  // a one-way sink, not a place anything comes back from, so a plain
+  // ISSUED_* leg (same shape as ISSUED_DAY_STORE/ISSUED_PRODUCTION) is
+  // enough — its own "on hand" is just the running sum of this type, no
+  // separate ledger table needed. batchId (below) traces it back to
+  // whichever batch produced it, for the PO-level reconciliation.
+  ISSUED_RECYCLE
 }
 
 // Inward QC gate on a RECEIVED row — meaningless for ISSUED_* rows
-// (null there). QC_REJECTED is terminal; ACCEPTED is the only state that
-// counts toward receivedQty in the stock formula, so a delivery sitting
-// in QC or rejected doesn't inflate on-hand stock.
+// (null there). ON_HOLD is a parked, non-terminal state (QC can come back
+// and move it to QC_APPROVED/QC_REJECTED later); QC_REJECTED is the only
+// terminal one. ACCEPTED is the only state that counts toward receivedQty
+// in the stock formula, so a delivery sitting in QC, on hold, or rejected
+// doesn't inflate on-hand stock.
 enum InventoryReceiptStatus {
   PENDING_QC
+  ON_HOLD
   QC_APPROVED
   QC_REJECTED
   ACCEPTED
@@ -779,6 +1435,37 @@ model InventoryItem {
   category  InventoryCategory
   name      String
   unit      String? // typical unit of measure, e.g. Kg / Ltr / Count
+  // The item master's own code (e.g. "RM00951"), when known — from the
+  // "SKU Namkaran" naming-reconciliation sheet: real code, plus the name
+  // Store types vs. what Lab calls it vs. the one standardized "Correct
+  // Name" this item's own `name` is seeded with (see
+  // inventory.schemas.ts's importItemMasterSchema). Optional and unique
+  // only when set — an item created ad hoc off some other module (a
+  // transaction, a request) never had a code to begin with, and stays
+  // that way until an Item Master import attaches one by exact name
+  // match.
+  code      String?           @unique
+  // A default suggestion only — from the same Item Master sheet's own
+  // "Make" column (the vendor Store/Lab currently associates with this
+  // item), unlike RecipeIngredient.brand which is a fixed part of an
+  // approved formulation. This never gates or replaces the real,
+  // per-delivery vendorName every InventoryTransaction already carries
+  // (a given RM/PM item can genuinely arrive from a different vendor
+  // next time) — it only pre-fills that field's starting value so Store
+  // doesn't retype the usual vendor on every entry.
+  preferredVendor String?
+
+  // Pricing/costing — matches the client's own stock-report format (the
+  // "RM PM Status" sheets: Cost Price, M.R.P., Purchase Price, Sales
+  // Price), which the ERP otherwise had no equivalent for at all — the
+  // rest of this app is purely operational (physical stock + workflow),
+  // no costing layer. Purchase/Accounts-only to edit; stripped out of
+  // GET /items responses for every other role — see inventory.routes.ts.
+  costPrice     Float?
+  mrp           Float?
+  purchasePrice Float?
+  salesPrice    Float?
+
   createdAt DateTime          @default(now())
   updatedAt DateTime          @updatedAt
 
@@ -787,6 +1474,12 @@ model InventoryItem {
   preInventoryRequirements PreInventoryRequirement[]
   batchConsumptions        BatchMaterialConsumption[]
   poMaterialRequirements   PoMaterialRequirement[]
+  rndTransfers             RndTransfer[]
+  rndStoreTransactions     RndStoreTransaction[]
+  rndSampleRequests        RndSampleRequest[]
+  debitNotes               DebitNote[]
+  qcSampleTransfers        QcSampleTransfer[]
+  qcSampleTransactions     QcSampleTransaction[]
 
   @@unique([category, name])
   @@map("inventory_items")
@@ -863,9 +1556,33 @@ model Plant {
   transactions      InventoryTransaction[]
   requests          InventoryRequest[]
   dispatchTransfers DispatchTransfer[]
-  batches           Batch[]
+  preProductions    PreProduction[]
 
   @@map("plants")
+}
+
+// One per InventoryCategory (RM/PM), not a growable list like Day Store/
+// Plant — `category @unique` caps this at exactly two rows, matching the
+// client's actual layout: an RM Warehouse and a PM Warehouse. Every
+// InventoryItem is already permanently RM or PM (InventoryItem.category),
+// so which Warehouse an item's stock belongs to is never stored anywhere
+// — it's derived by matching item.category to warehouse.category, the
+// same "soft link" a Plant or Day Store already has to a Warehouse (via
+// whatever item a transaction moves, never a stored parent/child FK). No
+// access restriction either — unlike DayStoreAssignment, there is no
+// WarehouseAssignment: any Store/PPIC user who can see Inventory can see
+// and act on both warehouses, same as today's plain category filter.
+// Rename only (no create/delete) — see warehouses.routes.ts.
+model Warehouse {
+  id          String            @id @default(uuid())
+  name        String            @unique
+  category    InventoryCategory @unique
+  createdById String
+  createdAt   DateTime          @default(now())
+
+  createdBy User @relation("WarehouseCreatedBy", fields: [createdById], references: [id])
+
+  @@map("warehouses")
 }
 
 // One requirement line — created by PPIC (S1). Step 2 ("what's already
@@ -951,16 +1668,24 @@ model InventoryRequest {
   // not need one.
   plantId String?
 
+  // Which PreProduction's Indent Issue stage raised this request, when it
+  // was — closes the gap where that stage used to just be a free-text
+  // sign-off, disconnected from this, the actual "which material goes to
+  // production" gate. Optional: a request can still be raised by hand
+  // with no run attached, same as before this field existed.
+  preProductionId String?
+
   // Soft delete — this is the "withdraw" action on a request Store hasn't
   // issued anything against yet.
   deletedAt   DateTime?
   deletedById String?
 
-  item         InventoryItem          @relation(fields: [itemId], references: [id])
-  requestedBy  User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
-  reviewedBy   User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
-  plant        Plant?                 @relation(fields: [plantId], references: [id])
-  deletedBy    User?                  @relation("InventoryRequestDeletedBy", fields: [deletedById], references: [id])
+  item          InventoryItem          @relation(fields: [itemId], references: [id])
+  requestedBy   User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy    User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
+  plant         Plant?                 @relation(fields: [plantId], references: [id])
+  preProduction PreProduction?         @relation(fields: [preProductionId], references: [id])
+  deletedBy     User?                  @relation("InventoryRequestDeletedBy", fields: [deletedById], references: [id])
   // One request can now be issued against more than once (partial
   // fulfillment) — issuedQty/remainingQty are derived by summing these,
   // never stored, same "never let a number drift out of sync" rule as
@@ -974,6 +1699,7 @@ model InventoryRequest {
   fgTransfers  DispatchTransfer[]
 
   @@index([status])
+  @@index([preProductionId])
   @@map("inventory_requests")
 }
 
@@ -1029,6 +1755,35 @@ model InventoryTransaction {
   // real vendor delivery later.
   isOpeningStock Boolean @default(false)
 
+  // Step 6 of the R&D sample lifecycle — leftover material Store confirms
+  // received back from the R&D Store. Same "skip the QC gate" shape as
+  // isOpeningStock above (receiptStatus goes straight to ACCEPTED at
+  // creation) for the same reason: this material never left the
+  // company's custody (Warehouse -> R&D -> back), it isn't a fresh
+  // vendor delivery to inspect. Kept as its own flag rather than folded
+  // into isOpeningStock so reports never conflate the two.
+  isRndReturn Boolean @default(false)
+
+  // Internal transit tracking — an ISSUED_DAY_STORE/ISSUED_PRODUCTION
+  // entry Store opts into a dispatch -> confirm gate, instead of it
+  // counting as arrived the instant it's logged. Generalizes the same
+  // sent/confirmed idea RndTransfer already uses for Warehouse <-> R&D,
+  // to Day Store/Plant destinations. isTransitTracked=false (default)
+  // keeps today's behavior exactly — deliveredAt is stamped at creation,
+  // same moment as createdAt, so nothing changes for routine same-day
+  // handoffs. isTransitTracked=true leaves deliveredAt null until the
+  // receiving side confirms: the item has already left the source (still
+  // excluded from its on-hand immediately, same subtraction as today —
+  // it physically left custody whether confirmed or not) but isn't added
+  // to the destination's on-hand until then (see stock.ts —
+  // getOnHandByDayStoreAndItem/getOnHandByPlantAndItem only count a row
+  // once deliveredAt is set). RECEIVED rows use the existing inward QC
+  // gate instead; ISSUED_RND rows use RndTransfer's own gate — neither
+  // sets this flag.
+  isTransitTracked Boolean   @default(false)
+  deliveredAt      DateTime?
+  deliveredById    String?
+
   // S6/S7 — which Day Store received an ISSUED_DAY_STORE row, and which
   // Plant received an ISSUED_PRODUCTION row (denormalized off the
   // fulfilled request, same reasoning as unit/size being per-entry
@@ -1036,6 +1791,10 @@ model InventoryTransaction {
   // second stock ledger; stock-on-hand math never reads these.
   dayStoreId String?
   plantId    String?
+  // ISSUED_RECYCLE only — which PreProduction run this waste came from
+  // (Dispensing's own WASTE-purpose leg), so a PO-level reconciliation
+  // can trace waste back to the run that produced it.
+  preProductionId String?
 
   // Traceability fields off Sanjay's physical stock sheets — batch/GRN
   // identify *which* delivery or lot this row is, mfg/expiry track shelf
@@ -1055,19 +1814,28 @@ model InventoryTransaction {
   deletedAt   DateTime?
   deletedById String?
 
-  item        InventoryItem @relation(fields: [itemId], references: [id])
-  createdBy   User          @relation(fields: [createdById], references: [id])
-  qcCheckedBy User?         @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
-  acceptedBy  User?         @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
-  dayStore    DayStore?     @relation(fields: [dayStoreId], references: [id])
-  plant       Plant?        @relation(fields: [plantId], references: [id])
-  deletedBy   User?         @relation("InventoryTransactionDeletedBy", fields: [deletedById], references: [id])
+  item                    InventoryItem   @relation(fields: [itemId], references: [id])
+  createdBy               User            @relation(fields: [createdById], references: [id])
+  qcCheckedBy             User?           @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
+  acceptedBy              User?           @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
+  deliveredBy             User?           @relation("InventoryTxnDeliveredBy", fields: [deliveredById], references: [id])
+  dayStore                DayStore?       @relation(fields: [dayStoreId], references: [id])
+  plant                   Plant?          @relation(fields: [plantId], references: [id])
+  preProduction           PreProduction?  @relation("PreProductionRecycleWaste", fields: [preProductionId], references: [id])
+  deletedBy               User?           @relation("InventoryTransactionDeletedBy", fields: [deletedById], references: [id])
+  // Back-relation for PreProduction.sourceReceiptId — see that field's comment.
+  receiptForPreProductions PreProduction[] @relation("PreProductionMaterialReceipt")
+  debitNotes              DebitNote[]
 
   @@index([itemId])
   @@index([type, date])
   @@index([receiptStatus])
   @@index([dayStoreId])
   @@index([plantId])
+  @@index([preProductionId])
+  // The open-transit list's own query — every tracked row still waiting
+  // on a delivery confirmation, oldest first.
+  @@index([isTransitTracked, deliveredAt])
   // Covers getOnHandByItemId's three groupBy calls (itemId in-filter +
   // type [+ receiptStatus for RECEIVED]) directly, instead of falling back
   // to the single-column itemId index and filtering the rest in a scan —
@@ -1075,6 +1843,226 @@ model InventoryTransaction {
   // "now available" check) runs, so it's the one worth a dedicated index.
   @@index([itemId, type, receiptStatus])
   @@map("inventory_transactions")
+}
+
+// Debit Note Issue — the ERP Diagram doc's reject branch off incoming QC
+// ("Approved/Rejected (QC)" -> Reject -> "Debit Note Issue (Accounts)"),
+// the one branch dropped from the Batch pipeline's own simplified
+// version of that diagram (see batch-stage.ts's comment) but real here,
+// against the actual Warehouse receipt. Raised by Accounts once a
+// RECEIVED row comes back QC_REJECTED (or partially rejected —
+// rejectedQty > 0) — the vendor-facing paper trail for "we're debiting
+// you for the defective/rejected portion of this delivery." Append-only,
+// same "a ledger entry, not a form field" reasoning as BatchRecycleLog —
+// no soft delete, no edit.
+model DebitNote {
+  id            String   @id @default(uuid())
+  transactionId String // the RECEIVED row this debit note is against
+  debitNoteNo   String?
+  date          DateTime @default(now())
+  vendorName    String?
+  itemId        String
+  quantity      Float
+  unit          String
+  amount        Float?
+  reason        String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  transaction InventoryTransaction @relation(fields: [transactionId], references: [id])
+  item        InventoryItem        @relation(fields: [itemId], references: [id])
+  createdBy   User                 @relation(fields: [createdById], references: [id])
+
+  @@index([transactionId])
+  @@map("debit_notes")
+}
+
+// ---------------------------------------------------------------------------
+// R&D Store — a second, independent stock ledger for R&D's own sample
+// lifecycle, per the client's own 6-step description:
+//   1. Warehouse sends a sample to R&D Store  -> Warehouse stock  −
+//   2. R&D Store confirms receipt             -> R&D Store stock  +
+//   3. Research uses/wastes/rejects the sample -> R&D Store stock  −
+//   4. R&D sends a sample to the customer      -> R&D Store stock  −
+//   5. R&D sends the leftover back to Warehouse -> R&D Store stock −
+//   6. Warehouse confirms receipt              -> Warehouse stock  +
+//
+// Two models, split the same way the rest of this schema splits "the
+// cross-department handoff" from "what happened once it landed":
+//   - RndTransfer is steps 1-2 and 5-6 — the two-sided Warehouse<->R&D
+//     movements, sender-creates/receiver-confirms shape (same as a
+//     Material Request or a Dispatch Transfer, not a single atomic move,
+//     so both departments have their own record of it). The sending
+//     side's stock effect lands immediately on creation (an ISSUED_RND /
+//     isRndReturn InventoryTransaction row — Warehouse's own existing
+//     ledger, unchanged), the confirming side's on confirmation (an
+//     INBOUND/RETURNED RndStoreTransaction row below).
+//   - RndStoreTransaction is R&D Store's own ledger — everything that
+//     only ever touches R&D's side: steps 2-5. Deliberately a separate
+//     table from InventoryTransaction rather than a third location tag
+//     on it — R&D's states (consumed for research, dispatched straight
+//     to a customer) have no InventoryTransaction equivalent to reuse.
+// ---------------------------------------------------------------------------
+
+enum RndTransferDirection {
+  TO_RND
+  TO_WAREHOUSE
+}
+
+// Per the client: a return from R&D never goes through inward QC (it
+// never left company custody), so there's no receipt-status gate here —
+// PENDING simply means "sent, not yet confirmed by the other side."
+model RndTransfer {
+  id        String               @id @default(uuid())
+  direction RndTransferDirection
+  itemId    String
+  quantity  Float
+  unit      String
+  note      String?
+
+  sentById String
+  sentAt   DateTime @default(now())
+
+  // Null = still pending the other department's confirmation.
+  confirmedById String?
+  confirmedAt   DateTime?
+
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
+
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  sentBy      User          @relation("RndTransferSentBy", fields: [sentById], references: [id])
+  confirmedBy User?         @relation("RndTransferConfirmedBy", fields: [confirmedById], references: [id])
+  deletedBy   User?         @relation("RndTransferDeletedBy", fields: [deletedById], references: [id])
+
+  storeTransaction RndStoreTransaction?
+  sampleRequest    RndSampleRequest?
+
+  @@index([itemId])
+  @@index([direction, confirmedAt])
+  @@map("rnd_transfers")
+}
+
+enum RndStoreTxnType {
+  INBOUND // confirmed receipt from Warehouse (step 2)
+  CONSUMED // used in research — used/wastage/rejected (step 3)
+  DISPATCHED // sent to a customer (step 4)
+  RETURNED // sent back to Warehouse (step 5)
+}
+
+// Reporting split for CONSUMED rows — the client explicitly asked to see
+// how much raw material went where. Originally just USED/WASTAGE/
+// REJECTED; USED was split into TESTING vs FORMULATION_TRIAL because
+// "how much went into testing vs into an actual formulation trial" is a
+// real distinction the client's reporting needs, not just "used" as one
+// bucket. Null for every other txn type.
+enum RndConsumeReason {
+  TESTING
+  FORMULATION_TRIAL
+  WASTAGE
+  REJECTED
+}
+
+model RndStoreTransaction {
+  id            String            @id @default(uuid())
+  itemId        String
+  type          RndStoreTxnType
+  quantity      Float
+  unit          String
+  consumeReason RndConsumeReason? // CONSUMED only
+  customerId    String? // DISPATCHED only
+  note          String?
+
+  // When this actually happened, as R&D records it — separate from
+  // createdAt (when the row was logged in the system, which can lag the
+  // real event by a day or more). Defaults to "now" at creation but is
+  // user-editable going forward. CONSUMED/DISPATCHED only; INBOUND/
+  // RETURNED already have a real date via their linked RndTransfer's own
+  // sentAt/confirmedAt.
+  date DateTime?
+
+  // DISPATCHED only — the sample-to-customer paperwork the client asked
+  // for: which brand it's under, and how it physically went out.
+  brandName       String?
+  courierDetails  String?
+
+  // CONSUMED only — which R&D effort this consumption belongs to, so a
+  // report can answer "how much of item X went into formulating product
+  // Y" instead of just "how much of X was used, in general". batchNo is
+  // R&D's own lot/batch reference, unrelated to the Warehouse ledger's
+  // own batchNo field on InventoryTransaction.
+  projectName    String?
+  formulationRef String?
+  batchNo        String?
+
+  // Set only on INBOUND/RETURNED rows created by confirming an
+  // RndTransfer — links this leg back to the Warehouse-side leg of the
+  // same physical movement. Null for CONSUMED/DISPATCHED, which have no
+  // Warehouse-side counterpart at all.
+  transferId String? @unique
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  // Soft delete
+  deletedAt   DateTime?
+  deletedById String?
+
+  item      InventoryItem @relation(fields: [itemId], references: [id])
+  customer  Customer?     @relation(fields: [customerId], references: [id])
+  transfer  RndTransfer?  @relation(fields: [transferId], references: [id])
+  createdBy User          @relation(fields: [createdById], references: [id])
+  deletedBy User?         @relation("RndStoreTransactionDeletedBy", fields: [deletedById], references: [id])
+
+  @@index([itemId])
+  @@index([type])
+  @@map("rnd_store_transactions")
+}
+
+enum RndSampleRequestStatus {
+  PENDING
+  FULFILLED
+  REJECTED
+  CANCELLED
+}
+
+// The real trigger for step 1, per the client: R&D doesn't wait for Store
+// to decide to send something — R&D is mid-research on a new product PPIC
+// asked for (see RecipeRequest) and knows exactly what raw material it
+// needs, so R&D asks Store for it. Same gate shape as InventoryRequest
+// (Store can't just push a sample out of thin air any more than it can
+// issue to Production out of thin air) — Store fulfilling a request is
+// what actually creates the RndTransfer(TO_RND) below; POST /transfers is
+// no longer open to STORE directly for this direction, ADMIN excepted.
+model RndSampleRequest {
+  id       String @id @default(uuid())
+  itemId   String
+  quantity Float
+  unit     String
+  note     String? // e.g. which PPIC/RecipeRequest product this sample is for
+
+  status RndSampleRequestStatus @default(PENDING)
+
+  requestedById String
+  requestedAt   DateTime @default(now())
+
+  reviewedById    String?
+  reviewedAt      DateTime?
+  rejectionReason String? // required by the API when rejecting
+
+  // Set once Store fulfills — the RndTransfer this request turned into.
+  transferId String? @unique
+
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+  requestedBy User          @relation("RndSampleRequestRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy  User?         @relation("RndSampleRequestReviewedBy", fields: [reviewedById], references: [id])
+  transfer    RndTransfer?  @relation(fields: [transferId], references: [id])
+
+  @@index([itemId])
+  @@index([status])
+  @@map("rnd_sample_requests")
 }
 
 enum DispatchTransferType {
@@ -1086,9 +2074,11 @@ enum DispatchTransferType {
 // (a billing document, not goods) skip QC entirely and stay null. Not a
 // stock gate — Dispatch Transfer never affects stock either way, QC
 // here only blocks the transfer from being treated as cleared to hand
-// off to Dispatch.
+// off to Dispatch. ON_HOLD is parked/non-terminal, same as the inward
+// gate's; QC_REJECTED is the only terminal one.
 enum DispatchQcStatus {
   PENDING_QC
+  ON_HOLD
   QC_APPROVED
   QC_REJECTED
 }
@@ -1151,6 +2141,8 @@ model DispatchTransfer {
   dispatchedBy  User?             @relation("DispatchTransferDispatchedBy", fields: [dispatchedById], references: [id])
   invoicedBy    User?             @relation("DispatchTransferInvoicedBy", fields: [invoicedById], references: [id])
   deletedBy     User?             @relation("DispatchTransferDeletedBy", fields: [deletedById], references: [id])
+  // Back-relation for CombinedLot.dispatchTransferId — see that field's comment.
+  combinedLots  CombinedLot[]     @relation("CombinedLotDispatchTransfer")
 
   @@index([customerId])
   @@index([type, date])

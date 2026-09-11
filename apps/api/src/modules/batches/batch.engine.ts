@@ -65,3 +65,33 @@ export function computeWastage(batch: WastageFields): WastageResult {
   const wastagePct = batch.inputQty > 0 ? Math.round((wastageQty / batch.inputQty) * 1000) / 10 : null;
   return { wastageQty, wastagePct };
 }
+
+// Bulk Reconciliation — BMR-1.docx "8.0 BULK RECONCILATION", the client's
+// real yield formula: Yield {(b+c)/a×100}%, NLT 99.0% — (b) Actual
+// Weight of Bulk, (c) QC Sample weight, (a) Theoretical Weight. A
+// distinct, more formal calculation from the simpler input/output
+// wastage above (that one's RM in vs RM out; this one's finished bulk
+// vs what the formulation predicted, accounting for the QC sample pulled
+// out separately). Process loss is the doc's other blank cell, derived
+// the same way: whatever's left over once actual + sample are accounted
+// for against theoretical.
+export interface BulkReconciliationFields {
+  bulkTheoreticalWeight: number | null;
+  bulkActualWeight: number | null;
+  bulkQcSampleWeight: number | null;
+}
+
+export interface BulkReconciliationResult {
+  yieldPct: number | null; // null until theoretical + actual are both recorded
+  processLoss: number | null;
+}
+
+export function computeBulkReconciliation(batch: BulkReconciliationFields): BulkReconciliationResult {
+  const a = batch.bulkTheoreticalWeight;
+  const b = batch.bulkActualWeight;
+  if (a === null || b === null || !(a > 0)) return { yieldPct: null, processLoss: null };
+  const c = batch.bulkQcSampleWeight ?? 0;
+  const yieldPct = Math.round(((b + c) / a) * 1000) / 10;
+  const processLoss = Math.max(0, Math.round((a - (b + c)) * 1000) / 1000);
+  return { yieldPct, processLoss };
+}

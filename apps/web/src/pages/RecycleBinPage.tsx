@@ -6,6 +6,7 @@ import { ApiError } from "../lib/api";
 import { formatEmployeeId } from "../lib/format";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
+import { ItemPicker } from "../components/ItemPicker";
 import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
@@ -92,14 +93,14 @@ export function RecycleBinPage() {
         <div className="w-full sm:w-72">
           <SearchBar value={search} onChange={setSearch} placeholder="Search by name, detail, or who deleted it…" />
         </div>
-        <select className="field w-auto" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as RecycleBinEntityType | "")}>
-          <option value="">All types</option>
-          {typesPresent.map((t) => (
-            <option key={t} value={t}>
-              {TYPE_LABEL[t]}
-            </option>
-          ))}
-        </select>
+        <div className="w-48">
+          <ItemPicker
+            items={[{ id: "", name: "All types" }, ...typesPresent.map((t) => ({ id: t, name: TYPE_LABEL[t] }))]}
+            value={typeFilter}
+            onChange={(v) => setTypeFilter(v as RecycleBinEntityType | "")}
+            clearable={false}
+          />
+        </div>
       </div>
 
       {isLoading ? (

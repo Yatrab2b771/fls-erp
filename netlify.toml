@@ -1,7 +1,11 @@
 [build]
-  command = "npm run build:web"
-  publish = "apps/web/dist"
+  base = "apps/web"
+  command = "npm run build"
+  publish = "dist"
 
+# Client-side routing (react-router-dom) — every real path has to fall
+# back to index.html so a hard refresh on e.g. /purchase-orders/123
+# doesn't 404 against Netlify's static file server.
 [[redirects]]
   from = "/*"
   to = "/index.html"

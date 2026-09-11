@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeDelay, computeWastage, type DelayFields } from "./batch.engine";
+import { computeBulkReconciliation, computeDelay, computeWastage, type DelayFields } from "./batch.engine";
 
 describe("computeDelay", () => {
   const blankDelay: DelayFields = { dispatchDate: null, dispatchPlanDate: null, manufacturingStartDate: null, productionPlanDate: null };
@@ -56,5 +56,28 @@ describe("computeWastage", () => {
 
   it("no output at all means total wastage", () => {
     expect(computeWastage({ inputQty: 100, outputQty: 0 })).toEqual({ wastageQty: 100, wastagePct: 100 });
+  });
+});
+
+describe("computeBulkReconciliation", () => {
+  const blank = { bulkTheoreticalWeight: null, bulkActualWeight: null, bulkQcSampleWeight: null };
+
+  it("is null until theoretical and actual weight are both recorded", () => {
+    expect(computeBulkReconciliation(blank)).toEqual({ yieldPct: null, processLoss: null });
+    expect(computeBulkReconciliation({ ...blank, bulkTheoreticalWeight: 500 })).toEqual({ yieldPct: null, processLoss: null });
+    expect(computeBulkReconciliation({ ...blank, bulkActualWeight: 490 })).toEqual({ yieldPct: null, processLoss: null });
+  });
+
+  it("matches the doc's own formula — Yield {(b+c)/a×100}, NLT 99.0%", () => {
+    // a=500, b=495, c=3 -> (495+3)/500*100 = 99.6%, loss = 500-498 = 2
+    expect(computeBulkReconciliation({ bulkTheoreticalWeight: 500, bulkActualWeight: 495, bulkQcSampleWeight: 3 })).toEqual({ yieldPct: 99.6, processLoss: 2 });
+  });
+
+  it("QC sample weight defaults to 0 when not recorded", () => {
+    expect(computeBulkReconciliation({ bulkTheoreticalWeight: 500, bulkActualWeight: 495, bulkQcSampleWeight: null })).toEqual({ yieldPct: 99, processLoss: 5 });
+  });
+
+  it("never goes negative — actual+sample beyond theoretical floors process loss at 0", () => {
+    expect(computeBulkReconciliation({ bulkTheoreticalWeight: 500, bulkActualWeight: 505, bulkQcSampleWeight: null })).toEqual({ yieldPct: 101, processLoss: 0 });
   });
 });

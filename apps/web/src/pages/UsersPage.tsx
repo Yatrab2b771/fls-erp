@@ -6,6 +6,7 @@ import { ApiError } from "../lib/api";
 import { formatEmployeeId } from "../lib/format";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
+import { ItemPicker } from "../components/ItemPicker";
 import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
@@ -136,14 +137,7 @@ function NewUserForm({ onDone }: { onDone: () => void }) {
         </div>
         <div>
           <label className="label">Department Role</label>
-          <select className="field" value={role} onChange={(e) => setRole(e.target.value as RoleName)}>
-            <option value="">— No role yet —</option>
-            {ALL_ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
+          <ItemPicker items={ALL_ROLES.map((r) => ({ id: r, name: r }))} value={role} onChange={(v) => setRole(v as RoleName)} placeholder="— No role yet —" />
         </div>
       </div>
       {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
@@ -172,6 +166,8 @@ function UserRow({ user }: { user: ManagedUser }) {
   const [resetMessage, setResetMessage] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(user.fullName);
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [emailDraft, setEmailDraft] = useState(user.email);
 
   const availableRoles = ALL_ROLES.filter((r) => !user.roles.includes(r));
 
@@ -188,10 +184,64 @@ function UserRow({ user }: { user: ManagedUser }) {
     }
   }
 
+  // Changing this bumps the target's tokenVersion server-side — if
+  // they're logged in right now, this signs them out immediately, same
+  // as a password reset does. Worth knowing before confirming, so it's
+  // called out in the success toast rather than silently assumed.
+  async function handleSaveEmail() {
+    const trimmed = emailDraft.trim();
+    if (!trimmed) return;
+    if (trimmed === user.email) return setEditingEmail(false);
+    try {
+      await renameUser.mutateAsync({ userId: user.id, email: trimmed });
+      toast.success("Email updated — any existing session on this account was signed out.");
+      setEditingEmail(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update email");
+    }
+  }
+
   return (
     <tr className="align-top">
       <td className="font-mono text-[11px] font-bold text-slate-500">{formatEmployeeId(user.employeeId)}</td>
-      <td className="font-mono text-xs text-slate-700">{user.email}</td>
+      <td className="font-mono text-xs text-slate-700">
+        {editingEmail ? (
+          <div className="flex items-center gap-1.5">
+            <input
+              autoFocus
+              type="email"
+              className="field !py-1 !px-2 text-xs"
+              value={emailDraft}
+              onChange={(e) => setEmailDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleSaveEmail();
+                if (e.key === "Escape") {
+                  setEmailDraft(user.email);
+                  setEditingEmail(false);
+                }
+              }}
+            />
+            <button className="btn-icon shrink-0" disabled={renameUser.isPending} onClick={handleSaveEmail} title="Save">
+              <Check className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} />
+            </button>
+            <button
+              className="btn-icon shrink-0"
+              onClick={() => {
+                setEmailDraft(user.email);
+                setEditingEmail(false);
+              }}
+              title="Cancel"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={2.5} />
+            </button>
+          </div>
+        ) : (
+          <button className="group flex items-center gap-1.5 text-left" onClick={() => setEditingEmail(true)} title="Click to change — signs out any existing session on this account">
+            {user.email}
+            <Pencil className="h-3 w-3 shrink-0 text-slate-300 group-hover:text-slate-500" strokeWidth={2.25} />
+          </button>
+        )}
+      </td>
       <td className="text-xs font-bold text-slate-700">
         {editingName ? (
           <div className="flex items-center gap-1.5">
@@ -245,25 +295,21 @@ function UserRow({ user }: { user: ManagedUser }) {
             </span>
           ))}
           {availableRoles.length > 0 && (
-            <select
-              className="rounded-lg border border-slate-200 bg-white px-1.5 py-1 text-[10px] font-bold text-slate-500"
-              value={addingRole}
-              onChange={(e) => {
-                const r = e.target.value as RoleName;
-                if (r) {
-                  grantRole.mutate({ userId: user.id, role: r });
-                  toast.success(`Granted ${r} to ${user.fullName}.`);
-                }
-                setAddingRole("");
-              }}
-            >
-              <option value="">+ Add role</option>
-              {availableRoles.map((r) => (
-                <option key={r} value={r}>
-                  {r}
-                </option>
-              ))}
-            </select>
+            <div className="w-32">
+              <ItemPicker
+                items={availableRoles.map((r) => ({ id: r, name: r }))}
+                value={addingRole}
+                placeholder="+ Add role"
+                onChange={(v) => {
+                  const r = v as RoleName;
+                  if (r) {
+                    grantRole.mutate({ userId: user.id, role: r });
+                    toast.success(`Granted ${r} to ${user.fullName}.`);
+                  }
+                  setAddingRole("");
+                }}
+              />
+            </div>
           )}
         </div>
       </td>

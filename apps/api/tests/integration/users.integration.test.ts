@@ -74,4 +74,28 @@ describe("Users module — admin directory, role grant/revoke, activate/deactiva
     expect(renamed.status).toBe(200);
     expect(renamed.body.fullName).toBe("Renamed Person");
   });
+
+  it("PATCH /:userId can change email — Admin-only, bumps tokenVersion, rejects a conflicting existing email", async () => {
+    const { token: adminToken } = await createUser(["ADMIN"]);
+    const { user: target, token: staleToken } = await createUser(["STORE"]);
+    const { email: otherEmail } = await createUser([]);
+
+    const deniedNonAdmin = await request(app).patch(`/api/users/${target.id}`).set(authHeader(staleToken)).send({ email: "new-address@fls.test" });
+    expect(deniedNonAdmin.status).toBe(403);
+
+    const conflict = await request(app).patch(`/api/users/${target.id}`).set(authHeader(adminToken)).send({ email: otherEmail });
+    expect(conflict.status).toBe(409);
+
+    const changed = await request(app).patch(`/api/users/${target.id}`).set(authHeader(adminToken)).send({ email: "new-address@fls.test" });
+    expect(changed.status).toBe(200);
+    expect(changed.body.email).toBe("new-address@fls.test");
+
+    // Same "existing session stops working immediately" guarantee as
+    // deactivate/role-revoke — email is part of login identity too.
+    const staleReq = await request(app).get("/api/auth/me").set(authHeader(staleToken));
+    expect(staleReq.status).toBe(401);
+
+    const relogin = await request(app).post("/api/auth/login").send({ email: "new-address@fls.test", password: "TestPassword123" });
+    expect(relogin.status).toBe(200);
+  });
 });

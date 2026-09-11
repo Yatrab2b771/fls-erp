@@ -6,8 +6,8 @@ import * as XLSX from "xlsx";
 // literal string.
 const PO_NUMBER_COLUMNS = ["PO Number", "PO No", "PO No.", "PO"];
 const CUSTOMER_COLUMNS = ["Customer", "Customer Name", "Company"];
-const BRAND_COLUMNS = ["Brand", "Brand Name"];
 const ORDER_DATE_COLUMNS = ["Order Date", "PO Date", "Date"];
+const EXPECTED_DELIVERY_DATE_COLUMNS = ["Expected Delivery Date", "Delivery Date", "End Date"];
 const REGULATORY_BODY_COLUMNS = ["Regulatory Body", "Reg Body", "Body"];
 const REGULATORY_STATUS_COLUMNS = ["Regulatory Status", "Reg Status", "Status"];
 const PRODUCT_COLUMNS = ["Product Name", "Product", "Item"];
@@ -16,7 +16,6 @@ const QUANTITY_COLUMNS = ["Quantity", "Qty", "Count"];
 const UNIT_COLUMNS = ["Unit"];
 const VOLUME_COLUMNS = ["Volume"];
 const PACK_SIZE_COLUMNS = ["Pack Size"];
-const PACK_TYPE_COLUMNS = ["Pack Type"];
 
 function firstNonEmpty(row: Record<string, unknown>, keys: string[]): unknown {
   for (const k of keys) {
@@ -63,8 +62,8 @@ function matchEnum(value: string | undefined, allowed: Set<string>): string | un
 export interface ImportPurchaseOrderRow {
   poNumber: string;
   customerName: string;
-  brandName?: string;
   orderDate?: string;
+  expectedDeliveryDate?: string;
   regulatoryBody?: string;
   regulatoryStatus?: string;
   productName: string;
@@ -73,7 +72,6 @@ export interface ImportPurchaseOrderRow {
   unit: string;
   volume?: number;
   packSize?: string;
-  packType?: string;
 }
 
 export interface ParsedPurchaseOrderImport {
@@ -117,8 +115,8 @@ export function parsePurchaseOrderWorkbook(buffer: ArrayBuffer): ParsedPurchaseO
       rows.push({
         poNumber,
         customerName,
-        brandName: asText(row, BRAND_COLUMNS),
         orderDate: parseDate(firstNonEmpty(row, ORDER_DATE_COLUMNS)),
+        expectedDeliveryDate: parseDate(firstNonEmpty(row, EXPECTED_DELIVERY_DATE_COLUMNS)),
         regulatoryBody: matchEnum(asText(row, REGULATORY_BODY_COLUMNS), REGULATORY_BODIES),
         regulatoryStatus: matchEnum(asText(row, REGULATORY_STATUS_COLUMNS), REGULATORY_STATUSES),
         productName,
@@ -127,7 +125,6 @@ export function parsePurchaseOrderWorkbook(buffer: ArrayBuffer): ParsedPurchaseO
         unit,
         volume: Number.isFinite(volume) && volume! > 0 ? volume : undefined,
         packSize: asText(row, PACK_SIZE_COLUMNS),
-        packType: asText(row, PACK_TYPE_COLUMNS),
       });
     }
   }
@@ -140,8 +137,8 @@ export function downloadPurchaseOrderImportTemplate() {
     {
       "PO Number": "PO-2026-0500",
       Customer: "Acme Nutrition Pvt. Ltd.",
-      Brand: "FLS Wellness",
       "Order Date": "20-08-2026",
+      "Expected Delivery Date": "20-09-2026",
       "Regulatory Body": "FSSAI",
       "Regulatory Status": "Applied",
       "Product Name": "Whey Protein Powder",
@@ -150,13 +147,12 @@ export function downloadPurchaseOrderImportTemplate() {
       Unit: "KG",
       Volume: "",
       "Pack Size": "1 Kg",
-      "Pack Type": "Jar",
     },
     {
       "PO Number": "PO-2026-0500",
       Customer: "Acme Nutrition Pvt. Ltd.",
-      Brand: "",
       "Order Date": "",
+      "Expected Delivery Date": "",
       "Regulatory Body": "",
       "Regulatory Status": "",
       "Product Name": "Multivitamin Capsules",
@@ -165,9 +161,21 @@ export function downloadPurchaseOrderImportTemplate() {
       Unit: "SKU",
       Volume: "",
       "Pack Size": "60 Caps",
-      "Pack Type": "Bottle",
     },
-    { "PO Number": "", Customer: "", Brand: "", "Order Date": "", "Regulatory Body": "", "Regulatory Status": "", "Product Name": "", "Dosage Form": "", Quantity: "", Unit: "", Volume: "", "Pack Size": "", "Pack Type": "" },
+    {
+      "PO Number": "",
+      Customer: "",
+      "Order Date": "",
+      "Expected Delivery Date": "",
+      "Regulatory Body": "",
+      "Regulatory Status": "",
+      "Product Name": "",
+      "Dosage Form": "",
+      Quantity: "",
+      Unit: "",
+      Volume: "",
+      "Pack Size": "",
+    },
   ];
   const sheet = XLSX.utils.json_to_sheet(rows);
   const workbook = XLSX.utils.book_new();

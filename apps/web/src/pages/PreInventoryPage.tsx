@@ -1,7 +1,18 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { CheckCircle2, Clock, ClipboardList, Download, FileSpreadsheet, Package, Plus, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
+import { CheckCircle2, Clock, ClipboardList, Download, FileSpreadsheet, Package, Plus, Send, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCreateInventoryItem, useCreateRequirement, useDeleteRequirement, useImportPurchaseLog, useImportRequirements, useInventoryItems, useInventoryVendors, usePreInventoryRequirements, useSetRequirementPurchase } from "../lib/hooks";
+import {
+  useCreateInventoryItem,
+  useCreateRequirement,
+  useDeleteRequirement,
+  useImportPurchaseLog,
+  useImportRequirements,
+  useInventoryItems,
+  useInventoryVendors,
+  useNotifyPurchase,
+  usePreInventoryRequirements,
+  useSetRequirementPurchase,
+} from "../lib/hooks";
 import type { InventoryCategory, PreInventoryRequirement } from "../lib/types";
 import { parsePurchaseLogWorkbook, parseRequirementWorkbook } from "../lib/inventoryImport";
 import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportPurchaseAgingReport, exportRequirementsReport } from "../lib/inventoryExport";
@@ -10,9 +21,16 @@ import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
+import { ItemPicker } from "../components/ItemPicker";
 import { useToast } from "../components/Toast";
 
 const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
+const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
+const CATEGORY_ITEMS = [
+  { id: "RM", name: "Raw Material" },
+  { id: "PM", name: "Packaging Material" },
+];
+const CATEGORY_FILTER_ITEMS = [{ id: "", name: "All Categories" }, ...CATEGORY_ITEMS];
 const CATEGORY_LABEL: Record<InventoryCategory, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
 // S2 ("what's already available") isn't a step any more — currentStock/
@@ -52,8 +70,18 @@ function StatusBadge({ status }: { status: RequirementStatus }) {
 
 export function PreInventoryPage() {
   const { hasRole, user } = useAuth();
-  const canRequest = hasRole("PPIC");
+  // PPIC-only used to be the rule — Purchase can now log a requirement
+  // directly too, not just react to one PPIC already raised. See
+  // pre-inventory.routes.ts's POST / for the same relaxed gate.
+  const canRequest = hasRole("PPIC", "PURCHASE");
+  // Purchase-only — PPIC plans (raises the requirement above), Purchase
+  // buys (logs the PO/Vendor/ETA here). See pre-inventory.routes.ts's
+  // PATCH /:id/purchase for the same split.
   const canPurchase = hasRole("PURCHASE");
+  // PPIC's own explicit "Send to Purchase" call — a shortfall existing
+  // isn't reason enough for the system to notify Purchase by itself any
+  // more. See pre-inventory.routes.ts's POST /:id/notify-purchase.
+  const canNotifyPurchase = hasRole("PPIC");
 
   const [category, setCategory] = useState<InventoryCategory | "">("");
   const [search, setSearch] = useState("");
@@ -204,11 +232,9 @@ export function PreInventoryPage() {
         <div className="min-w-[220px] flex-1">
           <SearchBar value={search} onChange={setSearch} placeholder="Search item, vendor, or PO number…" />
         </div>
-        <select className="field w-auto" value={category} onChange={(e) => setCategory(e.target.value as InventoryCategory | "")}>
-          <option value="">All Categories</option>
-          <option value="RM">Raw Material</option>
-          <option value="PM">Packaging Material</option>
-        </select>
+        <div className="w-48">
+          <ItemPicker items={CATEGORY_FILTER_ITEMS} value={category} onChange={(v) => setCategory(v as InventoryCategory | "")} clearable={false} />
+        </div>
       </div>
 
       {isLoading ? (
@@ -220,7 +246,7 @@ export function PreInventoryPage() {
       ) : (
         <div className="space-y-3">
           {filtered.map((r) => (
-            <RequirementCard key={r.id} requirement={r} canPurchase={canPurchase} isOwner={r.requestedBy.id === user?.id} />
+            <RequirementCard key={r.id} requirement={r} canPurchase={canPurchase} canNotifyPurchase={canNotifyPurchase} isOwner={r.requestedBy.id === user?.id} />
           ))}
         </div>
       )}
@@ -279,7 +305,7 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
         size: size.trim() || undefined,
         note: note.trim() || undefined,
       });
-      toast.success(created.shortQty > 0 ? `Added — ${created.shortQty} ${unit} short, Purchase has been notified.` : "Added — already fully covered by current stock.");
+      toast.success(created.shortQty > 0 ? `Added — ${created.shortQty} ${unit} short. Send it to Purchase when you're ready.` : "Added — already fully covered by current stock.");
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not create requirement");
@@ -293,23 +319,15 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <div>
           <label className="label">Category</label>
-          <select className="field" value={category} onChange={(e) => switchCategory(e.target.value as InventoryCategory)}>
-            <option value="RM">Raw Material</option>
-            <option value="PM">Packaging Material</option>
-          </select>
+          <ItemPicker items={CATEGORY_ITEMS} value={category} onChange={(v) => switchCategory(v as InventoryCategory)} clearable={false} />
         </div>
         <div className="sm:col-span-2">
           <label className="label">Item</label>
           {!showNewItem ? (
             <div className="flex flex-wrap gap-2">
-              <select className="field min-w-0 flex-1" value={itemId} onChange={(e) => setItemId(e.target.value)}>
-                <option value="">— Select an item —</option>
-                {(items ?? []).map((i) => (
-                  <option key={i.id} value={i.id}>
-                    {i.name}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-0 flex-1">
+                <ItemPicker items={items ?? []} value={itemId} onChange={setItemId} />
+              </div>
               <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNewItem(true)}>
                 <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New
               </button>
@@ -329,13 +347,7 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
         </div>
         <div>
           <label className="label">Unit</label>
-          <select className="field" value={unit} onChange={(e) => setUnit(e.target.value)}>
-            {UNIT_OPTIONS.map((u) => (
-              <option key={u} value={u}>
-                {u}
-              </option>
-            ))}
-          </select>
+          <ItemPicker items={UNIT_ITEMS} value={unit} onChange={setUnit} clearable={false} />
         </div>
         <div>
           <label className="label">Required Qty</label>
@@ -364,11 +376,31 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
   );
 }
 
-function RequirementCard({ requirement, canPurchase, isOwner }: { requirement: PreInventoryRequirement; canPurchase: boolean; isOwner: boolean }) {
+function RequirementCard({
+  requirement,
+  canPurchase,
+  canNotifyPurchase,
+  isOwner,
+}: {
+  requirement: PreInventoryRequirement;
+  canPurchase: boolean;
+  canNotifyPurchase: boolean;
+  isOwner: boolean;
+}) {
   const toast = useToast();
   const setPurchase = useSetRequirementPurchase();
+  const notifyPurchase = useNotifyPurchase();
   const deleteRequirement = useDeleteRequirement();
   const { data: vendors } = useInventoryVendors({ enabled: canPurchase });
+
+  async function handleNotifyPurchase() {
+    try {
+      await notifyPurchase.mutateAsync(requirement.id);
+      toast.success("Purchase has been notified.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not notify Purchase");
+    }
+  }
 
   const [showPurchase, setShowPurchase] = useState(false);
   const [poNumber, setPoNumber] = useState("");
@@ -438,6 +470,11 @@ function RequirementCard({ requirement, canPurchase, isOwner }: { requirement: P
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {canNotifyPurchase && status === "SHORTFALL" && (
+            <button type="button" className="btn-ghost btn-sm" disabled={notifyPurchase.isPending} onClick={handleNotifyPurchase}>
+              <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {notifyPurchase.isPending ? "Sending…" : "Send to Purchase"}
+            </button>
+          )}
           {canPurchase && status === "SHORTFALL" && !showPurchase && (
             <button
               type="button"

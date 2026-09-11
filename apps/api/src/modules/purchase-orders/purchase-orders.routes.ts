@@ -11,11 +11,13 @@ import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { buildPurchaseOrderPdf } from "./po-pdf";
 import {
   createPurchaseOrderSchema,
+  generatePoInvoiceSchema,
   importPurchaseOrdersSchema,
   reviewPurchaseOrderSchema,
   updatePurchaseOrderItemSchema,
   updatePurchaseOrderSchema,
   type CreatePurchaseOrderInput,
+  type GeneratePoInvoiceInput,
   type ImportPurchaseOrdersInput,
   type ReviewPurchaseOrderInput,
   type UpdatePurchaseOrderInput,
@@ -61,7 +63,6 @@ const poInclude = {
     // instant it's removed, same as before, just recoverable now.
     where: { deletedAt: null },
     include: {
-      _count: { select: { batches: true } },
       // Lightweight summaries only — full plan detail (items, calculated
       // result) is fetched on-demand from the BOM/RM Costing pages
       // themselves; here we just need enough to render a status chip and
@@ -69,9 +70,12 @@ const poInclude = {
       // strip that ties all four modules together).
       bomPlans: { select: { id: true, name: true, status: true }, orderBy: { createdAt: "desc" } },
       rmPlans: { select: { id: true, name: true, status: true }, orderBy: { createdAt: "desc" } },
-      // Just enough to compute completion below — not the batch's full
-      // record, that's what GET /api/batches/:id is for.
-      batches: { select: { currentStageId: true, dispatchDate: true, customerConfirmation: true } },
+      // Just enough to compute completion below (and to know whether
+      // production has started at all, for the delete guard further
+      // down) — not the run's full record, that's what GET
+      // /api/pre-productions/:id is for. PreProduction is 1:1 with a PO
+      // item now, so this is at most one row, not a list.
+      preProduction: { select: { id: true, combinedLot: { select: { currentStageId: true, dispatchDate: true } } } },
     },
     orderBy: { createdAt: "asc" },
   },
@@ -81,25 +85,28 @@ const poInclude = {
 
 type PoWithBatches = Prisma.PurchaseOrderGetPayload<{ include: typeof poInclude }>;
 
-// A PO is "completed" once every Batch across every one of its line
-// items has reached the end of the pipeline for real — DISPATCH_PLAN
-// *and* a recorded customer confirmation, same "done" definition the
-// Dashboard's own active-batch count already uses (see
-// DashboardPage.tsx activeBatches). Computed on read, never stored —
-// same rule as every other derived number in this app. completionDate
-// is the latest dispatchDate across those batches (the business-entered
-// ship date at that stage, not a technical row-update timestamp), and
-// daysTaken is the whole-day span from the PO's own orderDate (falling
-// back to when it was entered, if BD never filled in an order date).
+// A PO is "completed" once every line item's PreProduction run has
+// actually pooled into a CombinedLot and that lot has reached the end of
+// its own pipeline — DISPATCH_PLAN — same "done" definition the
+// Dashboard's own active-batch count already uses (see DashboardPage.tsx
+// activeBatches), just re-derived for the three-tier pipeline: an item
+// with no PreProduction yet (production hasn't started) or a
+// PreProduction still short of its plannedQty (no CombinedLot yet) both
+// count as "not completed". Computed on read, never stored — same rule
+// as every other derived number in this app. completionDate is the
+// latest dispatchDate across those lots (the business-entered ship date
+// at that stage, not a technical row-update timestamp), and daysTaken is
+// the whole-day span from the PO's own orderDate (falling back to when
+// it was entered, if BD never filled in an order date).
 function computeCompletion(po: PoWithBatches): { isCompleted: boolean; completionDate: string | null; daysTaken: number | null } {
-  const allBatches = po.items.flatMap((item) => item.batches);
-  if (allBatches.length === 0) return { isCompleted: false, completionDate: null, daysTaken: null };
+  if (po.items.length === 0) return { isCompleted: false, completionDate: null, daysTaken: null };
 
-  const isCompleted = allBatches.every((b) => b.currentStageId === "DISPATCH_PLAN" && b.customerConfirmation === "Received");
+  const lots = po.items.map((item) => item.preProduction?.combinedLot ?? null);
+  const isCompleted = lots.every((lot) => lot?.currentStageId === "DISPATCH_PLAN");
   if (!isCompleted) return { isCompleted: false, completionDate: null, daysTaken: null };
 
-  const dispatchDates = allBatches.map((b) => b.dispatchDate).filter((d): d is Date => d !== null);
-  if (dispatchDates.length === 0) return { isCompleted: true, completionDate: null, daysTaken: null }; // confirmed received, but Dispatch never filled in a ship date to measure from
+  const dispatchDates = lots.map((lot) => lot!.dispatchDate).filter((d): d is Date => d !== null);
+  if (dispatchDates.length === 0) return { isCompleted: true, completionDate: null, daysTaken: null }; // reached Dispatch Plan, but Dispatch never filled in a ship date to measure from
 
   const completionDate = new Date(Math.max(...dispatchDates.map((d) => d.getTime())));
   const startDate = po.orderDate ?? po.createdAt;
@@ -109,10 +116,10 @@ function computeCompletion(po: PoWithBatches): { isCompleted: boolean; completio
 }
 
 function serializePo(po: PoWithBatches) {
-  // batches was only fetched to compute completion — strip it back out
-  // of each item before responding, same "don't leak the query's
+  // preProduction was only fetched to compute completion — strip it back
+  // out of each item before responding, same "don't leak the query's
   // working data into the API shape" reasoning as everywhere else.
-  return { ...po, items: po.items.map(({ batches: _batches, ...item }) => item), completion: computeCompletion(po) };
+  return { ...po, items: po.items.map(({ preProduction: _preProduction, ...item }) => item), completion: computeCompletion(po) };
 }
 
 // Read is open to any authenticated user; only BD/Admin write.
@@ -135,42 +142,47 @@ purchaseOrdersRouter.get("/", async (req, res, next) => {
 // path segments, "/:id" only matches one, so there's no ambiguity either
 // order. Kept up here just to sit next to the other list-shaped GETs.
 //
-// wastageQty is never stored (schema.prisma: derived inputQty - outputQty,
-// see batch.engine.ts computeWastage) — recomputed here the same way.
-// mfgRejectedQty is QC's own stored figure, independent of wastage. A
-// batch with neither set yet (still mid-pipeline) is left out — nothing
-// to report until Production/QC have actually entered those numbers.
+// Wastage is now a per-ProductionBatch number (Tier 2 — several small
+// manufacturing runs can exist per PreProduction), never stored
+// (schema.prisma: derived inputQty - outputQty, see batch.engine.ts
+// computeWastage) — recomputed here the same way. mfgRejectedQty moved
+// to CombinedLot (Tier 3 — QC's own quality-rejection figure against the
+// pooled lot, independent of any one run's wastage), so this report now
+// reads both tiers and reports each ProductionBatch's own wastage
+// alongside its parent lot's rejection figure. A run with neither set
+// yet (still mid-pipeline) is left out — nothing to report until
+// Production/QC have actually entered those numbers.
 purchaseOrdersRouter.get("/reports/wastage-rejection", async (_req, res, next) => {
   try {
-    const batches = await prisma.batch.findMany({
-      where: { OR: [{ inputQty: { not: null } }, { mfgRejectedQty: { not: null } }] },
+    const runs = await prisma.productionBatch.findMany({
+      where: { inputQty: { not: null } },
       select: {
         id: true,
         batchNo: true,
-        unit: true,
         inputQty: true,
         outputQty: true,
-        mfgRejectedQty: true,
-        purchaseOrderItem: {
+        preProduction: {
           select: {
-            productName: true,
-            purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+            purchaseOrderItem: {
+              select: { productName: true, unit: true, purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } } },
+            },
+            combinedLot: { select: { mfgRejectedQty: true } },
           },
         },
       },
       orderBy: { updatedAt: "desc" },
     });
 
-    const rows = batches.map((b) => ({
-      customerName: b.purchaseOrderItem.purchaseOrder.customer.companyName,
-      poNumber: b.purchaseOrderItem.purchaseOrder.poNumber ?? b.purchaseOrderItem.purchaseOrder.id.slice(0, 8),
-      productName: b.purchaseOrderItem.productName,
+    const rows = runs.map((b) => ({
+      customerName: b.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName,
+      poNumber: b.preProduction.purchaseOrderItem.purchaseOrder.poNumber ?? b.preProduction.purchaseOrderItem.purchaseOrder.id.slice(0, 8),
+      productName: b.preProduction.purchaseOrderItem.productName,
       batchNo: b.batchNo,
-      unit: b.unit,
+      unit: b.preProduction.purchaseOrderItem.unit,
       inputQty: b.inputQty,
       outputQty: b.outputQty,
       wastageQty: b.inputQty !== null && b.outputQty !== null ? Math.max(0, b.inputQty - b.outputQty) : null,
-      mfgRejectedQty: b.mfgRejectedQty,
+      mfgRejectedQty: b.preProduction.combinedLot?.mfgRejectedQty ?? null,
     }));
 
     res.json(rows);
@@ -186,8 +198,25 @@ purchaseOrdersRouter.post("/", requireRole("BD"), validateBody(createPurchaseOrd
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) return res.status(400).json({ error: "Unknown customer" });
 
+    // Explicit, strictly-increasing createdAt per item — a nested create
+    // all runs inside one transaction, and Postgres's now() returns the
+    // *transaction's* start time for every row in it, not a fresh
+    // per-row timestamp. Left to @default(now()), every item in this PO
+    // would get the exact same createdAt, making poInclude's
+    // `items: { orderBy: { createdAt: "asc" } }` a tie — Postgres is
+    // free to return tied rows in either order, so the item list (and
+    // this order.body.items[0]/[1] indexing every caller relies on)
+    // would occasionally come back shuffled. A 1ms-apart synthetic
+    // timestamp per item, in submission order, makes that ordering real
+    // instead of a coin flip.
+    const baseCreatedAt = Date.now();
     const order = await prisma.purchaseOrder.create({
-      data: { customerId, ...rest, createdById: req.user!.id, items: { create: items } },
+      data: {
+        customerId,
+        ...rest,
+        createdById: req.user!.id,
+        items: { create: items.map((item, idx) => ({ ...item, createdAt: new Date(baseCreatedAt + idx) })) },
+      },
       include: poInclude,
     });
 
@@ -250,13 +279,16 @@ purchaseOrdersRouter.post("/import", requireRole("BD"), validateBody(importPurch
         data: {
           customerId,
           poNumber,
-          brandName: first.brandName,
           orderDate: first.orderDate,
+          expectedDeliveryDate: first.expectedDeliveryDate,
           regulatoryBody: first.regulatoryBody,
           regulatoryStatus: first.regulatoryStatus,
           createdById: req.user!.id,
+          // Explicit, strictly-increasing createdAt per item — same
+          // "a nested create's rows would otherwise tie on now()"
+          // reasoning as the manual-form POST / above.
           items: {
-            create: groupRows.map((r) => ({
+            create: groupRows.map((r, idx) => ({
               productName: r.productName,
               dosageForm: r.dosageForm,
               quantity: r.quantity,
@@ -264,6 +296,7 @@ purchaseOrdersRouter.post("/import", requireRole("BD"), validateBody(importPurch
               volume: r.volume,
               packSize: r.packSize,
               packType: r.packType,
+              createdAt: new Date(Date.now() + idx),
             })),
           },
         },
@@ -307,6 +340,292 @@ purchaseOrdersRouter.get("/:id/export.pdf", async (req: AuthedRequest<{ id: stri
     res.setHeader("Content-Disposition", `attachment; filename="FLS_PO_${order.poNumber ?? order.id}.pdf"`);
     doc.pipe(res);
     doc.end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Phase G — a PO-level combined Material Reconciliation, rolling up
+// every one of a PO's line items' production run: how much of the PO's
+// own ordered qty is actually planned, RM/PM dispensed (Production/
+// Sample/Waste — see BatchConsumptionPurpose), how much of the sample
+// leg actually went to QC and what it resolved to (Testing/Wastage/
+// Rejected — see QcSampleConsumeReason), every small ProductionBatch
+// run's own recorded output, the pooled CombinedLot's QA gate
+// Rejected/Wastage split (Phase F — see CombinedLot.mfgRejectedQty/
+// mfgWastageQty/packRejectedQty/packWastageQty), and finally what
+// Dispatch Plan recorded as shipped. One row per line item (a PO's
+// PreProduction runs are always scoped to one item, 1:1 now), plus a
+// `totals` row summing across every item — same "round every numeric
+// field to 3dp" reasoning as inventory.routes.ts's own reconciliation
+// report, since this sums the same kind of float ledgers.
+purchaseOrdersRouter.get("/:id/reconciliation", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const po = await prisma.purchaseOrder.findUnique({
+      where: { id: req.params.id },
+      select: {
+        id: true,
+        poNumber: true,
+        items: {
+          where: { deletedAt: null },
+          select: {
+            id: true,
+            productName: true,
+            quantity: true,
+            unit: true,
+            preProduction: {
+              select: {
+                id: true,
+                plannedQty: true,
+                productionBatches: { select: { id: true, batchNo: true, outputQty: true } },
+                combinedLot: {
+                  select: { currentStageId: true, mfgRejectedQty: true, mfgWastageQty: true, packRejectedQty: true, packWastageQty: true, dispatchedQty: true },
+                },
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+    if (!po) return res.status(404).json({ error: "Purchase order not found" });
+
+    const allPreProductionIds = po.items.map((i) => i.preProduction?.id).filter((id): id is string => id != null);
+
+    const [consumptionRows, qcSentRows, qcConsumedRows] = await Promise.all([
+      allPreProductionIds.length > 0
+        ? prisma.batchMaterialConsumption.groupBy({ by: ["preProductionId", "purpose"], where: { preProductionId: { in: allPreProductionIds } }, _sum: { quantity: true } })
+        : [],
+      allPreProductionIds.length > 0
+        ? prisma.qcSampleTransfer.groupBy({ by: ["preProductionId"], where: { preProductionId: { in: allPreProductionIds }, direction: "TO_QC", deletedAt: null }, _sum: { quantity: true } })
+        : [],
+      allPreProductionIds.length > 0
+        ? prisma.qcSampleTransaction.groupBy({ by: ["preProductionId", "consumeReason"], where: { preProductionId: { in: allPreProductionIds }, type: "CONSUMED", deletedAt: null }, _sum: { quantity: true } })
+        : [],
+    ]);
+
+    // Same binary-float-noise reasoning as inventory.routes.ts's own
+    // reconciliation report — summing many groupBy results can land on
+    // e.g. 1e-14 for what's mathematically exactly 0.
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+
+    const consumptionByRun = new Map<string, { production: number; sample: number; waste: number }>();
+    for (const r of consumptionRows) {
+      const cur = consumptionByRun.get(r.preProductionId) ?? { production: 0, sample: 0, waste: 0 };
+      const qty = r._sum.quantity ?? 0;
+      if (r.purpose === "SAMPLE") cur.sample += qty;
+      else if (r.purpose === "WASTE") cur.waste += qty;
+      else cur.production += qty;
+      consumptionByRun.set(r.preProductionId, cur);
+    }
+    const sampleSentByRun = new Map(qcSentRows.map((r) => [r.preProductionId, r._sum.quantity ?? 0]));
+    const qcConsumedByRun = new Map<string, { testing: number; wastage: number; rejected: number }>();
+    for (const r of qcConsumedRows) {
+      const cur = qcConsumedByRun.get(r.preProductionId) ?? { testing: 0, wastage: 0, rejected: 0 };
+      const qty = r._sum.quantity ?? 0;
+      if (r.consumeReason === "TESTING") cur.testing += qty;
+      else if (r.consumeReason === "WASTAGE") cur.wastage += qty;
+      else if (r.consumeReason === "REJECTED") cur.rejected += qty;
+      qcConsumedByRun.set(r.preProductionId, cur);
+    }
+
+    const poItems = po.items;
+    type ItemRow = ReturnType<typeof buildItemRow>;
+    function buildItemRow(item: (typeof poItems)[number]) {
+      const run = item.preProduction;
+      const c = run ? (consumptionByRun.get(run.id) ?? { production: 0, sample: 0, waste: 0 }) : { production: 0, sample: 0, waste: 0 };
+      const qc = run ? (qcConsumedByRun.get(run.id) ?? { testing: 0, wastage: 0, rejected: 0 }) : { testing: 0, wastage: 0, rejected: 0 };
+      const lot = run?.combinedLot ?? null;
+      const productionBatches = (run?.productionBatches ?? []).map((b) => ({ batchId: b.id, batchNo: b.batchNo, outputQty: round(b.outputQty ?? 0) }));
+
+      return {
+        purchaseOrderItemId: item.id,
+        productName: item.productName,
+        orderedQty: item.quantity,
+        unit: item.unit,
+        currentStageId: lot?.currentStageId ?? null,
+        plannedQtyTotal: round(run?.plannedQty ?? 0),
+        dispensedProduction: round(c.production),
+        dispensedSample: round(c.sample),
+        dispensedWaste: round(c.waste),
+        sampleSentToQc: round(sampleSentByRun.get(run?.id ?? "") ?? 0),
+        sampleTestingQty: round(qc.testing),
+        sampleWastageQty: round(qc.wastage),
+        sampleRejectedQty: round(qc.rejected),
+        outputQty: round(productionBatches.reduce((sum, b) => sum + b.outputQty, 0)),
+        mfgRejectedQty: round(lot?.mfgRejectedQty ?? 0),
+        mfgWastageQty: round(lot?.mfgWastageQty ?? 0),
+        packRejectedQty: round(lot?.packRejectedQty ?? 0),
+        packWastageQty: round(lot?.packWastageQty ?? 0),
+        dispatchedQty: round(lot?.dispatchedQty ?? 0),
+        productionBatches,
+      };
+    }
+
+    const items: ItemRow[] = poItems.map(buildItemRow);
+
+    const totalsKeys = [
+      "plannedQtyTotal",
+      "dispensedProduction",
+      "dispensedSample",
+      "dispensedWaste",
+      "sampleSentToQc",
+      "sampleTestingQty",
+      "sampleWastageQty",
+      "sampleRejectedQty",
+      "outputQty",
+      "mfgRejectedQty",
+      "mfgWastageQty",
+      "packRejectedQty",
+      "packWastageQty",
+      "dispatchedQty",
+    ] as const;
+    const totals = Object.fromEntries(totalsKeys.map((k) => [k, round(items.reduce((acc, it) => acc + it[k], 0))])) as Record<(typeof totalsKeys)[number], number>;
+
+    res.json({ poId: po.id, poNumber: po.poNumber, items, totals });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- PO-level consolidated Billing — separate from each Batch's own
+// Billing & E-Way Bill stage (that one's per-shipment paperwork:
+// invoiceNo/ewayBillNo). This is the whole-PO commercial amount, per the
+// client: one PO can carry several products/batches and Accounts wants
+// one number for the lot.
+//
+// Per item: Price per Pouch (from that item's own, latest CALCULATED RM
+// Costing plan) x estimated pouches shipped. "Estimated pouches" isn't
+// dispatchedQty itself — dispatchedQty is recorded in the same unit as
+// the PO item (Kg, since RM Costing only ever runs for Kg-unit items —
+// see rm-plan.routes.ts's own isKgUnit gate), so it's converted via the
+// same plan's packSizeG (grams per pouch): dispatchedKg * 1000 /
+// packSizeG. An item with no CALCULATED RM Costing plan (a BOM-only or
+// pouch-unit product) simply can't be priced this way yet — its line
+// carries amount: null and priced: false, and is left out of the total
+// rather than guessed at. ---
+
+async function computePoBilling(purchaseOrderId: string) {
+  const po = await prisma.purchaseOrder.findUnique({
+    where: { id: purchaseOrderId },
+    select: {
+      id: true,
+      poNumber: true,
+      items: {
+        where: { deletedAt: null },
+        select: {
+          id: true,
+          productName: true,
+          unit: true,
+          preProduction: { select: { combinedLot: { select: { dispatchedQty: true } } } },
+          rmPlans: {
+            where: { status: "CALCULATED" },
+            orderBy: { calculatedAt: "desc" },
+            take: 1,
+            select: { resultSnapshot: true },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+  if (!po) return null;
+
+  const round = (n: number) => Math.round(n * 100) / 100;
+
+  const lines = po.items.map((item) => {
+    const dispatchedQtyKg = round(item.preProduction?.combinedLot?.dispatchedQty ?? 0);
+    const snapshot = item.rmPlans[0]?.resultSnapshot as { batches?: { packSizeG?: number; pricePerPouch?: number }[] } | null | undefined;
+    const batchResult = snapshot?.batches?.[0];
+
+    if (!batchResult?.packSizeG || !batchResult?.pricePerPouch) {
+      return {
+        purchaseOrderItemId: item.id,
+        productName: item.productName,
+        unit: item.unit,
+        dispatchedQtyKg,
+        packSizeG: null,
+        pricePerPouch: null,
+        estimatedPouches: null,
+        amount: null,
+        priced: false,
+      };
+    }
+
+    const estimatedPouches = round((dispatchedQtyKg * 1000) / batchResult.packSizeG);
+    const amount = round(estimatedPouches * batchResult.pricePerPouch);
+
+    return {
+      purchaseOrderItemId: item.id,
+      productName: item.productName,
+      unit: item.unit,
+      dispatchedQtyKg,
+      packSizeG: batchResult.packSizeG,
+      pricePerPouch: batchResult.pricePerPouch,
+      estimatedPouches,
+      amount,
+      priced: true,
+    };
+  });
+
+  const totalAmount = round(lines.reduce((sum, l) => sum + (l.amount ?? 0), 0));
+  return { poId: po.id, poNumber: po.poNumber, lines, totalAmount };
+}
+
+// Live preview — recomputes off current data every call, doesn't touch
+// the saved invoice (if one already exists it's returned alongside, so
+// the UI can show "this is what's saved" vs "this is what it'd be now").
+// Pricing data, same visibility rule as item-pricing.ts.
+purchaseOrdersRouter.get("/:id/billing", requireRole("PURCHASE", "ACCOUNTS"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const preview = await computePoBilling(req.params.id);
+    if (!preview) return res.status(404).json({ error: "Purchase order not found" });
+    const saved = await prisma.purchaseOrderInvoice.findUnique({ where: { purchaseOrderId: req.params.id }, include: { generatedBy: { select: { fullName: true, email: true } } } });
+    res.json({ ...preview, invoice: saved });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Generate/regenerate the saved invoice — Accounts-only (Purchase can see
+// the preview above, only Accounts commits it). A repeat call overwrites
+// the previous snapshot with a fresh computation, same "recalculating
+// re-opens it" reasoning as BomPlan/RmPlan's own Calculate.
+purchaseOrdersRouter.post("/:id/billing", requireRole("ACCOUNTS"), validateBody(generatePoInvoiceSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const computed = await computePoBilling(req.params.id);
+    if (!computed) return res.status(404).json({ error: "Purchase order not found" });
+
+    const { invoiceNo, invoiceDate } = req.body as GeneratePoInvoiceInput;
+    const invoice = await prisma.purchaseOrderInvoice.upsert({
+      where: { purchaseOrderId: req.params.id },
+      create: {
+        purchaseOrderId: req.params.id,
+        invoiceNo,
+        invoiceDate,
+        totalAmount: computed.totalAmount,
+        lineItems: computed.lines as unknown as Prisma.InputJsonValue,
+        generatedById: req.user!.id,
+      },
+      update: {
+        invoiceNo,
+        invoiceDate,
+        totalAmount: computed.totalAmount,
+        lineItems: computed.lines as unknown as Prisma.InputJsonValue,
+        generatedById: req.user!.id,
+      },
+      include: { generatedBy: { select: { fullName: true, email: true } } },
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "purchase_order.invoice_generated",
+      entityType: "PurchaseOrder",
+      entityId: req.params.id,
+      metadata: { totalAmount: computed.totalAmount, lineCount: computed.lines.length },
+    });
+
+    res.status(201).json({ ...computed, invoice });
   } catch (err) {
     next(err);
   }
@@ -402,14 +721,14 @@ purchaseOrdersRouter.patch(
   validateBody(updatePurchaseOrderItemSchema),
   async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
     try {
-      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { _count: { select: { batches: true } } } });
+      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { preProduction: { select: { id: true } } } });
       if (!item || item.purchaseOrderId !== req.params.id) return res.status(404).json({ error: "Line item not found" });
 
       const data = req.body as UpdatePurchaseOrderItemInput;
-      const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data, include: { _count: { select: { batches: true } } } });
+      const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data, include: { preProduction: { select: { id: true } } } });
 
-      // Editing a line item stays allowed even once it has real
-      // production Batches against it (unlike deleting it, which is
+      // Editing a line item stays allowed even once it has a real
+      // PreProduction run against it (unlike deleting it, which is
       // blocked — see DELETE above) — genuine corrections shouldn't be
       // locked out. But without recording *what* changed, there'd be no
       // way to explain later why a batch's numbers no longer match its
@@ -423,7 +742,7 @@ purchaseOrdersRouter.patch(
         action: "purchase_order.item_updated",
         entityType: "PurchaseOrder",
         entityId: req.params.id,
-        metadata: { itemId: updated.id, before, after: data, batchCount: item._count.batches },
+        metadata: { itemId: updated.id, before, after: data, hasPreProduction: item.preProduction != null },
       });
 
       res.json(updated);
@@ -435,21 +754,21 @@ purchaseOrdersRouter.patch(
 
 purchaseOrdersRouter.delete("/:id/items/:itemId", requireRole("BD"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
   try {
-    const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { _count: { select: { batches: true } } } });
+    const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { preProduction: { select: { id: true } } } });
     if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
 
-    // Batch.purchaseOrderItemId cascades on delete — this item's own
-    // production Batches (and everything hanging off each one:
-    // BatchStageEvent's whole audit trail, BatchMaterialConsumption)
-    // would be silently wiped out along with it, even one sitting at
-    // Dispatch, fully packaged and QC-approved. There's no confirmation
-    // dialog that could make that safe to allow — a line item with real
-    // production against it just isn't removable any more, same "it's
-    // real ledger history, not a form field" reasoning as everywhere
-    // else deletion is locked down in this app.
-    if (item._count.batches > 0) {
+    // PreProduction.purchaseOrderItemId cascades on delete — this item's
+    // own production run (and everything hanging off it: its stage
+    // events, consumption ledger, and every ProductionBatch/CombinedLot
+    // that grew out of it) would be silently wiped out along with it,
+    // even one sitting at Dispatch, fully packaged and QC-approved.
+    // There's no confirmation dialog that could make that safe to allow —
+    // a line item with real production against it just isn't removable
+    // any more, same "it's real ledger history, not a form field"
+    // reasoning as everywhere else deletion is locked down in this app.
+    if (item.preProduction) {
       return res.status(409).json({
-        error: `This line item has ${item._count.batches} production batch${item._count.batches === 1 ? "" : "es"} against it and can't be removed — deleting it would erase that batch history.`,
+        error: "This line item has a production run against it and can't be removed — deleting it would erase that production history.",
       });
     }
 

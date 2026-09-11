@@ -2,18 +2,23 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, ArrowRight, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useBatches, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePoReadiness, usePurchaseOrders, useRmPlans } from "../lib/hooks";
-import { BATCH_STAGE_ROLE } from "../lib/batchStage";
+import { useCombinedLots, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePoReadiness, usePreProductions, usePurchaseOrders, useRmPlans } from "../lib/hooks";
+import { PRE_PRODUCTION_STAGE_ROLE } from "../lib/preProductionStage";
+import { COMBINED_LOT_STAGE_ROLE } from "../lib/combinedLotStage";
 import { StatTile } from "../components/StatTile";
 import { DelayBadge, RequestStatusBadge, StageBadge } from "../components/Badges";
-import type { BatchStageId } from "../lib/types";
+import type { CombinedLotStageId, PreProduction, PreProductionStageId } from "../lib/types";
 
-// The pipeline's 10 stages, grouped into 5 visual phases so the stepper
-// reads as one clean flow instead of 10 cramped nodes.
-const FLOW_STAGES: { label: string; stages: BatchStageId[]; accent: string }[] = [
-  { label: "Procurement", stages: ["PO_RELEASE", "MATERIAL_RECEIVED"], accent: "amber" },
-  { label: "Planning", stages: ["INDENT_ISSUE"], accent: "slate" },
-  { label: "Manufacturing", stages: ["DISPENSING", "PRODUCTION_EXECUTION", "QA_GATE_MFG"], accent: "blue" },
+type AnyStageId = PreProductionStageId | CombinedLotStageId;
+
+// The pipeline's 12 stages across both tiers, grouped into 5 visual
+// phases so the stepper reads as one clean flow instead of 12 cramped
+// nodes. LINE_CLEARANCE/IPQC/BULK_QC are the three extra QC checkpoints
+// added against the client's Production Process Flow doc.
+const FLOW_STAGES: { label: string; stages: AnyStageId[]; accent: string }[] = [
+  { label: "Procurement", stages: ["MATERIAL_RECEIVED"], accent: "amber" },
+  { label: "Planning", stages: ["INDENT_ISSUE", "LINE_CLEARANCE"], accent: "slate" },
+  { label: "Manufacturing", stages: ["DISPENSING", "SAMPLE_QC_APPROVAL", "IPQC", "QA_GATE_MFG", "BULK_QC"], accent: "blue" },
   { label: "Packaging", stages: ["PACKAGING", "QA_GATE_PACKAGING"], accent: "violet" },
   { label: "Dispatch", stages: ["BILLING_EWAY_BILL", "DISPATCH_PLAN"], accent: "emerald" },
 ];
@@ -25,6 +30,14 @@ const FLOW_COLOR: Record<string, { fill: string; dot: string }> = {
   violet: { fill: "from-violet-300 to-violet-500", dot: "bg-violet-500" },
   emerald: { fill: "from-emerald-300 to-emerald-500", dot: "bg-emerald-500" },
 };
+
+// A PreProduction run counts as "still pending" for queue/count purposes
+// until it's actually cleared its own terminal gate (Sample QC Approval
+// completes in place, so currentStageId alone can't tell "waiting" from
+// "done" the way every earlier stage can).
+function isPreProductionPending(r: PreProduction) {
+  return !(r.currentStageId === "SAMPLE_QC_APPROVAL" && r.sampleQcStatus === "Approved");
+}
 
 function greeting() {
   const h = new Date().getHours();
@@ -42,7 +55,8 @@ function initials(name: string) {
 export function DashboardPage() {
   const { user, hasRole } = useAuth();
   const { data: orders } = usePurchaseOrders();
-  const { data: batches } = useBatches();
+  const { data: preRuns } = usePreProductions();
+  const { data: lots } = useCombinedLots();
   const { data: bomPlans } = useBomPlans();
   const { data: rmPlans } = useRmPlans();
   const { data: stock } = useInventoryStock();
@@ -53,32 +67,29 @@ export function DashboardPage() {
   const { data: poReadinessRows } = usePoReadiness(false, { enabled: canSeePoReadiness });
 
   // ADMIN, BD and PPIC run the whole order book (BD creates orders, PPIC
-  // plans every batch off of them) — everyone else's job is a specific
-  // production stage, so their dashboard is scoped to "batches currently
-  // waiting on my department", not the full company view. hasRole()'s
-  // ADMIN bypass still applies underneath this, but this is a deliberate
-  // narrower *default view* for the other six departments.
+  // plans every run off of them) — everyone else's job is a specific
+  // production stage, so their dashboard is scoped to "production
+  // currently waiting on my department", not the full company view.
+  // hasRole()'s ADMIN bypass still applies underneath this, but this is a
+  // deliberate narrower *default view* for the other six departments.
   const orgWide = hasRole("ADMIN", "BD", "PPIC");
 
-  const allBatches = batches ?? [];
-  // Batches actionable by this department right now, sitting at a stage
-  // this role owns. DISPATCH_PLAN is terminal (nothing comes after it)
-  // but still actionable — Dispatch keeps filling in shipment details
-  // there rather than advancing past it, so it's excluded from every
-  // *other* department's queue (nothing left for them to do) but not
-  // Dispatch's own, and only counts as "done" once a customer
-  // confirmation has actually been recorded.
-  const myQueueBatches = allBatches.filter((b) => {
-    if (!hasRole(BATCH_STAGE_ROLE[b.currentStageId])) return false;
-    if (b.currentStageId === "DISPATCH_PLAN" && (!hasRole("DISPATCH") || b.customerConfirmation === "Received")) return false;
-    return true;
-  });
+  const allPreRuns = preRuns ?? [];
+  const allLots = lots ?? [];
+
+  // Production actionable by this department right now, sitting at a
+  // stage this role owns. DISPATCH_PLAN is terminal (nothing comes after
+  // it), and a PreProduction run that's already Approved has nothing
+  // left for this tier either — both excluded from every department's
+  // queue once reached.
+  const myQueuePreRuns = allPreRuns.filter((r) => isPreProductionPending(r) && hasRole(...PRE_PRODUCTION_STAGE_ROLE[r.currentStageId]));
+  const myQueueLots = allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN" && hasRole(...COMBINED_LOT_STAGE_ROLE[l.currentStageId]));
 
   // Inventory has its own queue of department-owned work that isn't a
-  // Batch stage at all — QA/QC's inward/outward QC checks, and Store's
-  // request review / issue / accept steps. Without this, those roles'
-  // "Your Queue" only ever showed Batch work, even though Inventory had
-  // real items waiting on them.
+  // pipeline stage at all — QA/QC's inward/outward QC checks, and
+  // Store's request review / issue / accept steps. Without this, those
+  // roles' "Your Queue" only ever showed production work, even though
+  // Inventory had real items waiting on them.
   const canQc = !orgWide && hasRole("QA_QC");
   const canReviewInventory = !orgWide && hasRole("STORE");
   const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canQc });
@@ -95,12 +106,19 @@ export function DashboardPage() {
     badge: ReactNode;
   }
 
-  const batchRows: QueueRow[] = myQueueBatches.map((b) => ({
-    key: `batch-${b.id}`,
-    to: `/batches/${b.id}`,
-    title: b.batchNo ?? b.id.slice(0, 8),
-    subtitle: b.purchaseOrderItem.productName,
-    badge: <StageBadge stage={b.currentStageId} />,
+  const preRunRows: QueueRow[] = myQueuePreRuns.map((r) => ({
+    key: `pre-${r.id}`,
+    to: `/pre-productions/${r.id}`,
+    title: r.purchaseOrderItem.productName,
+    subtitle: r.purchaseOrderItem.purchaseOrder.customer.companyName,
+    badge: <StageBadge stage={r.currentStageId} />,
+  }));
+  const lotRows: QueueRow[] = myQueueLots.map((l) => ({
+    key: `lot-${l.id}`,
+    to: `/combined-lots/${l.id}`,
+    title: l.preProduction.purchaseOrderItem.productName,
+    subtitle: l.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName,
+    badge: <StageBadge stage={l.currentStageId} />,
   }));
 
   const pendingQcPill = <span className="pill border-amber-200 bg-amber-50 text-amber-700">Pending QC</span>;
@@ -112,26 +130,33 @@ export function DashboardPage() {
     ...(qcApprovedReceipts ?? []).map((t) => ({ key: `acc-${t.id}`, to: "/inventory", title: t.item.name, subtitle: `Accept into stock · ${t.quantity} ${t.unit}`, badge: <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">QC Approved</span> })),
   ];
 
-  const myQueueRows = [...batchRows, ...inventoryRows];
+  const myQueueRows = [...preRunRows, ...lotRows, ...inventoryRows];
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
-  // A batch at DISPATCH_PLAN isn't done just for having reached that
-  // stage — it's still active until a customer confirmation is actually
-  // recorded (same completion definition as myQueueBatches above).
-  const activeBatches = allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN" || b.customerConfirmation !== "Received").length;
-  const orgDelayed = allBatches.filter((b) => b.delay.isDelayed);
-  const myDelayed = myQueueBatches.filter((b) => b.delay.isDelayed);
+  // "Active" = a run still short of its own terminal gate, or a lot not
+  // yet at Dispatch Plan — same completion definition
+  // purchase-orders.routes.ts's computeCompletion uses.
+  const activeCount = allPreRuns.filter(isPreProductionPending).length + allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN").length;
+  const orgDelayed: { id: string; to: string; title: string; subtitle: string; delay: { isDelayed: boolean; against: "dispatchPlanDate" | "productionPlanDate" | null; daysLate: number | null } }[] = [
+    ...allPreRuns.filter((r) => r.delay.isDelayed).map((r) => ({ id: r.id, to: `/pre-productions/${r.id}`, title: r.purchaseOrderItem.productName, subtitle: r.purchaseOrderItem.purchaseOrder.customer.companyName, delay: r.delay })),
+    ...allLots
+      .filter((l) => l.delay.isDelayed)
+      .map((l) => ({ id: l.id, to: `/combined-lots/${l.id}`, title: l.preProduction.purchaseOrderItem.productName, subtitle: l.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName, delay: l.delay })),
+  ];
+  const myDelayed = orgDelayed.filter((d) => myQueueRows.some((r) => r.to === d.to));
   const negativeStock = stock?.filter((s) => s.onHand < 0).length ?? 0;
   const readyPoCount = poReadinessRows?.filter((r) => r.isReady).length ?? 0;
 
   const stageCounts = FLOW_STAGES.map((group) => ({
     ...group,
-    count: allBatches.filter((b) => group.stages.includes(b.currentStageId)).length,
+    count:
+      allPreRuns.filter((r) => isPreProductionPending(r) && group.stages.includes(r.currentStageId)).length +
+      allLots.filter((l) => group.stages.includes(l.currentStageId)).length,
   }));
   const maxCount = Math.max(1, ...stageCounts.map((s) => s.count));
 
   const recentOrders = [...(orders ?? [])].slice(0, 5);
-  const attentionBatches = orgWide ? orgDelayed : myDelayed;
+  const attentionRows = orgWide ? orgDelayed : myDelayed;
   const displayName = user?.fullName ?? user?.email ?? "";
 
   return (
@@ -143,9 +168,14 @@ export function DashboardPage() {
             --tw-gradient-* custom properties and wash this card out to
             near-white, which a literal `background` value isn't subject to. */}
         <div
-          className="hero-grid relative overflow-hidden rounded-2xl p-6 shadow-lift sm:p-8"
+          className="relative overflow-hidden rounded-2xl p-6 shadow-lift sm:p-8"
           style={{ backgroundColor: "#312e81", backgroundImage: "linear-gradient(135deg, #4338ca 0%, #3730a3 55%, #0f172a 100%)" }}
         >
+          {/* The grid texture rides on its own layer, not on this element:
+              .hero-grid also sets background-size: 32px, which tiled the
+              inline gradient above into a visible 32px checkerboard
+              instead of one smooth wash. */}
+          <div className="hero-grid pointer-events-none absolute inset-0" />
           <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(129,140,248,0.25)" }} />
           <div className="pointer-events-none absolute -bottom-20 left-1/3 h-56 w-56 rounded-full blur-3xl" style={{ backgroundColor: "rgba(167,139,250,0.15)" }} />
           <div className="relative">
@@ -157,7 +187,7 @@ export function DashboardPage() {
             </h1>
             <p className="mt-1.5 max-w-xl text-sm" style={{ color: "#e0e7ff" }}>
               {orgWide
-                ? "Order Tracking is one real pipeline — PO Release through Dispatch Plan, every department's status visible at a glance."
+                ? "Order Tracking is one real pipeline — Material Received through Dispatch Plan, every department's status visible at a glance."
                 : "What's actually on your department's plate right now — not the whole company's order book."}
             </p>
           </div>
@@ -167,7 +197,7 @@ export function DashboardPage() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile icon={ShoppingCart} label="Purchase Orders" value={orders?.length ?? 0} accent="rose" />
             <StatTile icon={Beaker} label="Products" value={totalProducts} accent="brand" />
-            <StatTile icon={Truck} label="Active Batches" value={activeBatches} accent="blue" />
+            <StatTile icon={Truck} label="Active Production" value={activeCount} accent="blue" />
             <StatTile icon={AlarmClock} label="Delayed" value={orgDelayed.length} accent="rose" />
             <StatTile icon={Package} label="BOM + RM Plans" value={(bomPlans?.length ?? 0) + (rmPlans?.length ?? 0)} accent="emerald" />
             <StatTile icon={Warehouse} label="Negative Stock" value={negativeStock} accent={negativeStock ? "rose" : "slate"} />
@@ -187,7 +217,7 @@ export function DashboardPage() {
         {orgWide && (
           <div className="card p-5 sm:p-6">
             <h2 className="mb-4 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              <Sparkles className="h-3.5 w-3.5" /> Production Flow — where every batch is right now
+              <Sparkles className="h-3.5 w-3.5" /> Production Flow — where everything is right now
             </h2>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
               {stageCounts.map((s, idx) => {
@@ -199,14 +229,9 @@ export function DashboardPage() {
                       <p className="text-lg font-black text-slate-900">{s.count}</p>
                     </div>
                     <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
-                      <div
-                        className={`h-full rounded-full bg-gradient-to-r ${color.fill} transition-all duration-500`}
-                        style={{ width: `${Math.max(6, (s.count / maxCount) * 100)}%` }}
-                      />
+                      <div className={`h-full rounded-full bg-gradient-to-r ${color.fill} transition-all duration-500`} style={{ width: `${Math.max(6, (s.count / maxCount) * 100)}%` }} />
                     </div>
-                    {idx < stageCounts.length - 1 && (
-                      <span className={`absolute -right-[7px] top-[26px] hidden h-2 w-2 rounded-full ring-2 ring-white sm:block ${color.dot}`} />
-                    )}
+                    {idx < stageCounts.length - 1 && <span className={`absolute -right-[7px] top-[26px] hidden h-2 w-2 rounded-full ring-2 ring-white sm:block ${color.dot}`} />}
                   </div>
                 );
               })}
@@ -296,20 +321,18 @@ export function DashboardPage() {
             <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">
               <AlarmClock className="h-3.5 w-3.5" /> Needs Attention
             </h3>
-            {attentionBatches.length > 0 && <span className="pill border-rose-200 bg-rose-50 text-rose-700">{attentionBatches.length}</span>}
+            {attentionRows.length > 0 && <span className="pill border-rose-200 bg-rose-50 text-rose-700">{attentionRows.length}</span>}
           </div>
-          {attentionBatches.length === 0 ? (
-            <p className="p-5 text-center text-xs text-slate-400">
-              {orgWide ? "Nothing delayed right now." : "Nothing delayed in your queue."}
-            </p>
+          {attentionRows.length === 0 ? (
+            <p className="p-5 text-center text-xs text-slate-400">{orgWide ? "Nothing delayed right now." : "Nothing delayed in your queue."}</p>
           ) : (
             <div className="divide-y divide-slate-100">
-              {attentionBatches.slice(0, 5).map((b) => (
-                <Link key={b.id} to={`/batches/${b.id}`} className="block px-4 py-2.5 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.rose.500)]">
-                  <p className="truncate font-bold text-slate-700">{b.batchNo ?? b.id.slice(0, 8)}</p>
-                  <p className="truncate text-slate-400">{b.purchaseOrderItem.productName}</p>
+              {attentionRows.slice(0, 5).map((r) => (
+                <Link key={r.id} to={r.to} className="block px-4 py-2.5 text-xs transition-all duration-200 hover:bg-slate-50 hover:pl-5 hover:shadow-[inset_2px_0_0_theme(colors.rose.500)]">
+                  <p className="truncate font-bold text-slate-700">{r.title}</p>
+                  <p className="truncate text-slate-400">{r.subtitle}</p>
                   <div className="mt-1">
-                    <DelayBadge delay={b.delay} />
+                    <DelayBadge delay={r.delay} />
                   </div>
                 </Link>
               ))}

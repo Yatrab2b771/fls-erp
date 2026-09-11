@@ -7,6 +7,7 @@ const ACCENT_CLASSES: Record<string, { bg: string; text: string; bar: string }> 
   rose: { bg: "bg-rose-500/10", text: "text-rose-600", bar: "from-rose-400 to-rose-600" },
   violet: { bg: "bg-violet-500/10", text: "text-violet-600", bar: "from-violet-400 to-violet-600" },
   blue: { bg: "bg-blue-500/10", text: "text-blue-600", bar: "from-blue-400 to-blue-600" },
+  sky: { bg: "bg-sky-500/10", text: "text-sky-600", bar: "from-sky-400 to-sky-600" },
   slate: { bg: "bg-slate-500/10", text: "text-slate-500", bar: "from-slate-300 to-slate-400" },
 };
 

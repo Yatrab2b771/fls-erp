@@ -24,8 +24,8 @@ export function exportPurchaseOrdersReport(orders: PurchaseOrder[]) {
     orders.map((po) => ({
       "PO Number": po.poNumber ?? po.id.slice(0, 8),
       Customer: po.customer.companyName,
-      Brand: po.brandName ?? "",
       "Order Date": po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "",
+      "Expected Delivery Date": po.expectedDeliveryDate ? new Date(po.expectedDeliveryDate).toLocaleDateString() : "",
       Status: po.status,
       Products: po.items.length,
       Completed: po.completion.isCompleted ? "Yes" : "No",
@@ -60,7 +60,6 @@ export function exportPendingPoAgingReport(orders: PurchaseOrder[]) {
     pending.map(({ po, agingDays }) => ({
       Customer: po.customer.companyName,
       "PO Number": po.poNumber ?? po.id.slice(0, 8),
-      Brand: po.brandName ?? "",
       "Order Date": po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "",
       Status: po.status,
       Products: po.items.length,

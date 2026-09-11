@@ -69,27 +69,38 @@ usersRouter.post("/:userId/roles", requireRole("ADMIN"), validateBody(grantRoleS
   }
 });
 
-// isActive and fullName are independent, optional edits on the same
-// row — at least one is required. A tokenVersion bump only makes sense
-// for isActive (it's what forces existing sessions to re-check), not a
+// isActive, fullName, and email are independent, optional edits on the
+// same row — at least one is required. A tokenVersion bump only makes
+// sense for isActive and email (both are what a session's existing
+// token relies on to still mean the same account/permissions), not a
 // plain rename.
 const updateUserSchema = z
-  .object({ isActive: z.boolean().optional(), fullName: z.string().min(1).max(200).optional() })
-  .refine((v) => v.isActive !== undefined || v.fullName !== undefined, { message: "Provide isActive and/or fullName" });
+  .object({ isActive: z.boolean().optional(), fullName: z.string().min(1).max(200).optional(), email: z.string().email().max(200).optional() })
+  .refine((v) => v.isActive !== undefined || v.fullName !== undefined || v.email !== undefined, { message: "Provide isActive, fullName, and/or email" });
 
 usersRouter.patch("/:userId", requireRole("ADMIN"), validateBody(updateUserSchema), async (req: AuthedRequest<{ userId: string }>, res, next) => {
   try {
     const { userId } = req.params;
-    const { isActive, fullName } = req.body as { isActive?: boolean; fullName?: string };
+    const { isActive, fullName, email } = req.body as { isActive?: boolean; fullName?: string; email?: string };
 
     const targetUser = await prisma.user.findUnique({ where: { id: userId } });
     if (!targetUser) return res.status(404).json({ error: "User not found" });
+
+    if (email !== undefined && email !== targetUser.email) {
+      const conflict = await prisma.user.findUnique({ where: { email } });
+      if (conflict) return res.status(409).json({ error: "Another account already uses that email." });
+    }
 
     const updated = await prisma.user.update({
       where: { id: userId },
       data: {
         ...(isActive !== undefined ? { isActive, tokenVersion: { increment: 1 } } : {}),
         ...(fullName !== undefined ? { fullName } : {}),
+        // Email is part of login identity, same reasoning as isActive
+        // above — bump tokenVersion so any session already logged in
+        // under the old email is forced to re-authenticate rather than
+        // keep working under a now-stale identity.
+        ...(email !== undefined && email !== targetUser.email ? { email, tokenVersion: { increment: 1 } } : {}),
       },
     });
 
@@ -98,6 +109,9 @@ usersRouter.patch("/:userId", requireRole("ADMIN"), validateBody(updateUserSchem
     }
     if (fullName !== undefined) {
       await recordAudit({ actorId: req.user!.id, action: "user.renamed", entityType: "User", entityId: userId, metadata: { from: targetUser.fullName, to: fullName } });
+    }
+    if (email !== undefined && email !== targetUser.email) {
+      await recordAudit({ actorId: req.user!.id, action: "user.email_changed", entityType: "User", entityId: userId, metadata: { from: targetUser.email, to: email } });
     }
 
     res.json({ id: updated.id, email: updated.email, fullName: updated.fullName, isActive: updated.isActive });

@@ -1,14 +1,29 @@
-import { useRef, useState, type ChangeEvent } from "react";
+import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Clock, Download, FileSpreadsheet, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
+import { AlertTriangle, Clock, Download, FileSpreadsheet, FileText, ListChecks, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCreateCustomer, useCreatePurchaseOrder, useCustomers, useImportPurchaseOrders, usePurchaseOrders } from "../lib/hooks";
+import {
+  useAllProductNames,
+  useCreateCustomer,
+  useCreatePurchaseOrder,
+  useCreateSku,
+  useCustomers,
+  useImportBatchStages,
+  useImportPurchaseOrders,
+  usePurchaseOrders,
+  useReportCatalogMismatch,
+  useSkus,
+} from "../lib/hooks";
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
 import { ApiError, downloadFile } from "../lib/api";
-import type { PoWastageRejectionRow } from "../lib/types";
+import type { PoWastageRejectionRow, ProductType } from "../lib/types";
 import { exportPendingPoAgingReport, exportPurchaseOrdersReport, exportWastageRejectionReport } from "../lib/purchaseOrdersExport";
 import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
+import { downloadBatchStageImportTemplate, parseBatchStageWorkbook } from "../lib/batchStageImport";
+import { findSimilarName } from "../lib/similarName";
+import { ItemPicker } from "../components/ItemPicker";
+import { PickerWithAdd } from "../components/PickerWithAdd";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -17,6 +32,7 @@ import { useToast } from "../components/Toast";
 import { PoStatusBadge } from "../components/Badges";
 
 const UNIT_OPTIONS = ["KG", "SKU", "Litres", "Other"];
+const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
 
 interface LineItemDraft {
   productName: string;
@@ -25,11 +41,72 @@ interface LineItemDraft {
   unit: string;
   volume: string;
   packSize: string;
-  packType: string;
+  // No longer a form choice — BD doesn't classify this upfront anymore.
+  // Always sent as EXISTING; PPIC's Generate button does the real
+  // catalog match itself and only then discovers whether it's genuinely
+  // new. See PurchaseOrderItem.productType.
+  productType: ProductType;
 }
 
 function blankItem(): LineItemDraft {
-  return { productName: "", dosageForm: "", quantity: "", unit: "KG", volume: "", packSize: "", packType: "" };
+  return { productName: "", dosageForm: "", quantity: "", unit: "KG", volume: "", packSize: "", productType: "EXISTING" };
+}
+
+// Same picker-with-"+ New" behavior as PickerWithAdd, minus its own
+// <label> — every other field on a product line here uses a bare
+// placeholder instead of a label, to keep the row compact.
+function ProductPicker({
+  options,
+  value,
+  onChange,
+  onCreate,
+  placeholder,
+}: {
+  options: { id: string; name: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  onCreate: (name: string) => Promise<{ id: string } | null>;
+  placeholder: string;
+}) {
+  const [showNew, setShowNew] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  async function handleCreate() {
+    if (!newName.trim()) return;
+    setCreating(true);
+    try {
+      const created = await onCreate(newName.trim());
+      if (created) {
+        onChange(created.id);
+        setShowNew(false);
+        setNewName("");
+      }
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return !showNew ? (
+    <div className="flex gap-1.5">
+      <div className="min-w-0 flex-1">
+        <ItemPicker items={options} value={value} onChange={onChange} placeholder={placeholder} icon={Package} />
+      </div>
+      <button type="button" className="btn-ghost btn-sm shrink-0" onClick={() => setShowNew(true)}>
+        <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> New
+      </button>
+    </div>
+  ) : (
+    <div className="flex gap-1.5">
+      <input className="field min-w-0 flex-1" placeholder="New product name" value={newName} onChange={(e) => setNewName(e.target.value)} />
+      <button type="button" className="btn-primary btn-sm shrink-0" disabled={creating} onClick={handleCreate}>
+        {creating ? "Adding…" : "Add"}
+      </button>
+      <button type="button" className="btn-icon shrink-0" title="Cancel" onClick={() => setShowNew(false)}>
+        <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+      </button>
+    </div>
+  );
 }
 
 export function PurchaseOrdersPage() {
@@ -43,14 +120,17 @@ export function PurchaseOrdersPage() {
   const [wastageLoading, setWastageLoading] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const importOrders = useImportPurchaseOrders();
+  const batchImportFileRef = useRef<HTMLInputElement>(null);
+  const importBatchStages = useImportBatchStages();
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
-  const totalBatches = orders?.reduce((sum, po) => sum + po.items.reduce((s, i) => s + (i._count?.batches ?? 0), 0), 0) ?? 0;
+  // Approved but not yet fully shipped — same "in flight" idea the old
+  // per-item batch count stood in for, just at the PO level now that
+  // production detail isn't fetched as part of the list.
+  const inProductionCount = orders?.filter((po) => po.status === "APPROVED" && !po.completion.isCompleted).length ?? 0;
 
   const q = search.trim().toLowerCase();
-  const filteredOrders = orders?.filter(
-    (po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q) || (po.brandName ?? "").toLowerCase().includes(q),
-  );
+  const filteredOrders = orders?.filter((po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q));
 
   function handleExport() {
     if (!filteredOrders?.length) return toast.error("Nothing to export — no purchase orders match.");
@@ -117,6 +197,47 @@ export function PurchaseOrdersPage() {
     }
   }
 
+  // Bulk "forward the current stage" — one row per batch, resolved by
+  // (PO Number, Product Name, Batch No.), each row touching only
+  // whatever stage that batch is currently at (same as the manual
+  // Forward button, just done for many batches from a spreadsheet).
+  async function handleImportBatchFile(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows, skipped, sheetNames, detectedHeaders } = parseBatchStageWorkbook(buffer);
+      if (!rows.length) {
+        // eslint-disable-next-line no-console
+        console.error("[Batch update import] No usable rows.", { fileName: file.name, sheetNames, detectedHeaders, skipped });
+        return toast.error(
+          detectedHeaders.length
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had both a PO Number and a Product Name.`
+            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}).`,
+        );
+      }
+
+      const summary = await importBatchStages.mutateAsync(rows);
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing PO Number or Product Name)` : "";
+      const problems = summary.results.filter((r) => r.status !== "forwarded");
+      const problemNote = problems.length
+        ? ` — ${problems
+            .slice(0, 5)
+            .map((r) => `row ${r.row} (${r.poNumber}/${r.productName}): ${r.message}`)
+            .join("; ")}${problems.length > 5 ? `; …and ${problems.length - 5} more` : ""}`
+        : "";
+      if (summary.forwarded > 0) {
+        toast.success(`Forwarded ${summary.forwarded} of ${summary.rowsProcessed} batch(es).${skippedNote}${problemNote}`);
+      } else {
+        toast.error(`Forwarded 0 of ${summary.rowsProcessed} batch(es).${skippedNote}${problemNote}`);
+      }
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Import failed — check the file and try again.");
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -134,6 +255,21 @@ export function PurchaseOrdersPage() {
           <button className="btn-ghost" onClick={handleExportWastage} disabled={wastageLoading} title="Customer-wise, PO-wise production wastage and QC rejection">
             <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} /> {wastageLoading ? "Loading…" : "Wastage & Rejection"}
           </button>
+          {/* Open to everyone, not just BD — every department forwards
+              batches, and per-row RBAC (see batch-import.ts) already
+              decides which rows a given caller can actually forward. */}
+          <button className="btn-ghost" onClick={downloadBatchStageImportTemplate} title="Download a blank template for bulk-forwarding batches through their current stage">
+            <ListChecks className="h-3.5 w-3.5" strokeWidth={2.5} /> Batch Update Template
+          </button>
+          <button
+            className="btn-ghost"
+            disabled={importBatchStages.isPending}
+            onClick={() => batchImportFileRef.current?.click()}
+            title="Upload a sheet of batch updates — each row forwards that batch's current stage, same as the Forward button"
+          >
+            <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importBatchStages.isPending ? "Importing…" : "Import Batch Updates"}
+          </button>
+          <input ref={batchImportFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportBatchFile} />
           {canCreate && (
             <>
               <button className="btn-ghost" onClick={downloadPurchaseOrderImportTemplate} title="Download a blank template with the correct columns">
@@ -160,14 +296,12 @@ export function PurchaseOrdersPage() {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <StatTile icon={ShoppingCart} label="Purchase Orders" value={orders?.length ?? 0} accent="rose" />
         <StatTile icon={Package} label="Products Queued" value={totalProducts} accent="brand" />
-        <StatTile icon={Truck} label="Batches In Flight" value={totalBatches} accent="emerald" />
+        <StatTile icon={Truck} label="Orders In Production" value={inProductionCount} accent="emerald" />
       </div>
 
       {showForm && <NewPurchaseOrderForm onDone={() => setShowForm(false)} />}
 
-      {!isLoading && !!orders?.length && (
-        <SearchBar value={search} onChange={setSearch} placeholder="Search by PO number, customer, or brand…" />
-      )}
+      {!isLoading && !!orders?.length && <SearchBar value={search} onChange={setSearch} placeholder="Search by PO number or customer…" />}
 
       {isLoading ? (
         <SkeletonRows rows={4} cols={5} />
@@ -183,7 +317,6 @@ export function PurchaseOrdersPage() {
                 <tr>
                   <th>PO Number</th>
                   <th>Customer</th>
-                  <th>Brand</th>
                   <th className="text-center">Products</th>
                   <th>Order Date</th>
                   <th>Status</th>
@@ -200,7 +333,6 @@ export function PurchaseOrdersPage() {
                       </Link>
                     </td>
                     <td className="text-slate-600">{po.customer.companyName}</td>
-                    <td className="text-slate-600">{po.brandName ?? "—"}</td>
                     <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
                     <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
                     <td>
@@ -246,9 +378,38 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
   const [newCustomerName, setNewCustomerName] = useState("");
 
   const [poNumber, setPoNumber] = useState("");
-  const [brandName, setBrandName] = useState("");
+  // Product Name suggests from the selected Customer's own catalog —
+  // there's no separate Brand field any more (a Brand and the Customer
+  // placing the PO are the same real company; see the Sku model's own
+  // schema comment). BD can still add a genuinely new product on the
+  // fly (same "+ New" pattern as Customer above): a bare Sku row, name
+  // only, that R&D fills real specs into later.
+  const createSku = useCreateSku();
+  const reportMismatch = useReportCatalogMismatch();
+  const { data: customerSkus } = useSkus(customerId || undefined);
+  // Every product name across the *whole* catalog, not just this
+  // customer's own — a brand-new customer wanting an already-manufactured
+  // product (same formulation, different brand) can now just pick it here
+  // instead of retyping it and waiting for a mismatch report round-trip.
+  const { data: allProductNames } = useAllProductNames();
+  const productOptions = useMemo(() => {
+    const ownNames = (customerSkus ?? []).map((s) => s.productName);
+    const merged = Array.from(new Set([...ownNames, ...(allProductNames ?? [])]));
+    return merged.map((name) => ({ id: name, name }));
+  }, [customerSkus, allProductNames]);
   const [orderDate, setOrderDate] = useState("");
+  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState("");
   const [regulatoryBody, setRegulatoryBody] = useState("");
+  // FSSAI/AYUSH are the two nearly every PO needs, but not the only
+  // regulatory body that can come up — "+ New" adds one to this session's
+  // own list on the spot, no separate admin screen, same as it works for
+  // Day Store/Plant elsewhere. Nothing to persist server-side: the PO
+  // just stores whatever string ends up here (see regulatoryBodyField in
+  // purchase-orders.schemas.ts), so "creating" one is purely local state.
+  const [regulatoryBodyOptions, setRegulatoryBodyOptions] = useState([
+    { id: "FSSAI", name: "FSSAI" },
+    { id: "AYUSH", name: "AYUSH" },
+  ]);
   const [regulatoryStatus, setRegulatoryStatus] = useState("");
   const [items, setItems] = useState<LineItemDraft[]>([blankItem()]);
   const [file, setFile] = useState<File | null>(null);
@@ -290,6 +451,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
       }
     }
     if (!finalCustomerId) return setError("Select or create a customer first.");
+    if (!expectedDeliveryDate) return setError("Enter the Expected Delivery Date.");
 
     const cleanItems: CreatePurchaseOrderPayload["items"] = [];
     for (const item of items) {
@@ -301,7 +463,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
         unit: item.unit,
         volume: item.volume ? Number(item.volume) : undefined,
         packSize: item.packSize.trim() || undefined,
-        packType: item.packType.trim() || undefined,
+        productType: item.productType,
       });
     }
     if (cleanItems.length === 0) return setError("Add at least one product with a name and quantity.");
@@ -319,8 +481,8 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
       order = await createOrder.mutateAsync({
         customerId: finalCustomerId,
         poNumber: poNumber.trim() || undefined,
-        brandName: brandName.trim() || undefined,
         orderDate: orderDate || undefined,
+        expectedDeliveryDate: expectedDeliveryDate || undefined,
         regulatoryBody: regulatoryBody || undefined,
         regulatoryStatus: regulatoryStatus || undefined,
         items: cleanItems,
@@ -363,14 +525,9 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
           </label>
           {!showNewCustomer ? (
             <div className="flex gap-2">
-              <select className="field" value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-                <option value="">— Select a customer —</option>
-                {customers?.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.companyName}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-0 flex-1">
+                <ItemPicker items={(customers ?? []).map((c) => ({ id: c.id, name: c.companyName }))} value={customerId} onChange={setCustomerId} placeholder="— Select a customer —" />
+              </div>
               <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNewCustomer(true)}>
                 <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New
               </button>
@@ -389,29 +546,39 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
           <input className="field" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} placeholder="PO-2026-XXXX" />
         </div>
         <div>
-          <label className="label">Brand</label>
-          <input className="field" value={brandName} onChange={(e) => setBrandName(e.target.value)} />
-        </div>
-        <div>
           <label className="label">Order Date</label>
           <input type="date" className="field" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
         </div>
         <div>
-          <label className="label">Regulatory Body</label>
-          <select className="field" value={regulatoryBody} onChange={(e) => setRegulatoryBody(e.target.value)}>
-            <option value="">—</option>
-            <option value="FSSAI">FSSAI</option>
-            <option value="AYUSH">AYUSH</option>
-          </select>
+          <label className="label">
+            Expected Delivery Date <span className="text-rose-500">*</span>
+          </label>
+          <input type="date" className="field" value={expectedDeliveryDate} onChange={(e) => setExpectedDeliveryDate(e.target.value)} />
+        </div>
+        <div>
+          <PickerWithAdd
+            label="Regulatory Body"
+            placeholder="FSSAI, AYUSH, …"
+            options={regulatoryBodyOptions}
+            value={regulatoryBody}
+            onChange={setRegulatoryBody}
+            onCreate={async (name) => {
+              setRegulatoryBodyOptions((prev) => (prev.some((o) => o.id.toLowerCase() === name.toLowerCase()) ? prev : [...prev, { id: name, name }]));
+              return { id: name };
+            }}
+          />
         </div>
         <div>
           <label className="label">Regulatory Status</label>
-          <select className="field" value={regulatoryStatus} onChange={(e) => setRegulatoryStatus(e.target.value)}>
-            <option value="">—</option>
-            <option value="Applied">Applied</option>
-            <option value="Not Applied">Not Applied</option>
-            <option value="Issued">Issued</option>
-          </select>
+          <ItemPicker
+            items={[
+              { id: "Applied", name: "Applied" },
+              { id: "Not Applied", name: "Not Applied" },
+              { id: "Issued", name: "Issued" },
+            ]}
+            value={regulatoryStatus}
+            onChange={setRegulatoryStatus}
+          />
         </div>
       </div>
 
@@ -427,13 +594,29 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
         <div className="space-y-3">
           {items.map((item, i) => (
             <div key={i} className="grid grid-cols-2 gap-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-6">
-              <input
-                className="field sm:col-span-2"
-                placeholder={`Product ${i + 1} (e.g. Medicine A)`}
-                value={item.productName}
-                onChange={(e) => updateItem(i, { productName: e.target.value })}
-              />
-              <input className="field" placeholder="Dosage form" value={item.dosageForm} onChange={(e) => updateItem(i, { dosageForm: e.target.value })} />
+              <div className="sm:col-span-2">
+                <ProductPicker
+                  options={productOptions}
+                  value={item.productName}
+                  onChange={(v) => updateItem(i, { productName: v })}
+                  placeholder={`Product ${i + 1} — search the full catalog`}
+                  onCreate={async (name) => {
+                    if (!customerId) return null;
+                    // Same spelling-mismatch problem as Customer above, one
+                    // level down — a typo'd product already in the
+                    // catalog would otherwise silently get a duplicate.
+                    const similar = findSimilarName(name, (customerSkus ?? []).map((s) => s.productName));
+                    if (similar && !window.confirm(`Did you mean the existing product "${similar}"? Click Cancel to use that one, or OK to create "${name}" anyway.`)) {
+                      const customerName = customers?.find((c) => c.id === customerId)?.companyName;
+                      reportMismatch.mutate({ kind: "product", typedName: name, matchedName: similar, customerName });
+                      return { id: similar };
+                    }
+                    await createSku.mutateAsync({ customerId, productName: name });
+                    return { id: name };
+                  }}
+                />
+              </div>
+              <input className="field" placeholder="Dosage form (opt.)" value={item.dosageForm} onChange={(e) => updateItem(i, { dosageForm: e.target.value })} />
               <input
                 className="field font-mono"
                 type="number"
@@ -443,13 +626,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
                 value={item.quantity}
                 onChange={(e) => updateItem(i, { quantity: e.target.value })}
               />
-              <select className="field" value={item.unit} onChange={(e) => updateItem(i, { unit: e.target.value })}>
-                {UNIT_OPTIONS.map((u) => (
-                  <option key={u} value={u}>
-                    {u}
-                  </option>
-                ))}
-              </select>
+              <ItemPicker items={UNIT_ITEMS} value={item.unit} onChange={(v) => updateItem(i, { unit: v })} clearable={false} />
               <div className="flex gap-2">
                 <input
                   className="field font-mono"
@@ -466,6 +643,12 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
                   </button>
                 )}
               </div>
+              <input
+                className="field sm:col-span-2"
+                placeholder="Pack size (opt., e.g. 1kg)"
+                value={item.packSize}
+                onChange={(e) => updateItem(i, { packSize: e.target.value })}
+              />
             </div>
           ))}
         </div>

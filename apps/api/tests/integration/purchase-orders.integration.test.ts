@@ -11,6 +11,31 @@ async function createCustomer(token: string, companyName = "Acme Nutrition Pvt. 
   return res.body;
 }
 
+/**
+ * Walks a PO item's whole three-tier production run straight to a
+ * CombinedLot sitting at DISPATCH_PLAN, via admin JUMPs — fine for tests
+ * that are about PO-level rollups (completion, billing), not the
+ * pipeline walk itself, which the pre-production/production-batches/
+ * combined-lot test suites already cover in full. Returns the
+ * CombinedLot id.
+ */
+async function walkToDispatchPlan(itemId: string, plannedQty: number, tokens: { production: string; admin: string }) {
+  const run = (await request(app).post("/api/pre-productions").set(authHeader(tokens.production)).send({ purchaseOrderItemId: itemId })).body;
+  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
+  // JUMP only moves currentStageId — it doesn't set sampleQcStatus, and
+  // Production can't start until that's literally "Approved" (see
+  // production-batches.routes.ts's own gate), so a real FORWARD still
+  // has to set it even after an admin jump. ADMIN bypasses the stage's
+  // own department check, same as JUMP does.
+  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
+  const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ plannedQty })).body;
+  await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: plannedQty });
+  const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
+  const lot = completed.body.combinedLot as { id: string };
+  await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
+  return lot.id;
+}
+
 describe("POST /api/purchase-orders", () => {
   it("is restricted to BD and requires at least one product line item", async () => {
     const { token: bdToken } = await createUser(["BD"]);
@@ -60,7 +85,7 @@ describe("POST /api/purchase-orders/import", () => {
       .set(authHeader(bdToken))
       .send({
         rows: [
-          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", brandName: "FLS Wellness", orderDate: "2026-08-01", productName: "Whey Protein", quantity: 500, unit: "KG" },
+          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", orderDate: "2026-08-01", productName: "Whey Protein", quantity: 500, unit: "KG" },
           { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", productName: "Multivitamin Capsules", quantity: 2000, unit: "SKU" },
           { poNumber: "PO-IMPORT-1002", customerName: "Brand New Customer Pvt Ltd", productName: "Omega-3 Softgels", quantity: 1000, unit: "SKU" },
         ],
@@ -75,7 +100,6 @@ describe("POST /api/purchase-orders/import", () => {
     expect(po1!.items).toHaveLength(2); // both rows landed on the same PO
     expect(po1!.customerId).toBe(existingCustomer.id); // matched by name, not duplicated
     expect(po1!.status).toBe("DRAFT"); // same review step as the manual form
-    expect(po1!.brandName).toBe("FLS Wellness");
 
     const po2 = await prisma.purchaseOrder.findFirst({ where: { poNumber: "PO-IMPORT-1002" }, include: { customer: true } });
     expect(po2!.customer.companyName).toBe("Brand New Customer Pvt Ltd");
@@ -188,9 +212,9 @@ describe("PO line items — Add More / edit / remove", () => {
     expect(detail.body.items).toHaveLength(1);
   });
 
-  it("editing an item with a Batch against it is still allowed, but records the before/after and how many batches reference it", async () => {
+  it("editing an item with a PreProduction run against it is still allowed, but records the before/after and that a run exists", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
     const customer = await createCustomer(bdToken);
     const po = await request(app)
       .post("/api/purchase-orders")
@@ -199,19 +223,19 @@ describe("PO line items — Add More / edit / remove", () => {
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
 
     const itemId = po.body.items[0].id;
-    await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
+    await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
 
     const edited = await request(app).patch(`/api/purchase-orders/${po.body.id}/items/${itemId}`).set(authHeader(bdToken)).send({ quantity: 60 });
     expect(edited.status).toBe(200); // allowed — only delete is locked
     expect(edited.body.quantity).toBe(60);
 
     const log = await prisma.auditLog.findFirst({ where: { action: "purchase_order.item_updated", entityId: po.body.id }, orderBy: { createdAt: "desc" } });
-    expect(log?.metadata).toMatchObject({ before: { quantity: 100 }, after: { quantity: 60 }, batchCount: 1 });
+    expect(log?.metadata).toMatchObject({ before: { quantity: 100 }, after: { quantity: 60 }, hasPreProduction: true });
   });
 
-  it("blocks removing a line item that already has a production Batch against it — deleting it would cascade away the batch's whole history", async () => {
+  it("blocks removing a line item that already has a PreProduction run against it — deleting it would cascade away the run's whole history", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
     const customer = await createCustomer(bdToken);
     const po = await request(app)
       .post("/api/purchase-orders")
@@ -220,15 +244,15 @@ describe("PO line items — Add More / edit / remove", () => {
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
 
     const itemId = po.body.items[0].id;
-    const batch = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
-    expect(batch.status).toBe(201);
+    const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
+    expect(run.status).toBe(201);
 
     const blocked = await request(app).delete(`/api/purchase-orders/${po.body.id}/items/${itemId}`).set(authHeader(bdToken));
     expect(blocked.status).toBe(409);
 
-    // The batch (and the item it hangs off) is still very much there.
-    const batchStillThere = await request(app).get(`/api/batches/${batch.body.id}`).set(authHeader(bdToken));
-    expect(batchStillThere.status).toBe(200);
+    // The run (and the item it hangs off) is still very much there.
+    const runStillThere = await request(app).get(`/api/pre-productions/${run.body.id}`).set(authHeader(bdToken));
+    expect(runStillThere.status).toBe(200);
   });
 });
 
@@ -284,10 +308,10 @@ describe("GET /api/purchase-orders/:id/export.pdf", () => {
   });
 });
 
-describe("PO completion — days taken from order date to every batch being dispatched and confirmed", () => {
-  it("isCompleted stays false until every batch on every item is DISPATCH_PLAN + customer-confirmed; then completionDate/daysTaken compute off the latest dispatch date", async () => {
+describe("PO completion — days taken from order date to every item's lot reaching Dispatch Plan", () => {
+  it("isCompleted stays false until every item's CombinedLot reaches DISPATCH_PLAN; then completionDate/daysTaken compute off the latest dispatch date", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: dispatchToken } = await createUser(["DISPATCH"]);
     const { token: adminToken } = await createUser(["ADMIN"]);
     const customer = await createCustomer(bdToken, "Completion Test Customer");
@@ -305,32 +329,23 @@ describe("PO completion — days taken from order date to every batch being disp
         ],
       });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
-    expect(po.body.completion).toEqual({ isCompleted: false, completionDate: null, daysTaken: null }); // no batches yet at all
+    expect(po.body.completion).toEqual({ isCompleted: false, completionDate: null, daysTaken: null }); // no production started yet at all
 
     const itemA = po.body.items[0].id;
     const itemB = po.body.items[1].id;
-    const batchA = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemA });
-    const batchB = await request(app).post("/api/batches").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemB });
+    const tokens = { production: productionToken, admin: adminToken };
+    const lotA = await walkToDispatchPlan(itemA, 10, tokens);
+    // Item B deliberately left behind — no production started on it at all.
+    void itemB;
 
-    // Jump both straight to the terminal stage (admin override — fine for
-    // a test that's about the completion math, not the pipeline walk
-    // itself, which the batches test suite already covers in full).
-    await request(app).patch(`/api/batches/${batchA.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
-    await request(app).patch(`/api/batches/${batchB.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
-
-    // Batch A ships and is confirmed first — PO still isn't complete, B hasn't.
-    await request(app)
-      .patch(`/api/batches/${batchA.body.id}/stage`)
-      .set(authHeader(dispatchToken))
-      .send({ action: "FORWARD", dispatchDate: "2026-08-10", customerConfirmation: "Received" });
+    // Lot A ships — PO still isn't complete, B hasn't even started.
+    await request(app).patch(`/api/combined-lots/${lotA}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-08-10" });
     const stillOpen = await request(app).get(`/api/purchase-orders/${po.body.id}`).set(authHeader(bdToken));
     expect(stillOpen.body.completion.isCompleted).toBe(false);
 
-    // B ships later, and is the last one confirmed — that's what completes the PO.
-    await request(app)
-      .patch(`/api/batches/${batchB.body.id}/stage`)
-      .set(authHeader(dispatchToken))
-      .send({ action: "FORWARD", dispatchDate: "2026-08-15", customerConfirmation: "Received" });
+    // B starts, reaches Dispatch Plan and ships later — that's what completes the PO.
+    const lotB = await walkToDispatchPlan(itemB, 5, tokens);
+    await request(app).patch(`/api/combined-lots/${lotB}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-08-15" });
 
     const completed = await request(app).get(`/api/purchase-orders/${po.body.id}`).set(authHeader(bdToken));
     expect(completed.body.completion.isCompleted).toBe(true);
@@ -341,5 +356,94 @@ describe("PO completion — days taken from order date to every batch being disp
     const list = await request(app).get("/api/purchase-orders?pageSize=200").set(authHeader(bdToken));
     const listRow = list.body.find((p: { id: string }) => p.id === po.body.id);
     expect(listRow.completion).toEqual(completed.body.completion);
+  });
+});
+
+// Per the client: one consolidated commercial invoice for the whole PO,
+// not one per batch — Price per Pouch (from each item's own RM Costing
+// plan) x estimated pouches actually shipped, summed across every item.
+describe("GET/POST /api/purchase-orders/:id/billing — PO-level consolidated invoice", () => {
+  it("computes Price/Pouch x estimated-pouches-shipped per item, sums into one total, and lets Accounts save it as a real invoice", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: productionToken } = await createUser(["PRODUCTION"]);
+    const { token: adminToken } = await createUser(["ADMIN"]);
+    const { token: dispatchToken } = await createUser(["DISPATCH"]);
+    const { token: purchaseToken } = await createUser(["PURCHASE"]);
+    const { token: accountsToken } = await createUser(["ACCOUNTS"]);
+    const { token: rndToken } = await createUser(["RND"]);
+
+    // A priceable item — a real Recipe (RM Costing auto-matches by name,
+    // Kg-unit only) so Generate calculates a real packSizeG/pricePerPouch.
+    await request(app)
+      .post("/api/rm-costing/recipes/import")
+      .set(authHeader(rndToken))
+      .send({ recipes: [{ name: "Billing Test Whey", ingredients: [{ name: "Whey Isolate", brand: "TestBrand", costPerKg: 600, gPerServing: 25, proteinPct: 0.9 }] }] });
+
+    const customer = await createCustomer(bdToken, "Billing Test Customer");
+    const po = await request(app)
+      .post("/api/purchase-orders")
+      .set(authHeader(bdToken))
+      .send({
+        customerId: customer.id,
+        poNumber: "PO-BILL-1001",
+        items: [
+          { productName: "Billing Test Whey", quantity: 100, unit: "Kg" }, // priceable
+          { productName: "Billing Test Unpriced Product", quantity: 50, unit: "Kg" }, // no Recipe — stays unpriced
+        ],
+      });
+    await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+    const pricedItemId = po.body.items[0].id;
+    const unpricedItemId = po.body.items[1].id;
+
+    // Generate — auto-matches the Recipe, calculates immediately.
+    const rmPlan = await request(app).post("/api/rm-costing/plans").set(authHeader(bdToken)).send({ name: "Billing Test — RM", purchaseOrderItemId: pricedItemId });
+    expect(rmPlan.body.status).toBe("CALCULATED");
+    const packSizeG = rmPlan.body.result.batches[0].packSizeG;
+    const pricePerPouch = rmPlan.body.result.batches[0].pricePerPouch;
+    expect(packSizeG).toBeGreaterThan(0);
+    expect(pricePerPouch).toBeGreaterThan(0);
+
+    // Production run for the priced item, jumped straight to Dispatch Plan
+    // with a real dispatchedQty (Kg — same unit as the PO item, not pouches).
+    const lotId = await walkToDispatchPlan(pricedItemId, 100, { production: productionToken, admin: adminToken });
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-09-10", dispatchedQty: 85 });
+
+    // Denied roles first.
+    const deniedGet = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(bdToken));
+    expect(deniedGet.status).toBe(403);
+    const deniedGenerate = await request(app).post(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(purchaseToken)).send({});
+    expect(deniedGenerate.status).toBe(403); // Purchase can preview, not commit
+
+    const preview = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(purchaseToken));
+    expect(preview.status).toBe(200);
+    expect(preview.body.invoice).toBeNull(); // nothing saved yet
+
+    const pricedLine = preview.body.lines.find((l: { purchaseOrderItemId: string }) => l.purchaseOrderItemId === pricedItemId);
+    const unpricedLine = preview.body.lines.find((l: { purchaseOrderItemId: string }) => l.purchaseOrderItemId === unpricedItemId);
+
+    // 85 Kg dispatched -> pouches via packSizeG, x pricePerPouch.
+    const expectedPouches = Math.round(((85 * 1000) / packSizeG) * 100) / 100;
+    const expectedAmount = Math.round(expectedPouches * pricePerPouch * 100) / 100;
+    expect(pricedLine).toMatchObject({ dispatchedQtyKg: 85, packSizeG, pricePerPouch, priced: true });
+    expect(pricedLine.estimatedPouches).toBeCloseTo(expectedPouches, 2);
+    expect(pricedLine.amount).toBeCloseTo(expectedAmount, 2);
+
+    // The unpriced item (no RM Costing plan at all) carries a null amount
+    // — never guessed at — and doesn't count toward the total.
+    expect(unpricedLine).toMatchObject({ dispatchedQtyKg: 0, packSizeG: null, pricePerPouch: null, estimatedPouches: null, amount: null, priced: false });
+    expect(preview.body.totalAmount).toBeCloseTo(expectedAmount, 2);
+
+    // Accounts commits it as a real, saved invoice.
+    const generated = await request(app)
+      .post(`/api/purchase-orders/${po.body.id}/billing`)
+      .set(authHeader(accountsToken))
+      .send({ invoiceNo: "INV-PO-1001", invoiceDate: "2026-09-11" });
+    expect(generated.status).toBe(201);
+    expect(generated.body.invoice).toMatchObject({ invoiceNo: "INV-PO-1001", totalAmount: preview.body.totalAmount });
+    expect(generated.body.invoice.generatedBy.fullName).toBeTruthy();
+
+    // A later preview now shows the saved invoice alongside the live recompute.
+    const afterSave = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(accountsToken));
+    expect(afterSave.body.invoice.invoiceNo).toBe("INV-PO-1001");
   });
 });

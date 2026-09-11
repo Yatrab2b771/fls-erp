@@ -1,40 +1,49 @@
 import { AlarmClock, Recycle } from "lucide-react";
-import { BATCH_STAGE_LABEL } from "../lib/batchStage";
-import type { BatchDelay, BatchStageId, BatchWastage } from "../lib/types";
+import { PRE_PRODUCTION_STAGE_LABEL } from "../lib/preProductionStage";
+import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
+import type { CombinedLotStageId, PreProductionStageId, StageDelay, StageWastage } from "../lib/types";
+
+type AnyStageId = PreProductionStageId | CombinedLotStageId;
+
+const STAGE_LABEL: Record<AnyStageId, string> = { ...PRE_PRODUCTION_STAGE_LABEL, ...COMBINED_LOT_STAGE_LABEL };
 
 // Color-coded by rough phase of the pipeline, not one color per stage —
-// 10 distinct colors would be noise.
-const STAGE_COLOR: Record<BatchStageId, string> = {
-  PO_RELEASE: "bg-amber-50 text-amber-700 border-amber-200",
+// a dozen distinct colors across both tiers would be noise.
+const STAGE_COLOR: Record<AnyStageId, string> = {
   MATERIAL_RECEIVED: "bg-amber-50 text-amber-700 border-amber-200",
   INDENT_ISSUE: "bg-slate-100 text-slate-600 border-slate-200",
+  LINE_CLEARANCE: "bg-sky-50 text-sky-700 border-sky-200",
   DISPENSING: "bg-amber-50 text-amber-700 border-amber-200",
-  PRODUCTION_EXECUTION: "bg-blue-50 text-blue-700 border-blue-200",
+  SAMPLE_QC_APPROVAL: "bg-sky-50 text-sky-700 border-sky-200",
+  IPQC: "bg-sky-50 text-sky-700 border-sky-200",
   QA_GATE_MFG: "bg-blue-50 text-blue-700 border-blue-200",
+  BULK_QC: "bg-sky-50 text-sky-700 border-sky-200",
   PACKAGING: "bg-violet-50 text-violet-700 border-violet-200",
   QA_GATE_PACKAGING: "bg-violet-50 text-violet-700 border-violet-200",
   BILLING_EWAY_BILL: "bg-emerald-50 text-emerald-700 border-emerald-200",
   DISPATCH_PLAN: "bg-emerald-50 text-emerald-700 border-emerald-200",
 };
 
-const STAGE_DOT: Record<BatchStageId, string> = {
-  PO_RELEASE: "bg-amber-500",
+const STAGE_DOT: Record<AnyStageId, string> = {
   MATERIAL_RECEIVED: "bg-amber-500",
   INDENT_ISSUE: "bg-slate-400",
+  LINE_CLEARANCE: "bg-sky-500",
   DISPENSING: "bg-amber-500",
-  PRODUCTION_EXECUTION: "bg-blue-500",
+  SAMPLE_QC_APPROVAL: "bg-sky-500",
+  IPQC: "bg-sky-500",
   QA_GATE_MFG: "bg-blue-500",
+  BULK_QC: "bg-sky-500",
   PACKAGING: "bg-violet-500",
   QA_GATE_PACKAGING: "bg-violet-500",
   BILLING_EWAY_BILL: "bg-emerald-500",
   DISPATCH_PLAN: "bg-emerald-500",
 };
 
-export function StageBadge({ stage }: { stage: BatchStageId }) {
+export function StageBadge({ stage }: { stage: AnyStageId }) {
   return (
     <span className={`pill ${STAGE_COLOR[stage]}`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${STAGE_DOT[stage]} ${stage === "DISPATCH_PLAN" ? "" : "animate-pulse"}`} />
-      {BATCH_STAGE_LABEL[stage]}
+      <span className={`h-1.5 w-1.5 rounded-full ${STAGE_DOT[stage]} ${stage === "DISPATCH_PLAN" || stage === "SAMPLE_QC_APPROVAL" ? "" : "animate-pulse"}`} />
+      {STAGE_LABEL[stage]}
     </span>
   );
 }
@@ -47,7 +56,12 @@ const PO_STATUS_COLOR: Record<"DRAFT" | "APPROVED" | "REJECTED", string> = {
 };
 
 export function PoStatusBadge({ status }: { status: "DRAFT" | "APPROVED" | "REJECTED" }) {
-  return <span className={`pill ${PO_STATUS_COLOR[status]}`}>{status[0]}{status.slice(1).toLowerCase()}</span>;
+  return (
+    <span className={`pill ${PO_STATUS_COLOR[status]}`}>
+      {status[0]}
+      {status.slice(1).toLowerCase()}
+    </span>
+  );
 }
 
 // Material Request lifecycle — PENDING → APPROVED → (PARTIALLY_ISSUED →)* ISSUED, or REJECTED.
@@ -83,7 +97,7 @@ export function RequestStatusBadge({ status }: { status: RequestStatus }) {
   );
 }
 
-export function DelayBadge({ delay }: { delay: BatchDelay }) {
+export function DelayBadge({ delay }: { delay: StageDelay }) {
   if (!delay.isDelayed) return null;
   const against = delay.against === "dispatchPlanDate" ? "Dispatch Plan" : "Production Plan";
   return (
@@ -95,8 +109,8 @@ export function DelayBadge({ delay }: { delay: BatchDelay }) {
 }
 
 // Only shown once Production has actually recorded input/output — a
-// batch that hasn't reached that stage yet has nothing to report.
-export function WastageBadge({ wastage }: { wastage: BatchWastage }) {
+// production run that hasn't reached that point yet has nothing to report.
+export function WastageBadge({ wastage }: { wastage: StageWastage }) {
   if (wastage.wastageQty === null) return null;
   return (
     <span className="pill animate-fade-in border-amber-200 bg-amber-50 text-amber-700" title="Production wastage — inputQty minus outputQty">
