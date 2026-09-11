@@ -1,6 +1,9 @@
 {
   "name": "fls-erp",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "workspaces": [
     "apps/api",
     "apps/web"
