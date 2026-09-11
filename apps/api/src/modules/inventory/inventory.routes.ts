@@ -236,7 +236,11 @@ inventoryRouter.post("/items/import-master", requireRole("STORE"), validateBody(
 
 // --- Stock on hand — sum(RECEIVED) − sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) per item ---
 
-inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req: AuthedRequest, res, next) => {
+// ACCOUNTS included too — they can already edit an item's own
+// Cost/Purchase/MRP/Sales pricing (PATCH /items/:id/pricing below) and
+// need to browse the catalog to get there; same reasoning extends to
+// stock-by-location just below.
+inventoryRouter.get("/stock", requireRole("STORE", "PPIC", "ACCOUNTS"), async (req: AuthedRequest, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
 
@@ -291,7 +295,7 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC"), async (req: AuthedRe
 // Warehouse ledger — cheap, since each call is scoped to this single
 // itemId. Report #5: "pick an RM/PM, see Warehouse vs every Day Store
 // vs every Plant side by side."
-inventoryRouter.get("/items/:id/stock-by-location", requireRole("STORE", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.get("/items/:id/stock-by-location", requireRole("STORE", "PPIC", "ACCOUNTS"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const item = await prisma.inventoryItem.findUnique({ where: { id: req.params.id } });
     if (!item) return res.status(404).json({ error: "Item not found" });
@@ -510,7 +514,10 @@ export const txnInclude = {
 // QA_QC needs to see the Received log (to know what's awaiting inward
 // QC), not the rest of the ledger — the frontend scopes what it actually
 // shows per role, same pattern as PPIC's narrower Inventory access above.
-inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC"), async (req, res, next) => {
+// ACCOUNTS needs it too — they can already raise a debit note against a
+// Received row (see POST /transactions/:id/debit-notes below), which is
+// meaningless if they can never see the row to raise one against.
+inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS"), async (req, res, next) => {
   try {
     const { type, category, itemId, receiptStatus } = req.query as {
       type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";

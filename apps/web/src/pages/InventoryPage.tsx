@@ -564,8 +564,11 @@ export function InventoryPage() {
   // Per-tab visibility — each department only gets the slice of this
   // module its role actually has API access to (see inventory.routes.ts).
   const tabVisible: Record<ViewTab, boolean> = {
-    stock: canWrite || canRequest,
-    RECEIVED: canWrite || canInwardQc,
+    // ACCOUNTS on both: they can edit item pricing (needs Stock on Hand
+    // to browse into an item) and raise a debit note against a Received
+    // row (needs to actually see that row) — see inventory.routes.ts.
+    stock: canWrite || canRequest || canInvoice,
+    RECEIVED: canWrite || canInwardQc || canInvoice,
     ISSUED_DAY_STORE: canWrite,
     ISSUED_PRODUCTION: canWrite,
     requests: canWrite || canRequest,
