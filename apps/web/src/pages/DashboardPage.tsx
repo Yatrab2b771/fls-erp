@@ -158,19 +158,17 @@ export function DashboardPage() {
   ];
 
   const rndPill = <span className="pill border-violet-200 bg-violet-50 text-violet-700">R&D</span>;
+  const rndOpenCatalogGaps = (rndCatalogGaps ?? []).filter((r) => r.status !== "READY");
+  const rndAwaitingConfirmation = (rndPendingTransfers ?? []).filter((t) => t.direction === "TO_RND");
   const rndRows: QueueRow[] = [
-    ...(rndCatalogGaps ?? [])
-      .filter((r) => r.status !== "READY")
-      .map((r) => ({
-        key: `rr-${r.id}`,
-        to: "/rnd",
-        title: r.productName,
-        subtitle: `${r.customerName ?? "Unknown customer"} · ${r.status === "PENDING" ? "Needs an ETA" : "In progress"}`,
-        badge: rndPill,
-      })),
-    ...(rndPendingTransfers ?? [])
-      .filter((t) => t.direction === "TO_RND")
-      .map((t) => ({ key: `rt-${t.id}`, to: "/rnd-store", title: t.itemName, subtitle: `Confirm receipt · ${t.quantity} ${t.unit}`, badge: rndPill })),
+    ...rndOpenCatalogGaps.map((r) => ({
+      key: `rr-${r.id}`,
+      to: "/rnd",
+      title: r.productName,
+      subtitle: `${r.customerName ?? "Unknown customer"} · ${r.status === "PENDING" ? "Needs an ETA" : "In progress"}`,
+      badge: rndPill,
+    })),
+    ...rndAwaitingConfirmation.map((t) => ({ key: `rt-${t.id}`, to: "/rnd-store", title: t.itemName, subtitle: `Confirm receipt · ${t.quantity} ${t.unit}`, badge: rndPill })),
     ...(rndPendingSampleRequests ?? []).map((r) => ({ key: `rsr-${r.id}`, to: "/rnd-store", title: r.itemName, subtitle: `Awaiting Store · ${r.quantity} ${r.unit}`, badge: rndPill })),
   ];
 
@@ -255,6 +253,14 @@ export function DashboardPage() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile icon={ClipboardList} label="Awaiting You" value={myQueueRows.length} accent="blue" />
             <StatTile icon={AlarmClock} label="Delayed (Yours)" value={myDelayed.length} accent="rose" />
+            {canRnd && (
+              <>
+                <StatTile icon={Beaker} label="R&D Requests" value={rndOpenCatalogGaps.length} accent="violet" />
+                <StatTile icon={FlaskConical} label="Awaiting Confirmation" value={rndAwaitingConfirmation.length} accent="brand" />
+                <StatTile icon={ClipboardList} label="Sample Requests Pending" value={rndPendingSampleRequests?.length ?? 0} accent="amber" />
+                <StatTile icon={CheckCircle2} label="Inward QC (yours)" value={pendingReceiptQc?.length ?? 0} accent="emerald" />
+              </>
+            )}
           </div>
         )}
 
