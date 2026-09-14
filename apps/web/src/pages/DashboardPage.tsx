@@ -12,7 +12,9 @@ import {
   usePoReadiness,
   usePreProductions,
   usePurchaseOrders,
+  useCatalogSkuCount,
   useRecipeRequests,
+  useRecipes,
   useRmPlans,
   useRndSampleRequests,
   useRndTransfers,
@@ -124,6 +126,8 @@ export function DashboardPage() {
   const { data: rndCatalogGaps } = useRecipeRequests({ enabled: canRnd });
   const { data: rndPendingTransfers } = useRndTransfers("PENDING", { enabled: canRnd });
   const { data: rndPendingSampleRequests } = useRndSampleRequests("PENDING", { enabled: canRnd });
+  const { data: rndRecipes } = useRecipes({ enabled: canRnd });
+  const { data: rndSkuCount } = useCatalogSkuCount({ enabled: canRnd });
 
   interface QueueRow {
     key: string;
@@ -159,7 +163,16 @@ export function DashboardPage() {
 
   const rndPill = <span className="pill border-violet-200 bg-violet-50 text-violet-700">R&D</span>;
   const rndOpenCatalogGaps = (rndCatalogGaps ?? []).filter((r) => r.status !== "READY");
+  // Committed to a date (etaDate set) and that date has already passed,
+  // still not READY — the "Delayed" equivalent for R&D Requests, since
+  // the org-wide delay logic above is scoped to production dates only
+  // and never sees this queue at all.
+  const rndOverdueRequests = rndOpenCatalogGaps.filter((r) => r.etaDate && new Date(r.etaDate) < new Date());
   const rndAwaitingConfirmation = (rndPendingTransfers ?? []).filter((t) => t.direction === "TO_RND");
+  // RND's only CombinedLot-stage ownership is Bulk QC (see
+  // COMBINED_LOT_STAGE_ROLE) — so for a non-org-wide RND session,
+  // lotRows is already exactly this queue, nothing further to filter.
+  const rndBulkQcCount = lotRows.length;
   const rndRows: QueueRow[] = [
     ...rndOpenCatalogGaps.map((r) => ({
       key: `rr-${r.id}`,
@@ -256,9 +269,12 @@ export function DashboardPage() {
             {canRnd && (
               <>
                 <StatTile icon={Beaker} label="R&D Requests" value={rndOpenCatalogGaps.length} accent="violet" />
+                <StatTile icon={AlarmClock} label="Requests Overdue" value={rndOverdueRequests.length} accent={rndOverdueRequests.length ? "rose" : "slate"} />
                 <StatTile icon={FlaskConical} label="Awaiting Confirmation" value={rndAwaitingConfirmation.length} accent="brand" />
                 <StatTile icon={ClipboardList} label="Sample Requests Pending" value={rndPendingSampleRequests?.length ?? 0} accent="amber" />
                 <StatTile icon={CheckCircle2} label="Inward QC (yours)" value={pendingReceiptQc?.length ?? 0} accent="emerald" />
+                <StatTile icon={Truck} label="Bulk QC / COA Pending" value={rndBulkQcCount} accent="blue" />
+                <StatTile icon={Package} label="Catalog Size" value={`${rndRecipes?.length ?? 0} recipes · ${rndSkuCount ?? 0} SKUs`} accent="slate" />
               </>
             )}
           </div>

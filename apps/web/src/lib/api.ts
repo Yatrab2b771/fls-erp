@@ -74,6 +74,27 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
   return data as T;
 }
 
+/** Like api(), but for a paginated GET where the caller only wants "how
+ * many rows are there" (the X-Total-Count header), not a page of rows —
+ * a lightweight catalog-size read, e.g. the dashboard's SKU count. */
+export async function apiCount(path: string): Promise<number> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+
+  if (res.status === 401) {
+    onUnauthorized();
+    throw new ApiError("Session expired — please log in again.", 401);
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new ApiError(data.error ?? `Request failed (${res.status})`, res.status, data.details);
+  }
+  return Number(res.headers.get("X-Total-Count") ?? 0);
+}
+
 /** Triggers a browser download from an authenticated endpoint — a plain <a href> can't carry the Authorization header. */
 export async function downloadFile(path: string, filename: string): Promise<void> {
   const token = getToken();

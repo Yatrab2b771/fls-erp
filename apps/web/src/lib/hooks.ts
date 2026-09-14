@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./api";
+import { api, apiCount } from "./api";
 import type {
   AppNotification,
   AuditLogEntry,
@@ -713,8 +713,24 @@ export function useGiveRecipeRequestEta() {
 
 // --- RM Costing module ---
 
-export function useRecipes() {
-  return useQuery({ queryKey: ["rm-costing", "recipes"], queryFn: () => api<RecipeSummary[]>("/api/rm-costing/recipes") });
+export function useRecipes(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["rm-costing", "recipes"],
+    queryFn: () => api<RecipeSummary[]>("/api/rm-costing/recipes"),
+    enabled: options?.enabled ?? true,
+  });
+}
+
+// Company-wide catalog size (every customer, not one) — just the count,
+// for a reference stat tile. GET /api/catalog/skus is open to any
+// authenticated role, same as useRecipes above; pageSize=1 keeps the
+// actual row payload negligible, the X-Total-Count header is the point.
+export function useCatalogSkuCount(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["catalog", "skus", "count"],
+    queryFn: () => apiCount("/api/catalog/skus?pageSize=1"),
+    enabled: options?.enabled ?? true,
+  });
 }
 
 export function useImportRecipes() {
