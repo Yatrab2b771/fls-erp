@@ -1611,10 +1611,11 @@ function invalidateRndStore(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["inventory"] });
 }
 
-export function useRndTransfers(status?: "PENDING" | "CONFIRMED") {
+export function useRndTransfers(status?: "PENDING" | "CONFIRMED", options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["rnd-store", "transfers", status ?? null],
     queryFn: () => api<RndTransfer[]>(`/api/rnd-store/transfers${status ? `?status=${status}` : ""}`),
+    enabled: options?.enabled ?? true,
   });
 }
 
@@ -1630,10 +1631,11 @@ export function useCreateRndTransfer() {
   });
 }
 
-export function useRndSampleRequests(status?: RndSampleRequestStatus) {
+export function useRndSampleRequests(status?: RndSampleRequestStatus, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["rnd-store", "requests", status ?? null],
     queryFn: () => api<RndSampleRequest[]>(`/api/rnd-store/requests${status ? `?status=${status}` : ""}`),
+    enabled: options?.enabled ?? true,
   });
 }
 

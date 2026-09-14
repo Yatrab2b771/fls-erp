@@ -2,7 +2,21 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, ArrowRight, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCombinedLots, useBomPlans, useDispatchTransfers, useInventoryRequests, useInventoryStock, useInventoryTransactions, usePoReadiness, usePreProductions, usePurchaseOrders, useRmPlans } from "../lib/hooks";
+import {
+  useCombinedLots,
+  useBomPlans,
+  useDispatchTransfers,
+  useInventoryRequests,
+  useInventoryStock,
+  useInventoryTransactions,
+  usePoReadiness,
+  usePreProductions,
+  usePurchaseOrders,
+  useRecipeRequests,
+  useRmPlans,
+  useRndSampleRequests,
+  useRndTransfers,
+} from "../lib/hooks";
 import { PRE_PRODUCTION_STAGE_ROLE } from "../lib/preProductionStage";
 import { COMBINED_LOT_STAGE_ROLE } from "../lib/combinedLotStage";
 import { StatTile } from "../components/StatTile";
@@ -92,11 +106,24 @@ export function DashboardPage() {
   // Inventory had real items waiting on them.
   const canQc = !orgWide && hasRole("QA_QC");
   const canReviewInventory = !orgWide && hasRole("STORE");
-  const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canQc });
+  // R&D shares inward QC with QA/QC (PATCH /transactions/:id/qc), but not
+  // outward FG dispatch QC — so it folds into the same inward-QC fetch
+  // below rather than getting its own, and never touches pendingDispatchQc.
+  const canRnd = !orgWide && hasRole("RND");
+  const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canQc || canRnd });
   const { data: pendingDispatchQc } = useDispatchTransfers({ type: "FG", qcStatus: "PENDING_QC" }, { enabled: canQc });
   const { data: pendingMaterialRequests } = useInventoryRequests("PENDING", { enabled: canReviewInventory });
   const { data: approvedMaterialRequests } = useInventoryRequests("APPROVED", { enabled: canReviewInventory });
   const { data: qcApprovedReceipts } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "QC_APPROVED" }, { enabled: canReviewInventory });
+
+  // R&D's own non-pipeline queue — a catalog gap PPIC is waiting on, a
+  // sample Store sent that still needs confirming, and R&D's own sample
+  // request still waiting on Store to fulfill. Mirrors the Inventory
+  // block above: real department work that isn't a production-pipeline
+  // stage at all.
+  const { data: rndCatalogGaps } = useRecipeRequests({ enabled: canRnd });
+  const { data: rndPendingTransfers } = useRndTransfers("PENDING", { enabled: canRnd });
+  const { data: rndPendingSampleRequests } = useRndSampleRequests("PENDING", { enabled: canRnd });
 
   interface QueueRow {
     key: string;
@@ -130,7 +157,24 @@ export function DashboardPage() {
     ...(qcApprovedReceipts ?? []).map((t) => ({ key: `acc-${t.id}`, to: "/inventory", title: t.item.name, subtitle: `Accept into stock · ${t.quantity} ${t.unit}`, badge: <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">QC Approved</span> })),
   ];
 
-  const myQueueRows = [...preRunRows, ...lotRows, ...inventoryRows];
+  const rndPill = <span className="pill border-violet-200 bg-violet-50 text-violet-700">R&D</span>;
+  const rndRows: QueueRow[] = [
+    ...(rndCatalogGaps ?? [])
+      .filter((r) => r.status !== "READY")
+      .map((r) => ({
+        key: `rr-${r.id}`,
+        to: "/rnd",
+        title: r.productName,
+        subtitle: `${r.customerName ?? "Unknown customer"} · ${r.status === "PENDING" ? "Needs an ETA" : "In progress"}`,
+        badge: rndPill,
+      })),
+    ...(rndPendingTransfers ?? [])
+      .filter((t) => t.direction === "TO_RND")
+      .map((t) => ({ key: `rt-${t.id}`, to: "/rnd-store", title: t.itemName, subtitle: `Confirm receipt · ${t.quantity} ${t.unit}`, badge: rndPill })),
+    ...(rndPendingSampleRequests ?? []).map((r) => ({ key: `rsr-${r.id}`, to: "/rnd-store", title: r.itemName, subtitle: `Awaiting Store · ${r.quantity} ${r.unit}`, badge: rndPill })),
+  ];
+
+  const myQueueRows = [...preRunRows, ...lotRows, ...inventoryRows, ...rndRows];
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
   // "Active" = a run still short of its own terminal gate, or a lot not
@@ -311,8 +355,10 @@ export function DashboardPage() {
           <div className="space-y-1.5">
             {hasRole("BD") && <QuickAction to="/purchase-orders" icon={ShoppingCart} label="New Purchase Order" accent="rose" />}
             {hasRole("STORE") && <QuickAction to="/inventory" icon={Warehouse} label="Log Inventory Entry" accent="brand" />}
-            {hasRole("PPIC", "PURCHASE") && <QuickAction to="/packaging-bom" icon={Package} label="Packaging BOM" accent="emerald" />}
-            {hasRole("PPIC", "BD") && <QuickAction to="/rm-costing" icon={FlaskConical} label="RM Costing" accent="violet" />}
+            {hasRole("PPIC", "PURCHASE", "RND") && <QuickAction to="/packaging-bom" icon={Package} label="Packaging BOM" accent="emerald" />}
+            {hasRole("PPIC", "BD", "RND") && <QuickAction to="/rm-costing" icon={FlaskConical} label="RM Costing" accent="violet" />}
+            {hasRole("RND") && <QuickAction to="/rnd" icon={Beaker} label="R&D Requests" accent="violet" />}
+            {hasRole("RND") && <QuickAction to="/rnd-store" icon={FlaskConical} label="R&D Store" accent="brand" />}
           </div>
         </div>
 

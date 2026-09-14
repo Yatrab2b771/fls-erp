@@ -516,8 +516,10 @@ export const txnInclude = {
 // shows per role, same pattern as PPIC's narrower Inventory access above.
 // ACCOUNTS needs it too — they can already raise a debit note against a
 // Received row (see POST /transactions/:id/debit-notes below), which is
-// meaningless if they can never see the row to raise one against.
-inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS"), async (req, res, next) => {
+// meaningless if they can never see the row to raise one against. RND
+// shares inward QC itself (see PATCH /transactions/:id/qc below) — same
+// reasoning, seeing the row has to come before acting on it.
+inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND"), async (req, res, next) => {
   try {
     const { type, category, itemId, receiptStatus } = req.query as {
       type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
