@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { AlarmClock, ArrowRight, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
+import { AlarmClock, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useCombinedLots,
@@ -356,18 +356,6 @@ export function DashboardPage() {
           </div>
         </div>
 
-        <div className="card p-4">
-          <h3 className="mb-3 px-1 text-[10.5px] font-bold uppercase tracking-wider text-slate-400">Quick Actions</h3>
-          <div className="space-y-1.5">
-            {hasRole("BD") && <QuickAction to="/purchase-orders" icon={ShoppingCart} label="New Purchase Order" accent="rose" />}
-            {hasRole("STORE") && <QuickAction to="/inventory" icon={Warehouse} label="Log Inventory Entry" accent="brand" />}
-            {hasRole("PPIC", "PURCHASE", "RND") && <QuickAction to="/packaging-bom" icon={Package} label="Packaging BOM" accent="emerald" />}
-            {hasRole("PPIC", "BD", "RND") && <QuickAction to="/rm-costing" icon={FlaskConical} label="RM Costing" accent="violet" />}
-            {hasRole("RND") && <QuickAction to="/rnd" icon={Beaker} label="R&D Requests" accent="violet" />}
-            {hasRole("RND") && <QuickAction to="/rnd-store" icon={FlaskConical} label="R&D Store" accent="brand" />}
-          </div>
-        </div>
-
         <div className="card overflow-hidden">
           <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-4 py-3">
             <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">
@@ -393,24 +381,5 @@ export function DashboardPage() {
         </div>
       </aside>
     </div>
-  );
-}
-
-const ACCENT_ICON: Record<string, string> = {
-  brand: "bg-brand-50 text-brand-600 group-hover:bg-brand-100",
-  emerald: "bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100",
-  rose: "bg-rose-50 text-rose-600 group-hover:bg-rose-100",
-  violet: "bg-violet-50 text-violet-600 group-hover:bg-violet-100",
-};
-
-function QuickAction({ to, icon: Icon, label, accent }: { to: string; icon: typeof ShoppingCart; label: string; accent: keyof typeof ACCENT_ICON }) {
-  return (
-    <Link to={to} className="group flex items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-slate-50">
-      <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${ACCENT_ICON[accent]}`}>
-        <Icon className="h-3.5 w-3.5" strokeWidth={2.25} />
-      </div>
-      <p className="flex-1 text-[12.5px] font-bold text-slate-700">{label}</p>
-      <ArrowRight className="h-3.5 w-3.5 text-slate-300 transition-transform group-hover:translate-x-0.5 group-hover:text-slate-500" strokeWidth={2.5} />
-    </Link>
   );
 }
