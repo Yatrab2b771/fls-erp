@@ -103,7 +103,11 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // behind them is role-gated server-side, so opening the door here
       // adds read access and nothing more.
       { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC", "PURCHASE", "BD"] },
-      { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["RND", "PPIC", "BD"] },
+      // PPIC no longer gets a nav link here — Costing is being removed
+      // from their interface; they keep Packaging BOM above, and RND
+      // stays the one who triggers "Send to Pre-Inventory" off a
+      // calculated RM Costing plan going forward (see RmCostingPage.tsx).
+      { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["RND", "BD"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND", "PPIC"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
     ],

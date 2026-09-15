@@ -241,6 +241,7 @@ export function PurchaseOrdersPage() {
                   <th>PO Number</th>
                   <th>Customer</th>
                   <th className="text-center">Products</th>
+                  <th className="text-center" title="Calculated Packaging BOM / RM Costing plans, out of this PO's product count">BOM / Recipe</th>
                   <th>Order Date</th>
                   <th>Status</th>
                   <th>Completion</th>
@@ -257,6 +258,9 @@ export function PurchaseOrdersPage() {
                     </td>
                     <td className="text-slate-600">{po.customer.companyName}</td>
                     <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
+                    <td className="text-center">
+                      <PoBomRecipeStatus items={po.items} />
+                    </td>
                     <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
                     <td>
                       <PoStatusBadge status={po.status} />
@@ -286,6 +290,28 @@ export function PurchaseOrdersPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Module Integration — Packaging BOM/RM Costing status surfaced right in
+// Order Tracking itself, not just on the PO detail page's own Production
+// Pipeline section (which this reuses the same "CALCULATED" definition
+// from). A quick "is this PO planned yet" glance without opening every
+// row.
+function PoBomRecipeStatus({ items }: { items: { bomPlans?: { status: string }[]; rmPlans?: { status: string }[] }[] }) {
+  if (!items.length) return <span className="text-slate-300">—</span>;
+  const bomCount = items.filter((i) => i.bomPlans?.some((p) => p.status === "CALCULATED")).length;
+  const rmCount = items.filter((i) => i.rmPlans?.some((p) => p.status === "CALCULATED")).length;
+  const pillClass = (count: number) => (count === items.length ? "border-emerald-200 bg-emerald-50 text-emerald-700" : count === 0 ? "border-slate-200 bg-slate-50 text-slate-400" : "border-amber-200 bg-amber-50 text-amber-700");
+  return (
+    <div className="flex items-center justify-center gap-1">
+      <span className={`pill text-[10px] ${pillClass(bomCount)}`} title="Products with a calculated Packaging BOM">
+        BOM {bomCount}/{items.length}
+      </span>
+      <span className={`pill text-[10px] ${pillClass(rmCount)}`} title="Products with a calculated RM Costing (Recipe)">
+        Recipe {rmCount}/{items.length}
+      </span>
     </div>
   );
 }

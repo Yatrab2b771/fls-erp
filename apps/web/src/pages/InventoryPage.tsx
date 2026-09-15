@@ -573,7 +573,9 @@ export function InventoryPage() {
     // to browse into an item) and raise a debit note against a Received
     // row (needs to actually see that row) — see inventory.routes.ts.
     stock: canWrite || canRequest || canInvoice,
-    RECEIVED: canWrite || canInwardQc || canInvoice,
+    // PPIC gets Received too — their own date-wise GRN report — but not
+    // the two Issued tabs, those stay Store's own ledger.
+    RECEIVED: canWrite || canInwardQc || canInvoice || canRequest,
     ISSUED_DAY_STORE: canWrite,
     ISSUED_PRODUCTION: canWrite,
     requests: canWrite || canRequest,
@@ -583,7 +585,9 @@ export function InventoryPage() {
     // STORE-only — the ₹ reconciliation view is an internal accounting
     // tool, same audience as the API route itself.
     reconciliation: canWrite,
-    FG: canWrite || canQc || canDispatch || canInvoice,
+    // PPIC gets FG too — their own date-wise FG booking / dispatch list
+    // reports — but not BILL, that stays Store's own paperwork tab.
+    FG: canWrite || canQc || canDispatch || canInvoice || canRequest,
     BILL: canWrite,
   };
   const visibleMaterialTabs = MATERIAL_TABS.filter((t) => tabVisible[t.key]);
@@ -664,7 +668,7 @@ export function InventoryPage() {
     enabled: materialTab && tabVisible[tab],
   });
   const { data: dispatchTransfers, isLoading: dispatchLoading } = useDispatchTransfers(dispatchTab ? { type: tab } : undefined, {
-    enabled: dispatchTab && (tab === "FG" ? canWrite || canQc || canDispatch || canInvoice : canWrite),
+    enabled: dispatchTab && (tab === "FG" ? canWrite || canQc || canDispatch || canInvoice || canRequest : canWrite),
   });
   const { data: dispatchTotal } = useDispatchTransfers(undefined, { enabled: canWrite });
   const { data: pendingRequests } = useInventoryRequests("PENDING", { enabled: tabVisible.stock });

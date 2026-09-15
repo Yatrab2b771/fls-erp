@@ -89,6 +89,11 @@ export function DashboardPage() {
   // hasRole()'s ADMIN bypass still applies underneath this, but this is a
   // deliberate narrower *default view* for the other six departments.
   const orgWide = hasRole("ADMIN", "BD", "PPIC");
+  // PPIC's own tile set, same "like BD" shape — readiness/planning
+  // numbers instead of BD's sales-side ones, but the BOM/Recipe gap
+  // tiles further below are shared (PPIC is the one who actually
+  // triggers Generate).
+  const isPpicOnlyView = orgWide && hasRole("PPIC") && !hasRole("ADMIN", "BD");
 
   const allPreRuns = preRuns ?? [];
   const allLots = lots ?? [];
@@ -117,6 +122,10 @@ export function DashboardPage() {
   const { data: pendingMaterialRequests } = useInventoryRequests("PENDING", { enabled: canReviewInventory });
   const { data: approvedMaterialRequests } = useInventoryRequests("APPROVED", { enabled: canReviewInventory });
   const { data: qcApprovedReceipts } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "QC_APPROVED" }, { enabled: canReviewInventory });
+  // PPIC's own open indents (both purposes mixed — see InventoryRequest's
+  // own purpose field) — filtered down to Production ones for the tile.
+  const { data: ppicPendingRequests } = useInventoryRequests("PENDING", { enabled: isPpicOnlyView });
+  const ppicOpenRequisitions = (ppicPendingRequests ?? []).filter((r) => r.purpose === "ISSUED_PRODUCTION").length;
 
   // R&D's own non-pipeline queue — a catalog gap PPIC is waiting on, a
   // sample Store sent that still needs confirming, and R&D's own sample
@@ -204,6 +213,10 @@ export function DashboardPage() {
   const itemsWithBom = pendingItems.filter((i) => i.bomPlans?.some((p) => p.status === "CALCULATED")).length;
   const itemsWithRecipe = pendingItems.filter((i) => i.rmPlans?.some((p) => p.status === "CALCULATED")).length;
   const itemsMissingBoth = pendingItems.filter((i) => !i.bomPlans?.some((p) => p.status === "CALCULATED") && !i.rmPlans?.some((p) => p.status === "CALCULATED")).length;
+
+  const poReadinessTracked = poReadinessRows?.length ?? 0;
+  const poReadyCount = poReadinessRows?.filter((r) => r.isReady).length ?? 0;
+  const poNotReadyCount = poReadinessTracked - poReadyCount;
   const orgDelayed: { id: string; to: string; title: string; subtitle: string; delay: { isDelayed: boolean; against: "dispatchPlanDate" | "productionPlanDate" | null; daysLate: number | null } }[] = [
     ...allPreRuns.filter((r) => r.delay.isDelayed).map((r) => ({ id: r.id, to: `/pre-productions/${r.id}`, title: r.purchaseOrderItem.productName, subtitle: r.purchaseOrderItem.purchaseOrder.customer.companyName, delay: r.delay })),
     ...allLots
@@ -264,6 +277,16 @@ export function DashboardPage() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile icon={ShoppingCart} label="Pending POs" value={pendingOrders.length} accent="rose" />
             <StatTile icon={Beaker} label="Products (Pending)" value={pendingItems.length} accent="brand" />
+            <StatTile icon={Truck} label="Active in Production" value={activeCount} accent="blue" />
+            <StatTile icon={Package} label="Have BOM" value={itemsWithBom} accent="emerald" />
+            <StatTile icon={FlaskConical} label="Have Recipe" value={itemsWithRecipe} accent="violet" />
+            <StatTile icon={AlarmClock} label="Missing BOM & Recipe" value={itemsMissingBoth} accent={itemsMissingBoth ? "rose" : "slate"} />
+          </div>
+        ) : isPpicOnlyView ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <StatTile icon={CheckCircle2} label="POs Ready to Execute" value={poReadyCount} accent={poReadyCount ? "emerald" : "slate"} />
+            <StatTile icon={AlarmClock} label="POs Not Ready" value={poNotReadyCount} accent={poNotReadyCount ? "rose" : "slate"} />
+            <StatTile icon={ClipboardList} label="Open Production Requisitions" value={ppicOpenRequisitions} accent="amber" />
             <StatTile icon={Truck} label="Active in Production" value={activeCount} accent="blue" />
             <StatTile icon={Package} label="Have BOM" value={itemsWithBom} accent="emerald" />
             <StatTile icon={FlaskConical} label="Have Recipe" value={itemsWithRecipe} accent="violet" />

@@ -518,8 +518,11 @@ export const txnInclude = {
 // Received row (see POST /transactions/:id/debit-notes below), which is
 // meaningless if they can never see the row to raise one against. RND
 // shares inward QC itself (see PATCH /transactions/:id/qc below) — same
-// reasoning, seeing the row has to come before acting on it.
-inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND"), async (req, res, next) => {
+// reasoning, seeing the row has to come before acting on it. PPIC gets
+// read access too — their own date-wise GRN report (Material Received
+// rows already carry grnNo/grnDate) — the frontend only ever surfaces
+// the Received tab for them, never the two Issued ones.
+inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND", "PPIC"), async (req, res, next) => {
   try {
     const { type, category, itemId, receiptStatus } = req.query as {
       type?: "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION";
@@ -1636,8 +1639,10 @@ export const dispatchTransferInclude = {
 
 // QA_QC needs to see FG transfers awaiting outward QC, and Dispatch/
 // Accounts need the same log for their own S9 actions — the frontend
-// scopes what it actually shows/lets each role act on.
-inventoryRouter.get("/dispatch-transfers", requireRole("STORE", "QA_QC", "DISPATCH", "ACCOUNTS"), async (req, res, next) => {
+// scopes what it actually shows/lets each role act on. PPIC gets read
+// access too, for its own date-wise FG booking / dispatch list reports
+// — frontend only ever exposes the FG tab for them, never BILL.
+inventoryRouter.get("/dispatch-transfers", requireRole("STORE", "QA_QC", "DISPATCH", "ACCOUNTS", "PPIC"), async (req, res, next) => {
   try {
     const { type, customerId, qcStatus } = req.query as { type?: DispatchTransferType; customerId?: string; qcStatus?: DispatchQcStatus };
     const pagination = parsePagination(req);
