@@ -191,6 +191,92 @@ purchaseOrdersRouter.get("/reports/wastage-rejection", async (_req, res, next) =
   }
 });
 
+// BD & PPIC's own download report — one row per PO line item, columns
+// matching their shared Excel template exactly (PO No./PO Date/
+// Customer/Product Name/Qty/Dispatch Qty/Dispatch Date/Value/Ageing/
+// Remarks). Rejected POs are left out — same "not actually pending on
+// anything" reasoning as the aging report above. Value reuses
+// computePoBilling's own per-item pricing (Price per Pouch x estimated
+// pouches shipped, from the item's latest CALCULATED RM Costing plan) —
+// null/blank for an item that isn't priced yet, never guessed at.
+// Ageing is measured from PO Date (falling back to createdAt) through to
+// Dispatch Date once the item has one, or through to today if it's
+// still in flight — so a shipped item's age freezes the day it went out
+// instead of continuing to climb. Remarks has no backing field yet, so
+// it comes back blank for every row — same as the template's own sample
+// data — ready for BD/PPIC to fill in by hand after download.
+purchaseOrdersRouter.get("/reports/bd-ppic", requireRole("BD", "PPIC"), async (_req, res, next) => {
+  try {
+    const orders = await prisma.purchaseOrder.findMany({
+      where: { status: { not: "REJECTED" } },
+      select: {
+        poNumber: true,
+        orderDate: true,
+        createdAt: true,
+        customer: { select: { companyName: true } },
+        items: {
+          where: { deletedAt: null },
+          select: {
+            productName: true,
+            quantity: true,
+            unit: true,
+            preProduction: { select: { combinedLot: { select: { dispatchedQty: true, dispatchDate: true } } } },
+            rmPlans: {
+              where: { status: "CALCULATED" },
+              orderBy: { calculatedAt: "desc" },
+              take: 1,
+              select: { resultSnapshot: true },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const dayMs = 1000 * 60 * 60 * 24;
+    const now = Date.now();
+
+    const rows = orders.flatMap((po) =>
+      po.items.map((item) => {
+        const lot = item.preProduction?.combinedLot ?? null;
+        const dispatchedQtyKg = round(lot?.dispatchedQty ?? 0);
+        const dispatchDate = lot?.dispatchDate ?? null;
+
+        const snapshot = item.rmPlans[0]?.resultSnapshot as { batches?: { packSizeG?: number; pricePerPouch?: number }[] } | null | undefined;
+        const batchResult = snapshot?.batches?.[0];
+        let value: number | null = null;
+        if (batchResult?.packSizeG && batchResult?.pricePerPouch) {
+          const estimatedPouches = round((dispatchedQtyKg * 1000) / batchResult.packSizeG);
+          value = round(estimatedPouches * batchResult.pricePerPouch);
+        }
+
+        const startDate = po.orderDate ?? po.createdAt;
+        const ageingEnd = dispatchDate ?? new Date(now);
+        const ageingDays = Math.max(0, Math.round((ageingEnd.getTime() - startDate.getTime()) / dayMs));
+
+        return {
+          poNumber: po.poNumber,
+          poDate: po.orderDate,
+          customerName: po.customer.companyName,
+          productName: item.productName,
+          quantity: item.quantity,
+          unit: item.unit,
+          dispatchedQty: dispatchedQtyKg,
+          dispatchDate,
+          value,
+          ageingDays,
+        };
+      }),
+    );
+
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
 purchaseOrdersRouter.post("/", requireRole("BD"), validateBody(createPurchaseOrderSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { customerId, items, ...rest } = req.body as CreatePurchaseOrderInput;

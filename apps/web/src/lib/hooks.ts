@@ -230,6 +230,20 @@ export function useAddPurchaseOrderItem(poId: string) {
   });
 }
 
+// BD-only correction of a line item already on the PO — most commonly
+// productName, once a naming mismatch turns up downstream (see
+// findSimilarName). Stays allowed even once production has started
+// against the item (see the PATCH route's own comment); every other
+// field on PurchaseOrderItemSchema is technically accepted too, but the
+// UI only ever sends productName today.
+export function useUpdatePurchaseOrderItem(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, ...body }: { itemId: string; productName: string }) => api(`/api/purchase-orders/${poId}/items/${itemId}`, { method: "PATCH", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+  });
+}
+
 // --- PO Material Readiness — see PoMaterialRequirement in schema.prisma.
 // pageSize is pinned at the API's max (200) rather than paginated in the
 // UI — matches the scale the requirement was raised for (hundreds of

@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import type { PoWastageRejectionRow, PurchaseOrder } from "./types";
+import type { PoBdPpicReportRow, PoWastageRejectionRow, PurchaseOrder } from "./types";
 
 function download(sheetName: string, rows: Record<string, unknown>[], filename: string) {
   const sheet = XLSX.utils.json_to_sheet(rows);
@@ -76,6 +76,27 @@ export function exportPendingPoAgingReport(orders: PurchaseOrder[]) {
 // aren't tied to one specific PO in the data model the way a Batch is,
 // so they're covered by the existing Material Received / Dispatch
 // Transfer reports instead, not duplicated here.
+// BD & PPIC's own download report — columns matching their shared Excel
+// template exactly (see GET /api/purchase-orders/reports/bd-ppic).
+export function exportBdPpicReport(rows: PoBdPpicReportRow[]) {
+  download(
+    "TEMPLATE",
+    rows.map((r) => ({
+      "PO. NO.": r.poNumber ?? "",
+      "PO DATE": r.poDate ? new Date(r.poDate).toLocaleDateString() : "",
+      CUSTOMER: r.customerName,
+      "PRODUCT NAME": r.productName,
+      "QTY.": r.quantity,
+      "DISPATCH QTY.": r.dispatchedQty,
+      "DISPATCH DATE": r.dispatchDate ? new Date(r.dispatchDate).toLocaleDateString() : "",
+      VALUE: r.value ?? "",
+      AGEING: r.ageingDays,
+      REMARKS: "",
+    })),
+    `FLS_BD_PPIC_Report_${todayStamp()}.xlsx`,
+  );
+}
+
 export function exportWastageRejectionReport(rows: PoWastageRejectionRow[]) {
   download(
     "Wastage & Rejection",

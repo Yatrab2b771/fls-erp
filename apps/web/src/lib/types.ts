@@ -157,6 +157,22 @@ export interface PoWastageRejectionRow {
   mfgRejectedQty: number | null;
 }
 
+// BD & PPIC's own download report (GET /api/purchase-orders/reports/bd-ppic)
+// — one row per PO line item, columns matching their shared Excel
+// template. value/ageingDays defined server-side, see that route's comment.
+export interface PoBdPpicReportRow {
+  poNumber: string | null;
+  poDate: string | null;
+  customerName: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  dispatchedQty: number;
+  dispatchDate: string | null;
+  value: number | null;
+  ageingDays: number;
+}
+
 // Report — one RM/PM item's stock split by location (GET
 // /api/inventory/items/:id/stock-by-location). Same balances stock.ts
 // already computes per-location, just gathered for a single item across

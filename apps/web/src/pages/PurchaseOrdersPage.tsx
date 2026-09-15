@@ -16,7 +16,8 @@ import {
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
 import { ApiError, downloadFile } from "../lib/api";
-import type { ProductType } from "../lib/types";
+import type { PoBdPpicReportRow, ProductType } from "../lib/types";
+import { exportBdPpicReport } from "../lib/purchaseOrdersExport";
 import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
 import { findSimilarName } from "../lib/similarName";
 import { ItemPicker } from "../components/ItemPicker";
@@ -110,10 +111,15 @@ export function PurchaseOrdersPage() {
   const { hasRole } = useAuth();
   const { data: orders, isLoading } = usePurchaseOrders();
   const canCreate = hasRole("BD");
+  // BD & PPIC's own download report, matching their shared Excel
+  // template — not the company-wide export every department used to see
+  // (removed entirely for everyone else).
+  const canDownloadBdPpicReport = hasRole("BD", "PPIC");
   const toast = useToast();
 
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
+  const [bdPpicReportLoading, setBdPpicReportLoading] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const importOrders = useImportPurchaseOrders();
 
@@ -125,6 +131,20 @@ export function PurchaseOrdersPage() {
 
   const q = search.trim().toLowerCase();
   const filteredOrders = orders?.filter((po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q));
+
+  async function handleDownloadBdPpicReport() {
+    setBdPpicReportLoading(true);
+    try {
+      const rows = await api<PoBdPpicReportRow[]>("/api/purchase-orders/reports/bd-ppic");
+      if (!rows.length) return toast.error("Nothing to export — no purchase orders yet.");
+      exportBdPpicReport(rows);
+      toast.success(`Report downloaded — ${rows.length} row(s).`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not load the report");
+    } finally {
+      setBdPpicReportLoading(false);
+    }
+  }
 
   // Bulk PO creation — BD's own PO system export, straight to created
   // (Draft) POs instead of retyping each one into the manual form.
@@ -168,6 +188,11 @@ export function PurchaseOrdersPage() {
           <p className="text-sm text-slate-500">One PO can list several products — each becomes its own production tracker.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {canDownloadBdPpicReport && (
+            <button className="btn-ghost" onClick={handleDownloadBdPpicReport} disabled={bdPpicReportLoading} title="Download the BD & PPIC report — PO No., Dates, Customer, Product, Qty, Dispatch, Value and Ageing">
+              <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> {bdPpicReportLoading ? "Loading…" : "Download Report"}
+            </button>
+          )}
           {canCreate && (
             <>
               <button className="btn-ghost" onClick={downloadPurchaseOrderImportTemplate} title="Download a blank template with the correct columns">

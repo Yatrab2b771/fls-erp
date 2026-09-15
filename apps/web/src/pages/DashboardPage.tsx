@@ -192,6 +192,18 @@ export function DashboardPage() {
   // yet at Dispatch Plan — same completion definition
   // purchase-orders.routes.ts's computeCompletion uses.
   const activeCount = allPreRuns.filter(isPreProductionPending).length + allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN").length;
+
+  // BD gets its own tile set instead of the generic org-wide one — same
+  // "pending" definition as the old Pending PO Aging report (not
+  // REJECTED, not yet completed). Every count below is derived from the
+  // same pendingItems array, so they reconcile by construction: Have BOM
+  // + Have Recipe + Missing Both always foot back to Products (Pending).
+  const isBdOnlyView = orgWide && hasRole("BD") && !hasRole("ADMIN", "PPIC");
+  const pendingOrders = (orders ?? []).filter((po) => po.status !== "REJECTED" && !po.completion.isCompleted);
+  const pendingItems = pendingOrders.flatMap((po) => po.items);
+  const itemsWithBom = pendingItems.filter((i) => i.bomPlans?.some((p) => p.status === "CALCULATED")).length;
+  const itemsWithRecipe = pendingItems.filter((i) => i.rmPlans?.some((p) => p.status === "CALCULATED")).length;
+  const itemsMissingBoth = pendingItems.filter((i) => !i.bomPlans?.some((p) => p.status === "CALCULATED") && !i.rmPlans?.some((p) => p.status === "CALCULATED")).length;
   const orgDelayed: { id: string; to: string; title: string; subtitle: string; delay: { isDelayed: boolean; against: "dispatchPlanDate" | "productionPlanDate" | null; daysLate: number | null } }[] = [
     ...allPreRuns.filter((r) => r.delay.isDelayed).map((r) => ({ id: r.id, to: `/pre-productions/${r.id}`, title: r.purchaseOrderItem.productName, subtitle: r.purchaseOrderItem.purchaseOrder.customer.companyName, delay: r.delay })),
     ...allLots
@@ -248,7 +260,16 @@ export function DashboardPage() {
           </div>
         </div>
 
-        {orgWide ? (
+        {isBdOnlyView ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <StatTile icon={ShoppingCart} label="Pending POs" value={pendingOrders.length} accent="rose" />
+            <StatTile icon={Beaker} label="Products (Pending)" value={pendingItems.length} accent="brand" />
+            <StatTile icon={Truck} label="Active in Production" value={activeCount} accent="blue" />
+            <StatTile icon={Package} label="Have BOM" value={itemsWithBom} accent="emerald" />
+            <StatTile icon={FlaskConical} label="Have Recipe" value={itemsWithRecipe} accent="violet" />
+            <StatTile icon={AlarmClock} label="Missing BOM & Recipe" value={itemsMissingBoth} accent={itemsMissingBoth ? "rose" : "slate"} />
+          </div>
+        ) : orgWide ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             <StatTile icon={ShoppingCart} label="Purchase Orders" value={orders?.length ?? 0} accent="rose" />
             <StatTile icon={Beaker} label="Products" value={totalProducts} accent="brand" />

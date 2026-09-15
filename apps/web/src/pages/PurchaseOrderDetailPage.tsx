@@ -15,6 +15,7 @@ import {
   FlaskConical,
   Lock,
   Package,
+  Pencil,
   Plus,
   Receipt,
   Scale,
@@ -43,6 +44,7 @@ import {
   useReportCatalogMismatch,
   useReviewPurchaseOrder,
   useSkus,
+  useUpdatePurchaseOrderItem,
   useUploadPoDocument,
 } from "../lib/hooks";
 import { StageBadge, DelayBadge, PoStatusBadge } from "../components/Badges";
@@ -819,10 +821,25 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
   const createPlant = useCreatePlant();
   const createPreProduction = useCreatePreProduction();
   const removeItem = useRemovePurchaseOrderItem(poId);
+  const updateItem = useUpdatePurchaseOrderItem(poId);
   const toast = useToast();
   const [plantId, setPlantId] = useState("");
   const [showStart, setShowStart] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(item.productName);
   const isApproved = poStatus === "APPROVED";
+
+  async function handleSaveName() {
+    const trimmed = nameDraft.trim();
+    if (!trimmed || trimmed === item.productName) return setEditingName(false);
+    try {
+      await updateItem.mutateAsync({ itemId: item.id, productName: trimmed });
+      toast.success("Product name updated.");
+      setEditingName(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update the product name");
+    }
+  }
 
   async function handleStartProduction(confirmNotReady = false) {
     try {
@@ -853,14 +870,50 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
             <Beaker className="h-4 w-4" strokeWidth={2} />
           </div>
           <div>
-            <p className="flex items-center gap-1.5 font-bold text-slate-800">
-              {item.productName}
-              {item.productType === "NEW" && (
-                <span className="pill border-violet-200 bg-violet-50 text-[10px] text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM Costing can run.">
-                  New Product
-                </span>
-              )}
-            </p>
+            {editingName ? (
+              <div className="flex items-center gap-1.5">
+                <input
+                  autoFocus
+                  className="field h-7 py-0 text-sm font-bold"
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSaveName();
+                    if (e.key === "Escape") {
+                      setNameDraft(item.productName);
+                      setEditingName(false);
+                    }
+                  }}
+                />
+                <button className="btn-icon h-7 w-7" disabled={updateItem.isPending} onClick={handleSaveName} title="Save">
+                  <Check className="h-3.5 w-3.5" strokeWidth={2.5} />
+                </button>
+                <button
+                  className="btn-icon h-7 w-7"
+                  onClick={() => {
+                    setNameDraft(item.productName);
+                    setEditingName(false);
+                  }}
+                  title="Cancel"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+                </button>
+              </div>
+            ) : (
+              <p className="flex items-center gap-1.5 font-bold text-slate-800">
+                {item.productName}
+                {item.productType === "NEW" && (
+                  <span className="pill border-violet-200 bg-violet-50 text-[10px] text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM Costing can run.">
+                    New Product
+                  </span>
+                )}
+                {hasRole("BD") && (
+                  <button className="btn-icon h-6 w-6" onClick={() => setEditingName(true)} title="Edit product name">
+                    <Pencil className="h-3 w-3" strokeWidth={2.25} />
+                  </button>
+                )}
+              </p>
+            )}
             <p className="text-xs text-slate-500">
               {item.dosageForm && `${item.dosageForm} · `}
               <span className="font-mono font-bold text-slate-600">
