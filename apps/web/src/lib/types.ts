@@ -605,6 +605,53 @@ export interface ProductionBatch {
   createdById: string;
   createdByName: string;
   createdAt: string;
+  preProduction: {
+    id: string;
+    purchaseOrderItem: {
+      id: string;
+      productName: string;
+      quantity: number;
+      unit: string;
+      purchaseOrder: { id: string; poNumber: string | null; customer: { id: string; companyName: string } };
+    };
+  };
+  // This batch's OWN Tier-3 pipeline (IPQC through Dispatch Plan) — same
+  // shape as CombinedLot's below, minus Bulk Reconciliation and the COA
+  // sign-off chain (pooled-lot-only concepts, see schema.prisma's
+  // comment on ProductionBatch). Only reachable once status is COMPLETED.
+  currentStageId: CombinedLotStageId;
+  ipqcStatus: string | null;
+  ipqcRemarks: string | null;
+  mfgQaStatus: string | null;
+  mfgQcStatus: string | null;
+  mfgRemarks: string | null;
+  mfgApprovedQty: number | null;
+  mfgRejectedQty: number | null;
+  mfgWastageQty: number | null;
+  bulkQcStatus: string | null;
+  bulkQcRemarks: string | null;
+  packagingStartDate: string | null;
+  packagingStatus: string | null;
+  packagingEndDate: string | null;
+  packagingRemarks: string | null;
+  packQaStatus: string | null;
+  packQcStatus: string | null;
+  packRemarks: string | null;
+  packApprovedQty: number | null;
+  packRejectedQty: number | null;
+  packWastageQty: number | null;
+  invoiceNo: string | null;
+  invoiceDate: string | null;
+  ewayBillNo: string | null;
+  ewayBillDate: string | null;
+  billingRemarks: string | null;
+  dispatchDate: string | null;
+  dispatchedQty: number | null;
+  shipperQty: number | null;
+  totalShipperWeight: number | null;
+  transportType: string | null;
+  remainingQty: number | null;
+  anyRemarks: string | null;
 }
 
 // Tier 1 — one run per PO line item.

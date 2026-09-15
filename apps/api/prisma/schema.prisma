@@ -690,16 +690,29 @@ enum ProductionBatchStatus {
   COMPLETED
 }
 
-// One small manufacturing run against a PreProduction — just Production
-// Execution's own fields, nothing else; the pipeline stages before and
-// after this all live on PreProduction/CombinedLot instead, since they
-// happen once per PO item, not once per production run. plannedQty is
-// how much of PreProduction.plannedQty this specific run covers (see
-// batches.routes.ts POST / — the "how much left to plan" rollup the old
-// per-PO-item version of this already had, now scoped to the parent
-// PreProduction instead). Completing one (status -> COMPLETED) is what
-// actually adds outputQty to PreProduction.combinedQty — see
-// transition.ts's own combine logic.
+// One small manufacturing run against a PreProduction — Production
+// Execution's own fields, plannedQty (how much of PreProduction.plannedQty
+// this specific run covers), plus its OWN independent Tier-3 pipeline
+// (IPQC through Dispatch Plan — see combined-lot-stage.ts's own
+// CombinedLotStageId, reused here as-is rather than a parallel enum).
+//
+// Per the client's real floor practice: a batch doesn't have to wait for
+// every other batch on the same PreProduction to finish before it can be
+// packaged and shipped — completing one (status -> COMPLETED) still adds
+// its outputQty to PreProduction.combinedQty (a running progress figure),
+// but no longer auto-creates a CombinedLot. CombinedLot stays in the
+// schema and still works exactly as before for any lot that already
+// exists — it just isn't the only path a batch's material can take to
+// Dispatch any more; each batch is its own path by default. See
+// production-batch-transition.ts for the FORWARD/REJECT logic (same
+// shape as combined-lot-transition.ts) and purchase-orders.routes.ts's
+// computeCompletion for how a PO's own "done" definition now accounts
+// for both paths.
+//
+// batchNo is intentionally not required at creation — Production leaves
+// it blank; QC assigns the real batch number the first time it touches
+// this run, at its own IPQC stage (see production-batches.routes.ts
+// PATCH /:id/batch-no).
 model ProductionBatch {
   id              String                @id @default(uuid())
   preProductionId String
@@ -719,6 +732,53 @@ model ProductionBatch {
 
   completedById String?
   completedAt   DateTime?
+
+  // --- This batch's own Tier-3 pipeline, only reachable once COMPLETED.
+  // Same field shapes as CombinedLot's own (see that model's comments for
+  // the full reasoning behind each) — deliberately NOT carrying
+  // CombinedLot's Bulk Reconciliation fields (bulkTheoreticalWeight etc.)
+  // or its COA sign-off chain: those stay pooled-lot-only concepts, not
+  // meaningful against one small run. ---
+  currentStageId CombinedLotStageId @default(IPQC)
+
+  ipqcStatus  String?
+  ipqcRemarks String?
+
+  mfgQaStatus    String?
+  mfgQcStatus    String?
+  mfgRemarks     String?
+  mfgApprovedQty Float?
+  mfgRejectedQty Float?
+  mfgWastageQty  Float?
+
+  bulkQcStatus  String?
+  bulkQcRemarks String?
+
+  packagingStartDate DateTime?
+  packagingStatus    String?
+  packagingEndDate   DateTime?
+  packagingRemarks   String?
+
+  packQaStatus    String?
+  packQcStatus    String?
+  packRemarks     String?
+  packApprovedQty Float?
+  packRejectedQty Float?
+  packWastageQty  Float?
+
+  invoiceNo      String?
+  invoiceDate    DateTime?
+  ewayBillNo     String?
+  ewayBillDate   DateTime?
+  billingRemarks String?
+
+  dispatchDate       DateTime?
+  dispatchedQty      Float?
+  shipperQty         Float?
+  totalShipperWeight Float?
+  transportType      String?
+  remainingQty       Float?
+  anyRemarks         String?
 
   createdById String
   createdAt   DateTime @default(now())

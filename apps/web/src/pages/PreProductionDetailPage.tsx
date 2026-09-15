@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Beaker, Check, CheckCircle2, ClipboardEdit, ClipboardList, FlaskConical, Layers, Link2, ListChecks, ListPlus, Lock, Pencil, Plus, Shuffle, Trash2, Undo2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Beaker, Check, CheckCircle2, ClipboardEdit, ClipboardList, FlaskConical, Layers, Link2, ListChecks, ListPlus, Lock, Pencil, Plus, Shuffle, Trash2, Truck, Undo2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useAssignPreProductionPlant,
@@ -23,6 +23,7 @@ import {
   useVerifyConsumption,
 } from "../lib/hooks";
 import { PRE_PRODUCTION_STAGE_FIELDS, PRE_PRODUCTION_STAGE_LABEL, PRE_PRODUCTION_STAGE_ORDER, PRE_PRODUCTION_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/preProductionStage";
+import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
 import { FieldGrid } from "../components/FieldGrid";
 import { ItemPicker } from "../components/ItemPicker";
 import { PickerWithAdd } from "../components/PickerWithAdd";
@@ -1133,17 +1134,19 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
   );
 }
 
+// No Batch No. field here any more — QC assigns the real batch number
+// once, on this batch's own pipeline page, the first time it touches
+// the run (see ProductionBatchDetailPage.tsx's BatchNoBadge). Production
+// just starts the run.
 function NewProductionBatchForm({ preProductionId, remainingQty }: { preProductionId: string; remainingQty: number }) {
   const create = useCreateProductionBatch(preProductionId);
   const toast = useToast();
-  const [batchNo, setBatchNo] = useState("");
   const [plannedQty, setPlannedQty] = useState(String(remainingQty));
 
   async function handleCreate() {
     if (!plannedQty || Number(plannedQty) <= 0) return;
     try {
-      await create.mutateAsync({ batchNo: batchNo.trim() || undefined, plannedQty: Number(plannedQty) });
-      setBatchNo("");
+      await create.mutateAsync({ plannedQty: Number(plannedQty) });
       setPlannedQty("");
       toast.success("Production run started.");
     } catch (err) {
@@ -1153,10 +1156,6 @@ function NewProductionBatchForm({ preProductionId, remainingQty }: { preProducti
 
   return (
     <div className="flex flex-wrap items-end gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 p-3">
-      <div className="w-40">
-        <label className="label">Batch No. (optional)</label>
-        <input className="field" placeholder="e.g. B-2026-081" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
-      </div>
       <div className="w-32">
         <label className="label">Planned Qty</label>
         <input className="field font-mono" type="number" min="0" step="any" value={plannedQty} onChange={(e) => setPlannedQty(e.target.value)} />
@@ -1225,6 +1224,21 @@ function ProductionBatchCard({ preProductionId, batch }: { preProductionId: stri
           )}
         </span>
       </div>
+
+      {/* Once completed, this batch runs its OWN IPQC-through-Dispatch
+          pipeline — doesn't wait on any sibling batch. See
+          ProductionBatchDetailPage.tsx. */}
+      {isDone && (
+        <Link
+          to={`/production-batches/${batch.id}`}
+          className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-bold text-brand-700 hover:bg-brand-100"
+        >
+          <span className="flex items-center gap-1.5">
+            <Truck className="h-3.5 w-3.5" strokeWidth={2.25} /> This batch's own QC / Packaging / Dispatch pipeline — currently at {COMBINED_LOT_STAGE_LABEL[batch.currentStageId]}
+          </span>
+          <ArrowRight className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} />
+        </Link>
+      )}
 
       {!isDone && canAct && (
         <>

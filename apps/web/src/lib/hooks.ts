@@ -639,6 +639,47 @@ export function useCompleteProductionBatch(preProductionId: string) {
   });
 }
 
+// Every COMPLETED batch, across every PreProduction — the Dashboard's
+// own "my queue" source for a batch's own pipeline, same shape
+// useCombinedLots() below has for its tier.
+export function useAllProductionBatches() {
+  return useQuery({ queryKey: ["production-batches"], queryFn: () => api<ProductionBatch[]>("/api/production-batches") });
+}
+
+// Single-run detail fetch — used by this batch's own Tier-3 pipeline
+// page, same shape useCombinedLot(id) below has for its tier.
+export function useProductionBatch(id: string | undefined) {
+  return useQuery({ queryKey: ["production-batches", "detail", id], queryFn: () => api<ProductionBatch>(`/api/production-batches/${id}`), enabled: !!id });
+}
+
+// QC's own call — assigns/corrects the real batch number. Not
+// Production's any more, see ProductionBatch.batchNo's schema comment.
+export function useAssignProductionBatchNo(preProductionId?: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, batchNo }: { id: string; batchNo: string }) => api<ProductionBatch>(`/api/production-batches/${id}/batch-no`, { method: "PATCH", body: { batchNo } }),
+    onSuccess: (updated) => {
+      qc.setQueryData(["production-batches", "detail", updated.id], updated);
+      if (preProductionId) qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
+    },
+  });
+}
+
+// This batch's OWN Tier-3 pipeline transition — same FORWARD/REJECT
+// shape as useTransitionCombinedLotStage below, just no
+// confirmPartialDispatch (a batch dispatching on its own is the normal
+// case here, not an exception to confirm).
+export function useTransitionProductionBatchStage(batchId: string, preProductionId?: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { action: "FORWARD" | "REJECT"; note?: string } & Record<string, unknown>) => api<ProductionBatch>(`/api/production-batches/${batchId}/stage`, { method: "PATCH", body }),
+    onSuccess: (updated) => {
+      qc.setQueryData(["production-batches", "detail", batchId], updated);
+      if (preProductionId) qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
+    },
+  });
+}
+
 // --- Tier 3 — CombinedLot ---
 
 // Every pooled lot, across every PO item — used by the Dashboard's

@@ -5,8 +5,17 @@ import { requireAuth, requireRole, type AuthedRequest } from "../../common/middl
 import { notifyRoles } from "../../common/lib/notify";
 import { runSerializable } from "../../common/lib/serializable-transaction";
 import { productionBatchInclude, serializeProductionBatch, combinedLotInclude, serializeCombinedLot, type ProductionBatchWithRelations } from "./batch-include";
-import { createProductionBatchSchema, productionBatchExecutionSchema, type CreateProductionBatchInput, type ProductionBatchExecutionInput } from "./batch.schemas";
+import {
+  assignBatchNoSchema,
+  createProductionBatchSchema,
+  productionBatchExecutionSchema,
+  productionBatchTransitionEnvelopeSchema,
+  type AssignBatchNoInput,
+  type CreateProductionBatchInput,
+  type ProductionBatchExecutionInput,
+} from "./batch.schemas";
 import { COMBINED_LOT_STAGE_ROLE } from "./combined-lot-stage";
+import { transitionProductionBatchStage } from "./production-batch-transition";
 import type { Prisma } from "@prisma/client";
 
 // --- Tier 2 of the three-tier pipeline (see schema.prisma's own comment
@@ -28,6 +37,21 @@ import type { Prisma } from "@prisma/client";
 export const productionBatchesRouter = Router();
 
 productionBatchesRouter.use(requireAuth);
+
+// Every batch, across every PreProduction, COMPLETED ones only — the
+// Dashboard's own "everything currently in a batch's own IPQC-through-
+// Dispatch pipeline" queue, same "read access open to any authenticated
+// user, not paginated" shape as GET /combined-lots. A still-IN_PROGRESS
+// batch has nothing here yet (see transitionProductionBatchStage), so
+// it's excluded rather than shown sitting at a stage nobody can act on.
+productionBatchesRouter.get("/production-batches", async (_req, res, next) => {
+  try {
+    const batches = await prisma.productionBatch.findMany({ where: { status: "COMPLETED" }, include: productionBatchInclude, orderBy: { completedAt: "desc" } });
+    res.json(batches.map(serializeProductionBatch));
+  } catch (err) {
+    next(err);
+  }
+});
 
 async function requirePreProduction(preProductionId: string) {
   return prisma.preProduction.findUnique({
@@ -107,6 +131,19 @@ async function requireBatch(id: string): Promise<ProductionBatchWithRelations | 
   return prisma.productionBatch.findUnique({ where: { id }, include: productionBatchInclude });
 }
 
+// Single-run detail fetch — its own Tier-3 pipeline detail page needs a
+// clean GET /:id the same shape every other tier in this module has,
+// rather than making the frontend dig a batch out of its parent's list.
+productionBatchesRouter.get("/production-batches/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const batch = await requireBatch(req.params.id);
+    if (!batch) return res.status(404).json({ error: "Production run not found" });
+    res.json(serializeProductionBatch(batch));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Save this run's own execution fields — dates/status/remarks, input and
 // output quantities. Doesn't itself complete the run (see POST
 // /:id/complete below) — same "save everything, don't force it all at
@@ -181,6 +218,59 @@ productionBatchesRouter.post("/production-batches/:id/complete", requireRole("PR
     }
 
     res.json({ productionBatch: serializeProductionBatch(result.batch), combinedLot: result.combinedLot ? serializeCombinedLot(result.combinedLot) : null });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// QC assigns the real batch number — deliberately not Production's call
+// any more (see schema.prisma's own comment on ProductionBatch.batchNo).
+// Settable any time this run exists, not just once at IPQC — a genuine
+// correction later shouldn't be locked out.
+productionBatchesRouter.patch("/production-batches/:id/batch-no", requireRole("QA_QC", "RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const parsed = assignBatchNoSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
+    const { batchNo } = parsed.data as AssignBatchNoInput;
+
+    const existing = await requireBatch(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Production run not found" });
+
+    const updated = await prisma.productionBatch.update({ where: { id: existing.id }, data: { batchNo }, include: productionBatchInclude });
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.batch_no_assigned", entityType: "ProductionBatch", entityId: updated.id, metadata: { batchNo } });
+
+    res.json(serializeProductionBatch(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// This batch's OWN Tier-3 pipeline — IPQC through Dispatch Plan, same
+// FORWARD/REJECT shape as CombinedLot's own PATCH /:id/stage (see
+// combined-lot.routes.ts), just walked once per batch. Only reachable
+// once the run is COMPLETED (see transitionProductionBatchStage) — a
+// still-in-progress batch has nothing for QC to check yet.
+productionBatchesRouter.patch("/production-batches/:id/stage", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const batch = await prisma.productionBatch.findUnique({ where: { id: req.params.id } });
+    if (!batch) return res.status(404).json({ error: "Production run not found" });
+
+    const envelope = productionBatchTransitionEnvelopeSchema.safeParse(req.body);
+    if (!envelope.success) return res.status(400).json({ error: "Validation failed", details: envelope.error.flatten() });
+    const { action, note } = envelope.data;
+
+    const result = await transitionProductionBatchStage({
+      batch,
+      action,
+      note,
+      rawBody: req.body as Record<string, unknown>,
+      actorId: req.user!.id,
+      actorRoles: req.user!.roles,
+    });
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error, ...(result.details !== undefined ? { details: result.details } : {}) });
+    }
+    res.json(serializeProductionBatch(result.updated));
   } catch (err) {
     next(err);
   }

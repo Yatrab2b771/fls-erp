@@ -14,6 +14,7 @@ import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { PreProductionDetailPage } from "./pages/PreProductionDetailPage";
 import { CombinedLotDetailPage } from "./pages/CombinedLotDetailPage";
+import { ProductionBatchDetailPage } from "./pages/ProductionBatchDetailPage";
 import { PackagingBomPage } from "./pages/PackagingBomPage";
 import { RmCostingPage } from "./pages/RmCostingPage";
 import { InventoryPage } from "./pages/InventoryPage";
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/plant-consumption" element={<PlantConsumptionPage />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetailPage />} />
           <Route path="/pre-productions/:id" element={<PreProductionDetailPage />} />
+          <Route path="/production-batches/:id" element={<ProductionBatchDetailPage />} />
           <Route path="/combined-lots/:id" element={<CombinedLotDetailPage />} />
           <Route path="/packaging-bom" element={<PackagingBomPage />} />
           <Route path="/rm-costing" element={<RmCostingPage />} />

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { AlarmClock, Beaker, CheckCircle2, ClipboardList, FlaskConical, Package, ShoppingCart, Sparkles, Truck, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
+  useAllProductionBatches,
   useCombinedLots,
   useBomPlans,
   useDispatchTransfers,
@@ -73,6 +74,7 @@ export function DashboardPage() {
   const { data: orders } = usePurchaseOrders();
   const { data: preRuns } = usePreProductions();
   const { data: lots } = useCombinedLots();
+  const { data: batches } = useAllProductionBatches();
   const { data: bomPlans } = useBomPlans();
   const { data: rmPlans } = useRmPlans();
   const { data: stock } = useInventoryStock();
@@ -97,14 +99,18 @@ export function DashboardPage() {
 
   const allPreRuns = preRuns ?? [];
   const allLots = lots ?? [];
+  const allBatches = batches ?? [];
 
   // Production actionable by this department right now, sitting at a
   // stage this role owns. DISPATCH_PLAN is terminal (nothing comes after
   // it), and a PreProduction run that's already Approved has nothing
   // left for this tier either — both excluded from every department's
-  // queue once reached.
+  // queue once reached. myQueueBatches mirrors myQueueLots exactly, just
+  // for a batch's own independent pipeline (see schema.prisma's comment
+  // on ProductionBatch) — same stage enum, same role map.
   const myQueuePreRuns = allPreRuns.filter((r) => isPreProductionPending(r) && hasRole(...PRE_PRODUCTION_STAGE_ROLE[r.currentStageId]));
   const myQueueLots = allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN" && hasRole(...COMBINED_LOT_STAGE_ROLE[l.currentStageId]));
+  const myQueueBatches = allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN" && hasRole(...COMBINED_LOT_STAGE_ROLE[b.currentStageId]));
 
   // Inventory has its own queue of department-owned work that isn't a
   // pipeline stage at all — QA/QC's inward/outward QC checks, and
@@ -160,6 +166,13 @@ export function DashboardPage() {
     subtitle: l.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName,
     badge: <StageBadge stage={l.currentStageId} />,
   }));
+  const batchRows: QueueRow[] = myQueueBatches.map((b) => ({
+    key: `batch-${b.id}`,
+    to: `/production-batches/${b.id}`,
+    title: b.preProduction.purchaseOrderItem.productName,
+    subtitle: `${b.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName}${b.batchNo ? ` · ${b.batchNo}` : ""}`,
+    badge: <StageBadge stage={b.currentStageId} />,
+  }));
 
   const pendingQcPill = <span className="pill border-amber-200 bg-amber-50 text-amber-700">Pending QC</span>;
   const inventoryRows: QueueRow[] = [
@@ -178,10 +191,11 @@ export function DashboardPage() {
   // and never sees this queue at all.
   const rndOverdueRequests = rndOpenCatalogGaps.filter((r) => r.etaDate && new Date(r.etaDate) < new Date());
   const rndAwaitingConfirmation = (rndPendingTransfers ?? []).filter((t) => t.direction === "TO_RND");
-  // RND's only CombinedLot-stage ownership is Bulk QC (see
-  // COMBINED_LOT_STAGE_ROLE) — so for a non-org-wide RND session,
-  // lotRows is already exactly this queue, nothing further to filter.
-  const rndBulkQcCount = lotRows.length;
+  // RND's only CombinedLot/ProductionBatch-stage ownership is Bulk QC
+  // (see COMBINED_LOT_STAGE_ROLE) — so for a non-org-wide RND session,
+  // lotRows + batchRows are already exactly this queue, nothing further
+  // to filter.
+  const rndBulkQcCount = lotRows.length + batchRows.length;
   const rndRows: QueueRow[] = [
     ...rndOpenCatalogGaps.map((r) => ({
       key: `rr-${r.id}`,
@@ -194,13 +208,17 @@ export function DashboardPage() {
     ...(rndPendingSampleRequests ?? []).map((r) => ({ key: `rsr-${r.id}`, to: "/rnd-store", title: r.itemName, subtitle: `Awaiting Store · ${r.quantity} ${r.unit}`, badge: rndPill })),
   ];
 
-  const myQueueRows = [...preRunRows, ...lotRows, ...inventoryRows, ...rndRows];
+  const myQueueRows = [...preRunRows, ...lotRows, ...batchRows, ...inventoryRows, ...rndRows];
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
-  // "Active" = a run still short of its own terminal gate, or a lot not
-  // yet at Dispatch Plan — same completion definition
-  // purchase-orders.routes.ts's computeCompletion uses.
-  const activeCount = allPreRuns.filter(isPreProductionPending).length + allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN").length;
+  // "Active" = a run still short of its own terminal gate, a lot not yet
+  // at Dispatch Plan, or a completed batch still in its own pipeline —
+  // same completion definition purchase-orders.routes.ts's
+  // computeCompletion uses (either path counts).
+  const activeCount =
+    allPreRuns.filter(isPreProductionPending).length +
+    allLots.filter((l) => l.currentStageId !== "DISPATCH_PLAN").length +
+    allBatches.filter((b) => b.currentStageId !== "DISPATCH_PLAN").length;
 
   // BD gets its own tile set instead of the generic org-wide one — same
   // "pending" definition as the old Pending PO Aging report (not
@@ -231,7 +249,8 @@ export function DashboardPage() {
     ...group,
     count:
       allPreRuns.filter((r) => isPreProductionPending(r) && group.stages.includes(r.currentStageId)).length +
-      allLots.filter((l) => group.stages.includes(l.currentStageId)).length,
+      allLots.filter((l) => group.stages.includes(l.currentStageId)).length +
+      allBatches.filter((b) => group.stages.includes(b.currentStageId)).length,
   }));
   const maxCount = Math.max(1, ...stageCounts.map((s) => s.count));
 

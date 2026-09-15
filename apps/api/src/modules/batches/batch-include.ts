@@ -187,11 +187,38 @@ export function serializePreProduction(run: PreProductionWithRelations) {
 export const productionBatchInclude = {
   createdBy: { select: { fullName: true, email: true } },
   completedBy: { select: { fullName: true, email: true } },
+  // Needed for this batch's own Tier-3 pipeline — role notifications and
+  // the PO/customer context its detail page shows, same shape
+  // combinedLotInclude's own preProduction select uses below.
+  preProduction: {
+    select: {
+      id: true,
+      purchaseOrderItem: {
+        select: {
+          id: true,
+          productName: true,
+          quantity: true,
+          unit: true,
+          purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { id: true, companyName: true } } } },
+        },
+      },
+    },
+  },
 } satisfies Prisma.ProductionBatchInclude;
 
 export type ProductionBatchWithRelations = ProductionBatch & {
   createdBy: { fullName: string; email: string };
   completedBy: { fullName: string; email: string } | null;
+  preProduction: {
+    id: string;
+    purchaseOrderItem: {
+      id: string;
+      productName: string;
+      quantity: number;
+      unit: string;
+      purchaseOrder: { id: string; poNumber: string | null; customer: { id: string; companyName: string } };
+    };
+  };
 };
 
 export function serializeProductionBatch(batch: ProductionBatchWithRelations) {

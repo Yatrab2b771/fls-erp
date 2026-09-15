@@ -169,9 +169,10 @@ export const createProductionBatchSchema = z.object({
 
 // Every field this run collects, all optional — a run can be created and
 // completed incrementally, same "save everything, don't force it all at
-// once" shape the old single-Batch pipeline used stage by stage.
+// once" shape the old single-Batch pipeline used stage by stage. batchNo
+// is deliberately NOT here any more — Production doesn't set it, QC does
+// (see assignBatchNoSchema below).
 export const productionBatchExecutionSchema = z.object({
-  batchNo: z.string().max(120).optional(),
   manufacturingStartDate: dateField,
   manufacturingStatus: z.string().max(120).optional(),
   manufacturingEndDate: dateField,
@@ -189,6 +190,91 @@ export const productionBatchExecutionSchema = z.object({
 // recorded (via PATCH, same call or an earlier one) — there's nothing
 // meaningful to pool into the parent without it.
 export const completeProductionBatchSchema = z.object({});
+
+// QC assigns the real batch number the first time it touches this run —
+// deliberately its own tiny endpoint/schema rather than folded into the
+// IPQC stage-field save below, so it stays settable (a correction) at
+// any point in the batch's own pipeline, not just once at IPQC.
+export const assignBatchNoSchema = z.object({ batchNo: z.string().max(120) });
+
+// ---------------------------------------------------------------------------
+// Tier 2b — ProductionBatch's OWN Tier-3-shaped pipeline (IPQC through
+// Dispatch Plan), reusing CombinedLotStageId as-is since it's the exact
+// same 7 stages, just walked once per batch instead of once per pooled
+// lot. Trimmed versions of the CombinedLot field schemas below —
+// deliberately missing Bulk Reconciliation (a pooled-lot-only concept),
+// the COA sign-off chain, and dispatchTransferId (no FG-transfer linking
+// at this smaller scale) — see schema.prisma's own comment on
+// ProductionBatch for the full reasoning.
+// ---------------------------------------------------------------------------
+
+export const productionBatchIpqcFieldsSchema = z.object({
+  ipqcStatus: z.enum(IPQC_STATUSES).optional(),
+  ipqcRemarks: z.string().max(1000).optional(),
+});
+
+export const productionBatchQaGateMfgFieldsSchema = z.object({
+  mfgQaStatus: z.enum(MFG_APPROVAL_STATUSES).optional(),
+  mfgQcStatus: z.enum(MFG_APPROVAL_STATUSES).optional(),
+  mfgRemarks: z.string().max(1000).optional(),
+  mfgApprovedQty: z.coerce.number().nonnegative().optional(),
+  mfgRejectedQty: z.coerce.number().nonnegative().optional(),
+  mfgWastageQty: z.coerce.number().nonnegative().optional(),
+});
+
+export const productionBatchBulkQcFieldsSchema = z.object({
+  bulkQcStatus: z.enum(BULK_QC_STATUSES).optional(),
+  bulkQcRemarks: z.string().max(1000).optional(),
+});
+
+export const productionBatchPackagingFieldsSchema = z.object({
+  packagingStartDate: dateField,
+  packagingStatus: z.string().max(120).optional(),
+  packagingEndDate: dateField,
+  packagingRemarks: z.string().max(1000).optional(),
+});
+
+export const productionBatchQaGatePackagingFieldsSchema = z.object({
+  packQaStatus: z.enum(PACK_APPROVAL_STATUSES).optional(),
+  packQcStatus: z.enum(PACK_APPROVAL_STATUSES).optional(),
+  packRemarks: z.string().max(1000).optional(),
+  packApprovedQty: z.coerce.number().nonnegative().optional(),
+  packRejectedQty: z.coerce.number().nonnegative().optional(),
+  packWastageQty: z.coerce.number().nonnegative().optional(),
+});
+
+export const productionBatchBillingEwayBillFieldsSchema = z.object({
+  invoiceNo: z.string().max(120).optional(),
+  invoiceDate: dateField,
+  ewayBillNo: z.string().max(120).optional(),
+  ewayBillDate: dateField,
+  billingRemarks: z.string().max(1000).optional(),
+});
+
+export const productionBatchDispatchPlanFieldsSchema = z.object({
+  dispatchDate: dateField,
+  dispatchedQty: z.coerce.number().nonnegative().optional(),
+  shipperQty: z.coerce.number().nonnegative().optional(),
+  totalShipperWeight: z.coerce.number().nonnegative().optional(),
+  transportType: z.enum(TRANSPORT_TYPES).optional(),
+  remainingQty: z.coerce.number().nonnegative().optional(),
+  anyRemarks: z.string().max(1000).optional(),
+});
+
+export const PRODUCTION_BATCH_STAGE_FIELD_SCHEMA: Partial<Record<CombinedLotStageId, z.AnyZodObject>> = {
+  IPQC: productionBatchIpqcFieldsSchema,
+  QA_GATE_MFG: productionBatchQaGateMfgFieldsSchema,
+  BULK_QC: productionBatchBulkQcFieldsSchema,
+  PACKAGING: productionBatchPackagingFieldsSchema,
+  QA_GATE_PACKAGING: productionBatchQaGatePackagingFieldsSchema,
+  BILLING_EWAY_BILL: productionBatchBillingEwayBillFieldsSchema,
+  DISPATCH_PLAN: productionBatchDispatchPlanFieldsSchema,
+};
+
+export const productionBatchTransitionEnvelopeSchema = z.object({
+  action: z.enum(["FORWARD", "REJECT"]),
+  note: z.string().max(1000).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Tier 3 — CombinedLot. Created automatically once a PreProduction's
@@ -381,6 +467,8 @@ export type DispensingConsumptionInput = z.infer<typeof dispensingConsumptionSch
 export type IndentRequestLinesInput = z.infer<typeof indentRequestLinesSchema>;
 export type PreProductionTransitionEnvelopeInput = z.infer<typeof preProductionTransitionEnvelopeSchema>;
 export type CombinedLotTransitionEnvelopeInput = z.infer<typeof combinedLotTransitionEnvelopeSchema>;
+export type AssignBatchNoInput = z.infer<typeof assignBatchNoSchema>;
+export type ProductionBatchTransitionEnvelopeInput = z.infer<typeof productionBatchTransitionEnvelopeSchema>;
 export type ImportBatchStagesInput = z.infer<typeof importBatchStagesSchema>;
 export type ChecklistUpdateInput = z.infer<typeof checklistUpdateSchema>;
 export type CoaResultsReplaceInput = z.infer<typeof coaResultsReplaceSchema>;
