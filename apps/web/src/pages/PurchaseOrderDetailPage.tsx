@@ -573,11 +573,15 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
   const rmPlan = item.rmPlans?.[0];
   // Who can SEE a plan's pill/result once it exists — BD included, so
   // they can check status after approving. Separate from who can
-  // GENERATE one — BD can view, not trigger.
-  const canSeeBom = hasRole("PPIC", "PURCHASE", "BD");
-  const canSeeRm = hasRole("PPIC", "BD");
-  const canGenerateBom = hasRole("PPIC", "PURCHASE");
-  const canGenerateRm = hasRole("PPIC");
+  // GENERATE one — BD can view, not trigger. RND owns the catalog both
+  // of these match against (Import Catalog / Import Recipes), so they
+  // get both see and generate on each — POST /bom/plans and POST
+  // /rm-costing/plans have no role gate at all on the backend, this is
+  // a frontend-only restriction that had never included RND.
+  const canSeeBom = hasRole("PPIC", "PURCHASE", "BD", "RND");
+  const canSeeRm = hasRole("PPIC", "BD", "RND");
+  const canGenerateBom = hasRole("PPIC", "PURCHASE", "RND");
+  const canGenerateRm = hasRole("PPIC", "RND");
 
   const needsBom = canGenerateBom && !bomPlan;
   const needsRm = canGenerateRm && !rmPlan;
