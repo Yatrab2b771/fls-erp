@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Clock, Download, FileSpreadsheet, FileText, ListChecks, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
+import { Download, FileSpreadsheet, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useAllProductNames,
@@ -8,7 +8,6 @@ import {
   useCreatePurchaseOrder,
   useCreateSku,
   useCustomers,
-  useImportBatchStages,
   useImportPurchaseOrders,
   usePurchaseOrders,
   useReportCatalogMismatch,
@@ -17,10 +16,8 @@ import {
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
 import { ApiError, downloadFile } from "../lib/api";
-import type { PoWastageRejectionRow, ProductType } from "../lib/types";
-import { exportPendingPoAgingReport, exportPurchaseOrdersReport, exportWastageRejectionReport } from "../lib/purchaseOrdersExport";
+import type { ProductType } from "../lib/types";
 import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
-import { downloadBatchStageImportTemplate, parseBatchStageWorkbook } from "../lib/batchStageImport";
 import { findSimilarName } from "../lib/similarName";
 import { ItemPicker } from "../components/ItemPicker";
 import { PickerWithAdd } from "../components/PickerWithAdd";
@@ -117,11 +114,8 @@ export function PurchaseOrdersPage() {
 
   const [showForm, setShowForm] = useState(false);
   const [search, setSearch] = useState("");
-  const [wastageLoading, setWastageLoading] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const importOrders = useImportPurchaseOrders();
-  const batchImportFileRef = useRef<HTMLInputElement>(null);
-  const importBatchStages = useImportBatchStages();
 
   const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
   // Approved but not yet fully shipped — same "in flight" idea the old
@@ -131,37 +125,6 @@ export function PurchaseOrdersPage() {
 
   const q = search.trim().toLowerCase();
   const filteredOrders = orders?.filter((po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q));
-
-  function handleExport() {
-    if (!filteredOrders?.length) return toast.error("Nothing to export — no purchase orders match.");
-    exportPurchaseOrdersReport(filteredOrders);
-    toast.success("Report downloaded — includes completion date and days taken for finished POs.");
-  }
-
-  // Report #1 — customer-wise pending PO list, with aging. Computed off
-  // the same full order list already loaded here, not a separate fetch.
-  function handleExportPendingAging() {
-    if (!orders?.length) return toast.error("Nothing to export — no purchase orders yet.");
-    exportPendingPoAgingReport(orders);
-    toast.success("Pending PO aging report downloaded, oldest first.");
-  }
-
-  // Report #6 — customer-wise, PO-wise wastage & rejection. This one
-  // does need its own fetch (Batch-level wastage/rejection figures
-  // aren't part of the list already loaded on this page).
-  async function handleExportWastage() {
-    setWastageLoading(true);
-    try {
-      const rows = await api<PoWastageRejectionRow[]>("/api/purchase-orders/reports/wastage-rejection");
-      if (!rows.length) return toast.error("Nothing to export — no batch has recorded wastage or rejection yet.");
-      exportWastageRejectionReport(rows);
-      toast.success(`Wastage & rejection report downloaded — ${rows.length} batch(es).`);
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not load the wastage & rejection report");
-    } finally {
-      setWastageLoading(false);
-    }
-  }
 
   // Bulk PO creation — BD's own PO system export, straight to created
   // (Draft) POs instead of retyping each one into the manual form.
@@ -197,47 +160,6 @@ export function PurchaseOrdersPage() {
     }
   }
 
-  // Bulk "forward the current stage" — one row per batch, resolved by
-  // (PO Number, Product Name, Batch No.), each row touching only
-  // whatever stage that batch is currently at (same as the manual
-  // Forward button, just done for many batches from a spreadsheet).
-  async function handleImportBatchFile(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-
-    try {
-      const buffer = await file.arrayBuffer();
-      const { rows, skipped, sheetNames, detectedHeaders } = parseBatchStageWorkbook(buffer);
-      if (!rows.length) {
-        // eslint-disable-next-line no-console
-        console.error("[Batch update import] No usable rows.", { fileName: file.name, sheetNames, detectedHeaders, skipped });
-        return toast.error(
-          detectedHeaders.length
-            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had both a PO Number and a Product Name.`
-            : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}).`,
-        );
-      }
-
-      const summary = await importBatchStages.mutateAsync(rows);
-      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing PO Number or Product Name)` : "";
-      const problems = summary.results.filter((r) => r.status !== "forwarded");
-      const problemNote = problems.length
-        ? ` — ${problems
-            .slice(0, 5)
-            .map((r) => `row ${r.row} (${r.poNumber}/${r.productName}): ${r.message}`)
-            .join("; ")}${problems.length > 5 ? `; …and ${problems.length - 5} more` : ""}`
-        : "";
-      if (summary.forwarded > 0) {
-        toast.success(`Forwarded ${summary.forwarded} of ${summary.rowsProcessed} batch(es).${skippedNote}${problemNote}`);
-      } else {
-        toast.error(`Forwarded 0 of ${summary.rowsProcessed} batch(es).${skippedNote}${problemNote}`);
-      }
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Import failed — check the file and try again.");
-    }
-  }
-
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -246,30 +168,6 @@ export function PurchaseOrdersPage() {
           <p className="text-sm text-slate-500">One PO can list several products — each becomes its own production tracker.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-ghost" onClick={handleExport} title="Download the current list as an Excel report, including days-to-complete for finished POs">
-            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
-          </button>
-          <button className="btn-ghost" onClick={handleExportPendingAging} title="Customer-wise list of every PO still in progress, sorted oldest first">
-            <Clock className="h-3.5 w-3.5" strokeWidth={2.5} /> Pending PO Aging
-          </button>
-          <button className="btn-ghost" onClick={handleExportWastage} disabled={wastageLoading} title="Customer-wise, PO-wise production wastage and QC rejection">
-            <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} /> {wastageLoading ? "Loading…" : "Wastage & Rejection"}
-          </button>
-          {/* Open to everyone, not just BD — every department forwards
-              batches, and per-row RBAC (see batch-import.ts) already
-              decides which rows a given caller can actually forward. */}
-          <button className="btn-ghost" onClick={downloadBatchStageImportTemplate} title="Download a blank template for bulk-forwarding batches through their current stage">
-            <ListChecks className="h-3.5 w-3.5" strokeWidth={2.5} /> Batch Update Template
-          </button>
-          <button
-            className="btn-ghost"
-            disabled={importBatchStages.isPending}
-            onClick={() => batchImportFileRef.current?.click()}
-            title="Upload a sheet of batch updates — each row forwards that batch's current stage, same as the Forward button"
-          >
-            <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importBatchStages.isPending ? "Importing…" : "Import Batch Updates"}
-          </button>
-          <input ref={batchImportFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportBatchFile} />
           {canCreate && (
             <>
               <button className="btn-ghost" onClick={downloadPurchaseOrderImportTemplate} title="Download a blank template with the correct columns">
