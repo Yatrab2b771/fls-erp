@@ -10,6 +10,8 @@ import { RouteError } from "./common/lib/route-error";
 import { authRouter } from "./modules/auth/auth.routes";
 import { usersRouter } from "./modules/users/users.routes";
 import { customersRouter } from "./modules/customers/customers.routes";
+import { vendorsRouter } from "./modules/vendors/vendors.routes";
+import { vendorPurchaseOrdersRouter } from "./modules/vendor-purchase-orders/vendor-purchase-orders.routes";
 import { purchaseOrdersRouter } from "./modules/purchase-orders/purchase-orders.routes";
 import { preProductionRouter } from "./modules/batches/pre-production.routes";
 import { productionBatchesRouter } from "./modules/batches/production-batches.routes";
@@ -20,6 +22,8 @@ import { recipeCatalogRouter } from "./modules/rm-costing/recipe-catalog.routes"
 import { rmPlanRouter } from "./modules/rm-costing/rm-plan.routes";
 import { inventoryRouter } from "./modules/inventory/inventory.routes";
 import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
+import { stockTransfersRouter } from "./modules/inventory/stock-transfers.routes";
+import { plantConsumptionRouter } from "./modules/plant-consumption/plant-consumption.routes";
 import { dayStoresRouter, plantsRouter } from "./modules/inventory/locations.routes";
 import { warehousesRouter } from "./modules/inventory/warehouses.routes";
 import { notificationsRouter } from "./modules/notifications/notifications.routes";
@@ -74,6 +78,8 @@ export function createApp() {
   app.use("/api/auth", authRouter);
   app.use("/api/users", usersRouter);
   app.use("/api/customers", customersRouter);
+  app.use("/api/vendors", vendorsRouter);
+  app.use("/api/vendor-purchase-orders", vendorPurchaseOrdersRouter);
   app.use("/api/purchase-orders", purchaseOrdersRouter);
   // Three-tier pipeline — see schema.prisma's own comment blocks above
   // PreProduction/ProductionBatch/CombinedLot. productionBatchesRouter
@@ -88,6 +94,8 @@ export function createApp() {
   app.use("/api/rm-costing", recipeCatalogRouter);
   app.use("/api/rm-costing", rmPlanRouter);
   app.use("/api/inventory", inventoryRouter);
+  app.use("/api/stock-transfers", stockTransfersRouter);
+  app.use("/api/plant-consumption", plantConsumptionRouter);
   app.use("/api/inventory/requirements", preInventoryRouter);
   app.use("/api/inventory/day-stores", dayStoresRouter);
   app.use("/api/inventory/plants", plantsRouter);

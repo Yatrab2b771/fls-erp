@@ -311,7 +311,11 @@ inventoryRouter.get("/items/:id/stock-by-location", requireRole("STORE", "PPIC",
     res.json({
       item: stripPricing(item, req.user!.roles),
       warehouse: warehouseOnHand.get(item.id) ?? 0,
-      dayStores: dayStores.map((ds, i) => ({ id: ds.id, name: ds.name, ...(dayStoreBalances[i]!.get(item.id) ?? { receivedFromWarehouse: 0, issuedToProduction: 0, onHand: 0 }) })),
+      dayStores: dayStores.map((ds, i) => ({
+        id: ds.id,
+        name: ds.name,
+        ...(dayStoreBalances[i]!.get(item.id) ?? { receivedFromWarehouse: 0, issuedToProduction: 0, receivedFromTransfer: 0, sentViaTransfer: 0, onHand: 0 }),
+      })),
       plants: plants.map((p, i) => ({ id: p.id, name: p.name, onHand: plantBalances[i]!.get(item.id) ?? 0 })),
     });
   } catch (err) {

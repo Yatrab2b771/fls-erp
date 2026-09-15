@@ -10,7 +10,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 // inside one atomic transaction — see the callers in inventory.routes.ts
 // that pass `tx` under SERIALIZABLE isolation to close the check-then-
 // write race two concurrent Store users could otherwise hit.
-type Db = Pick<PrismaClient, "inventoryTransaction" | "batchMaterialConsumption">;
+type Db = Pick<PrismaClient, "inventoryTransaction" | "batchMaterialConsumption" | "stockTransfer">;
 
 // The one place stock-on-hand math lives — sum(RECEIVED, accepted) −
 // sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) − sum(ISSUED_RND), per
@@ -63,6 +63,12 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
 export interface DayStoreBalance {
   receivedFromWarehouse: number;
   issuedToProduction: number;
+  // Store-to-store legs (see StockTransfer in schema.prisma) — kept as
+  // their own two fields rather than folded into the Warehouse-facing
+  // ones above, since "how much came from another Day Store" and "how
+  // much went to Production" are different questions Store might ask.
+  receivedFromTransfer: number;
+  sentViaTransfer: number;
   onHand: number;
 }
 
@@ -71,15 +77,18 @@ export interface DayStoreBalance {
 // ISSUED_DAY_STORE *to* it, minus everything ISSUED_PRODUCTION Store has
 // tagged as coming back *out of* it (see issueInventoryRequestSchema —
 // dayStoreId is now required there precisely so this subtraction is
-// trustworthy, not silently missing rows nobody remembered to tag).
-// This is NOT a second source of truth for Warehouse's own number —
-// Warehouse's on-hand above is unaffected by any of this, it already
-// nets out both ISSUED_* types regardless of which store they went
-// through.
+// trustworthy, not silently missing rows nobody remembered to tag), plus
+// the same two legs again for direct store-to-store transfers (see
+// StockTransfer). This is NOT a second source of truth for Warehouse's
+// own number — Warehouse's on-hand above is unaffected by any of this,
+// it already nets out both ISSUED_* types regardless of which store they
+// went through, and a StockTransfer with a WAREHOUSE destination lands
+// there as a real RECEIVED row on confirm rather than through this path.
 export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: string[], db: Db = prisma): Promise<Map<string, DayStoreBalance>> {
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
+  const transferItemFilter: Prisma.StockTransferWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
-  const [issuedToStoreTotals, issuedFromStoreTotals] = await Promise.all([
+  const [issuedToStoreTotals, issuedFromStoreTotals, transferInTotals, transferOutTotals] = await Promise.all([
     // deliveredAt: not null — excludes a still-open transit-tracked row
     // (isTransitTracked=true, awaiting the Day Store's own confirm).
     // Every other row already has deliveredAt stamped at creation (see
@@ -92,17 +101,34 @@ export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: s
     // rule as everywhere else, regardless of whether that onward leg is
     // itself transit-tracked.
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION", dayStoreId }, _sum: { quantity: true } }),
+    // Another Day Store's transfer landing here — only counts once this
+    // store has confirmed it, same in-transit gate as deliveredAt above.
+    db.stockTransfer.groupBy({ by: ["itemId"], where: { ...transferItemFilter, destDayStoreId: dayStoreId, confirmedAt: { not: null } }, _sum: { quantity: true } }),
+    // This store sending onward (to another Day Store, the Warehouse, or
+    // a Plant) — counts immediately at send, regardless of destination
+    // or confirmation, same "source drops immediately" rule as above.
+    db.stockTransfer.groupBy({ by: ["itemId"], where: { ...transferItemFilter, sourceDayStoreId: dayStoreId }, _sum: { quantity: true } }),
   ]);
 
   const issuedToStore = new Map(issuedToStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
   const issuedFromStore = new Map(issuedFromStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  const transferIn = new Map(transferInTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  const transferOut = new Map(transferOutTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
-  const allItemIds = new Set([...issuedToStore.keys(), ...issuedFromStore.keys(), ...(itemIds ?? [])]);
+  const allItemIds = new Set([...issuedToStore.keys(), ...issuedFromStore.keys(), ...transferIn.keys(), ...transferOut.keys(), ...(itemIds ?? [])]);
   const balances = new Map<string, DayStoreBalance>();
   for (const id of allItemIds) {
     const receivedFromWarehouse = issuedToStore.get(id) ?? 0;
     const issuedToProduction = issuedFromStore.get(id) ?? 0;
-    balances.set(id, { receivedFromWarehouse, issuedToProduction, onHand: receivedFromWarehouse - issuedToProduction });
+    const receivedFromTransfer = transferIn.get(id) ?? 0;
+    const sentViaTransfer = transferOut.get(id) ?? 0;
+    balances.set(id, {
+      receivedFromWarehouse,
+      issuedToProduction,
+      receivedFromTransfer,
+      sentViaTransfer,
+      onHand: receivedFromWarehouse + receivedFromTransfer - issuedToProduction - sentViaTransfer,
+    });
   }
   return balances;
 }
@@ -119,21 +145,32 @@ export async function getOnHandByDayStoreAndItem(dayStoreId: string, itemIds?: s
 export async function getOnHandByPlantAndItem(plantId: string, itemIds?: string[], db: Db = prisma): Promise<Map<string, number>> {
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
   const consumptionItemFilter: Prisma.BatchMaterialConsumptionWhereInput = itemIds ? { itemId: { in: itemIds } } : {};
+  const transferItemFilter: Prisma.StockTransferWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
-  const [issuedToPlantTotals, consumedTotals] = await Promise.all([
+  const [issuedToPlantTotals, transferInTotals, transferOutTotals, consumedTotals] = await Promise.all([
     // deliveredAt: not null — same open-transit exclusion as the Day
     // Store inflow above; a no-op for anything not currently in transit.
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION", plantId, deliveredAt: { not: null } }, _sum: { quantity: true } }),
+    // A Day Store's direct transfer landing here — only counts once
+    // Plant has confirmed it, same in-transit gate as deliveredAt above.
+    db.stockTransfer.groupBy({ by: ["itemId"], where: { ...transferItemFilter, destPlantId: plantId, confirmedAt: { not: null } }, _sum: { quantity: true } }),
+    // This Plant returning unused material to a store/Warehouse (Plant
+    // Consumption's "returned" leg) — counts immediately at send, same
+    // "source drops immediately" rule as every other outflow, regardless
+    // of whether the receiving side has confirmed yet.
+    db.stockTransfer.groupBy({ by: ["itemId"], where: { ...transferItemFilter, sourcePlantId: plantId }, _sum: { quantity: true } }),
     db.batchMaterialConsumption.groupBy({ by: ["itemId"], where: { ...consumptionItemFilter, preProduction: { plantId } }, _sum: { quantity: true } }),
   ]);
 
   const issuedToPlant = new Map(issuedToPlantTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  const transferIn = new Map(transferInTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  const transferOut = new Map(transferOutTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
   const consumed = new Map(consumedTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
-  const allItemIds = new Set([...issuedToPlant.keys(), ...consumed.keys(), ...(itemIds ?? [])]);
+  const allItemIds = new Set([...issuedToPlant.keys(), ...transferIn.keys(), ...transferOut.keys(), ...consumed.keys(), ...(itemIds ?? [])]);
   const onHand = new Map<string, number>();
   for (const id of allItemIds) {
-    onHand.set(id, (issuedToPlant.get(id) ?? 0) - (consumed.get(id) ?? 0));
+    onHand.set(id, (issuedToPlant.get(id) ?? 0) + (transferIn.get(id) ?? 0) - (transferOut.get(id) ?? 0) - (consumed.get(id) ?? 0));
   }
   return onHand;
 }

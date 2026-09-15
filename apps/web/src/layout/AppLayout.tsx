@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
+  ArrowRightLeft,
   Beaker,
   Bell,
   Building2,
@@ -10,6 +11,7 @@ import {
   ChevronsLeft,
   ChevronsRight,
   ClipboardList,
+  Factory,
   FlaskConical,
   History,
   LayoutDashboard,
@@ -18,10 +20,12 @@ import {
   Menu,
   Microscope,
   Package,
+  PackageMinus,
   PauseCircle,
   Recycle,
   RotateCcw,
   ShieldCheck,
+  ShoppingBag,
   Truck,
   Warehouse,
   X,
@@ -78,6 +82,8 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Planning & Procurement",
     items: [
       { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
+      { to: "/vendors", label: "Vendors", icon: Factory, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
+      { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS"] },
       { to: "/po-readiness", label: "PO Readiness", icon: CheckCircle2, roles: ["PPIC"] },
     ],
   },
@@ -85,6 +91,8 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Warehouse & Quality",
     items: [
       { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS"] },
+      { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE", "PRODUCTION", "PPIC"] },
+      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE", "PPIC"] },
       { to: "/qc-dashboard", label: "QC Dashboard", icon: PauseCircle, roles: ["QA_QC"] },
       { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC", "PPIC"] },
     ],

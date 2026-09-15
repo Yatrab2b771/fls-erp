@@ -6,6 +6,11 @@ import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { CustomersPage } from "./pages/CustomersPage";
+import { VendorsPage } from "./pages/VendorsPage";
+import { VendorPurchaseOrdersPage } from "./pages/VendorPurchaseOrdersPage";
+import { VendorPurchaseOrderDetailPage } from "./pages/VendorPurchaseOrderDetailPage";
+import { StockTransfersPage } from "./pages/StockTransfersPage";
+import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { PreProductionDetailPage } from "./pages/PreProductionDetailPage";
 import { CombinedLotDetailPage } from "./pages/CombinedLotDetailPage";
@@ -48,6 +53,11 @@ export default function App() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
           <Route path="/customers" element={<CustomersPage />} />
+          <Route path="/vendors" element={<VendorsPage />} />
+          <Route path="/vendor-purchase-orders" element={<VendorPurchaseOrdersPage />} />
+          <Route path="/vendor-purchase-orders/:id" element={<VendorPurchaseOrderDetailPage />} />
+          <Route path="/stock-transfers" element={<StockTransfersPage />} />
+          <Route path="/plant-consumption" element={<PlantConsumptionPage />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetailPage />} />
           <Route path="/pre-productions/:id" element={<PreProductionDetailPage />} />
           <Route path="/combined-lots/:id" element={<CombinedLotDetailPage />} />

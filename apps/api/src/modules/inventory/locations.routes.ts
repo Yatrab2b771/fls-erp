@@ -97,7 +97,10 @@ dayStoresRouter.get("/:id/stock", requireRole("STORE", "PPIC"), async (req: Auth
 
     res.json({
       dayStore,
-      stock: items.map((item) => ({ item, ...(onHand.get(item.id) ?? { receivedFromWarehouse: 0, issuedToProduction: 0, onHand: 0 }) })),
+      stock: items.map((item) => ({
+        item,
+        ...(onHand.get(item.id) ?? { receivedFromWarehouse: 0, issuedToProduction: 0, receivedFromTransfer: 0, sentViaTransfer: 0, onHand: 0 }),
+      })),
     });
   } catch (err) {
     next(err);
@@ -251,7 +254,7 @@ plantsRouter.patch("/:id", requireRole("STORE"), validateBody(renameLocationSche
 // getOnHandByPlantAndItem. Mirrors the Day Store endpoint above, but the
 // outflow side comes from the Batches module (BatchMaterialConsumption),
 // not another Inventory transaction type.
-plantsRouter.get("/:id/stock", requireRole("STORE", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+plantsRouter.get("/:id/stock", requireRole("STORE", "PPIC", "PRODUCTION"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const plant = await prisma.plant.findUnique({ where: { id: req.params.id } });
     if (!plant) return res.status(404).json({ error: "Plant not found" });

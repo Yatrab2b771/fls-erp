@@ -18,6 +18,135 @@ export interface Customer {
   deliveryAddress: string | null;
 }
 
+// The vendor directory — RM/PM suppliers, not to be confused with
+// Customer above (the brand placing a sales order).
+export interface Vendor {
+  id: string;
+  name: string;
+  code: string | null;
+  contactPerson: string | null;
+  contactNo: string | null;
+  gstNo: string | null;
+  email: string | null;
+  address: string | null;
+}
+
+export interface ImportVendorRowResult {
+  row: number;
+  name: string;
+  status: "created" | "updated" | "invalid";
+  message: string;
+}
+
+// Bulk vendor import result (POST /api/vendors/import) — unlike
+// Customer's import-updates, this one creates a vendor the first time
+// its name is seen and updates it on a later sheet with the same name.
+export interface ImportVendorsResult {
+  rowsProcessed: number;
+  created: number;
+  updated: number;
+  invalid: number;
+  results: ImportVendorRowResult[];
+}
+
+// A vendor procurement order for RM/PM — NOT the same as PurchaseOrder
+// (the customer's sales order). See VendorPurchaseOrder in schema.prisma.
+export type VendorPurchaseOrderStatus = "DRAFT" | "ORDERED";
+
+export interface VendorPurchaseOrderItem {
+  id: string;
+  vendorPurchaseOrderId: string;
+  itemId: string;
+  quantity: number;
+  unit: string;
+  rate: number;
+  gstPct: number;
+  amount: number;
+  item: { id: string; name: string; category: InventoryCategory; unit: string | null; code: string | null };
+  // Computed on every read from linked InventoryTransaction(RECEIVED)
+  // rows QC has accepted — net of any rejected qty. See
+  // vendor-purchase-orders.routes.ts computeItemReceipt.
+  receivedQty: number;
+}
+
+export interface VendorPurchaseOrder {
+  id: string;
+  vendorId: string;
+  poNumber: string;
+  orderDate: string;
+  eta: string | null;
+  status: VendorPurchaseOrderStatus;
+  createdAt: string;
+  vendor: { id: string; name: string; code: string | null };
+  items: VendorPurchaseOrderItem[];
+  // Optional, entered by Warehouse at/after receiving — see requirement F.
+  freightCharges: number | null;
+  freightAddedBy: { id: string; fullName: string } | null;
+  freightAddedAt: string | null;
+  // Computed on every read, never stored — see
+  // vendor-purchase-orders.routes.ts serializeVendorPo.
+  totalAmount: number;
+  completion: { isCompleted: boolean; completionDate: string | null; daysTaken: number | null };
+}
+
+// Day Store -> Day Store/Warehouse/Plant, or (Phase 6) Plant -> Day
+// Store/Warehouse — see StockTransfer in schema.prisma. Flattened shape
+// matching stock-transfers.routes.ts's serializeTransfer, same
+// convention RndTransfer already uses (itemName/sentByName/etc., a
+// computed status).
+export type StockTransferSourceType = "DAY_STORE" | "PLANT";
+export type StockTransferDestinationType = "DAY_STORE" | "WAREHOUSE" | "PLANT";
+export type StockTransferStatus = "PENDING" | "CONFIRMED";
+
+export interface StockTransfer {
+  id: string;
+  itemId: string;
+  itemName: string;
+  category: InventoryCategory;
+  quantity: number;
+  unit: string;
+  note: string | null;
+  sourceType: StockTransferSourceType;
+  sourceDayStoreId: string | null;
+  sourceDayStoreName: string | null;
+  sourcePlantId: string | null;
+  sourcePlantName: string | null;
+  destinationType: StockTransferDestinationType;
+  destDayStoreId: string | null;
+  destDayStoreName: string | null;
+  destPlantId: string | null;
+  destPlantName: string | null;
+  // Set only when this transfer originated from the Plant Consumption
+  // screen (requirement I) — the "returned to store" leg tied to one
+  // PreProduction run.
+  preProductionId: string | null;
+  sentAt: string;
+  sentByName: string;
+  confirmedAt: string | null;
+  confirmedByName: string | null;
+  status: StockTransferStatus;
+}
+
+// Plant Consumption (requirement I) — see plant-consumption.routes.ts.
+export interface PlantConsumptionBalanceItem {
+  itemId: string;
+  itemName: string;
+  unit: string;
+  consumedQty: number;
+  wastedQty: number;
+  rejectedQty: number;
+  returnedQty: number;
+  // Whole-Plant live on-hand for this item — NOT scoped to this one run;
+  // several runs can share the same physical stock pool. See the
+  // route's own comment for why these aren't collapsed into one number.
+  plantOnHand: number;
+}
+
+export interface PlantConsumptionBalance {
+  plant: { id: string; name: string } | null;
+  items: PlantConsumptionBalanceItem[];
+}
+
 export interface PlanSummary {
   id: string;
   name: string;

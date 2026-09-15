@@ -31,6 +31,7 @@ import type {
   ImportCustomerUpdatesResult,
   ImportPoRequirementsResult,
   ImportPurchaseOrdersResult,
+  ImportVendorsResult,
   ItemStockByLocation,
   ManagedUser,
   MaterialReconciliationRow,
@@ -64,15 +65,24 @@ import type {
   RndTransfer,
   RndTransferDirection,
   RoleName,
+  PlantConsumptionBalance,
+  StockTransfer,
+  StockTransferDestinationType,
+  StockTransferSourceType,
+  StockTransferStatus,
   StoreUser,
   SystemHealth,
   TransitItem,
+  Vendor,
+  VendorPurchaseOrder,
+  VendorPurchaseOrderItem,
   Warehouse,
 } from "./types";
 import type { ImportCustomerCatalogPayload } from "./catalogImport";
 import type { ImportDispatchTransferRow, ImportInventoryRequestRow, ImportInventoryRow, ImportItemMasterRow, ImportPurchaseLogRow, ImportRequirementRow, ImportRndSampleRequestRow } from "./inventoryImport";
 import type { ImportPurchaseOrderRow } from "./purchaseOrdersImport";
 import type { ImportCustomerUpdateRow } from "./customersImport";
+import type { ImportVendorRow } from "./vendorsImport";
 
 // --- Customers ---
 
@@ -104,6 +114,142 @@ export function useImportCustomerUpdates() {
   return useMutation({
     mutationFn: (rows: ImportCustomerUpdateRow[]) => api<ImportCustomerUpdatesResult>("/api/customers/import-updates", { method: "POST", body: { rows } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["customers"] }),
+  });
+}
+
+// --- Vendors ---
+
+export function useVendors() {
+  return useQuery({ queryKey: ["vendors"], queryFn: () => api<Vendor[]>("/api/vendors?pageSize=200") });
+}
+
+export function useCreateVendor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Partial<Vendor>) => api<Vendor>("/api/vendors", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+  });
+}
+
+export function useUpdateVendor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Partial<Vendor> }) => api<Vendor>(`/api/vendors/${id}`, { method: "PATCH", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+  });
+}
+
+export function useImportVendors() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rows: ImportVendorRow[]) => api<ImportVendorsResult>("/api/vendors/import", { method: "POST", body: { rows } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendors"] }),
+  });
+}
+
+// --- Vendor Purchase Orders (RM/PM procurement — not to be confused
+// with the customer PurchaseOrder above) ---
+
+export function useVendorPurchaseOrders() {
+  return useQuery({ queryKey: ["vendor-purchase-orders"], queryFn: () => api<VendorPurchaseOrder[]>("/api/vendor-purchase-orders?pageSize=200") });
+}
+
+export function useVendorPurchaseOrder(id: string | undefined) {
+  return useQuery({
+    queryKey: ["vendor-purchase-orders", id],
+    queryFn: () => api<VendorPurchaseOrder>(`/api/vendor-purchase-orders/${id}`),
+    enabled: !!id,
+  });
+}
+
+export interface VendorPurchaseOrderItemPayload {
+  itemId: string;
+  quantity: number;
+  unit: string;
+  rate: number;
+  gstPct: number;
+}
+
+export interface CreateVendorPurchaseOrderPayload {
+  vendorId: string;
+  poNumber: string;
+  orderDate: string;
+  eta?: string;
+  items: VendorPurchaseOrderItemPayload[];
+}
+
+export function useCreateVendorPurchaseOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateVendorPurchaseOrderPayload) => api<VendorPurchaseOrder>("/api/vendor-purchase-orders", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders"] }),
+  });
+}
+
+export function useUpdateVendorPurchaseOrder(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Partial<Pick<CreateVendorPurchaseOrderPayload, "vendorId" | "poNumber" | "orderDate" | "eta">> & { status?: VendorPurchaseOrder["status"] }) =>
+      api<VendorPurchaseOrder>(`/api/vendor-purchase-orders/${id}`, { method: "PATCH", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", id] });
+      qc.invalidateQueries({ queryKey: ["vendor-purchase-orders"] });
+    },
+  });
+}
+
+export function useAddVendorPurchaseOrderItem(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: VendorPurchaseOrderItemPayload) => api<VendorPurchaseOrderItem>(`/api/vendor-purchase-orders/${poId}/items`, { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", poId] }),
+  });
+}
+
+export function useUpdateVendorPurchaseOrderItem(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, body }: { itemId: string; body: Partial<VendorPurchaseOrderItemPayload> }) =>
+      api<VendorPurchaseOrderItem>(`/api/vendor-purchase-orders/${poId}/items/${itemId}`, { method: "PATCH", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", poId] }),
+  });
+}
+
+export function useRemoveVendorPurchaseOrderItem(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) => api(`/api/vendor-purchase-orders/${poId}/items/${itemId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", poId] }),
+  });
+}
+
+export interface ReceiveVendorPurchaseOrderItemPayload {
+  quantity: number;
+  unit?: string;
+  batchNo?: string;
+  grnNo?: string;
+  mfgDate?: string;
+  expiryDate?: string;
+  remark?: string;
+}
+
+// Warehouse "Mark Received" — rides the same InventoryTransaction(RECEIVED)
+// + inward QC gate the Inventory page's own Material Received flow uses;
+// this just creates that row pre-linked to the vendor PO line item.
+export function useReceiveVendorPurchaseOrderItem(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, body }: { itemId: string; body: ReceiveVendorPurchaseOrderItemPayload }) =>
+      api(`/api/vendor-purchase-orders/${poId}/items/${itemId}/receive`, { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", poId] }),
+  });
+}
+
+export function useAddVendorPurchaseOrderFreight(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (freightCharges: number) => api<VendorPurchaseOrder>(`/api/vendor-purchase-orders/${poId}/freight`, { method: "POST", body: { freightCharges } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["vendor-purchase-orders", poId] }),
   });
 }
 
@@ -1745,6 +1891,107 @@ export function useRndStoreTransactions() {
 
 export function useRndStoreReport() {
   return useQuery({ queryKey: ["rnd-store", "report"], queryFn: () => api<RndStoreReportRow[]>("/api/rnd-store/report") });
+}
+
+// --- Stock Transfers — Day Store -> Day Store / Warehouse / Plant, see
+// stock-transfers.routes.ts. Same sender-creates/receiver-confirms shape
+// as RndTransfer above.
+
+function invalidateStockTransfers(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["stock-transfers"] });
+  // A send/confirm moves a Day Store's, Plant's, or the Warehouse's own
+  // on-hand — every one of those views reads through ["inventory"].
+  qc.invalidateQueries({ queryKey: ["inventory"] });
+}
+
+export function useStockTransfers(status?: StockTransferStatus) {
+  return useQuery({
+    queryKey: ["stock-transfers", status ?? null],
+    queryFn: () => api<StockTransfer[]>(`/api/stock-transfers${status ? `?status=${status}` : ""}`),
+  });
+}
+
+export interface CreateStockTransferPayload {
+  itemId: string;
+  quantity: number;
+  unit: string;
+  note?: string;
+  sourceType: StockTransferSourceType;
+  sourceDayStoreId?: string;
+  sourcePlantId?: string;
+  destinationType: StockTransferDestinationType;
+  destDayStoreId?: string;
+  destPlantId?: string;
+}
+
+export function useCreateStockTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateStockTransferPayload) => api<StockTransfer>("/api/stock-transfers", { method: "POST", body }),
+    onSuccess: () => invalidateStockTransfers(qc),
+  });
+}
+
+export function useConfirmStockTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<StockTransfer>(`/api/stock-transfers/${id}/confirm`, { method: "POST" }),
+    onSuccess: () => invalidateStockTransfers(qc),
+  });
+}
+
+export function useCancelStockTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/stock-transfers/${id}`, { method: "DELETE" }),
+    onSuccess: () => invalidateStockTransfers(qc),
+  });
+}
+
+// --- Plant Consumption — requirement I, see plant-consumption.routes.ts.
+
+// Which runs are at a given Plant — Plant Consumption's own "pick a run"
+// list, a plantId filter on the same GET /api/pre-productions the rest
+// of the Batches module already uses.
+export function usePreProductionsByPlant(plantId: string | undefined) {
+  return useQuery({
+    queryKey: ["pre-productions", { plantId }],
+    queryFn: () => api<PreProduction[]>(`/api/pre-productions?plantId=${plantId}`),
+    enabled: !!plantId,
+  });
+}
+
+export function usePlantConsumptionBalance(preProductionId: string | undefined) {
+  return useQuery({
+    queryKey: ["plant-consumption", preProductionId, "balance"],
+    queryFn: () => api<PlantConsumptionBalance>(`/api/plant-consumption/${preProductionId}/balance`),
+    enabled: !!preProductionId,
+  });
+}
+
+export interface RecordPlantConsumptionPayload {
+  itemId: string;
+  consumedQty?: number;
+  wastedQty?: number;
+  rejectedQty?: number;
+  returnedQty?: number;
+  unit: string;
+  destinationType?: "DAY_STORE" | "WAREHOUSE";
+  destDayStoreId?: string;
+  note?: string;
+}
+
+export function useRecordPlantConsumption(preProductionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RecordPlantConsumptionPayload) => api(`/api/plant-consumption/${preProductionId}/entries`, { method: "POST", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["plant-consumption", preProductionId] });
+      qc.invalidateQueries({ queryKey: ["stock-transfers"] });
+      qc.invalidateQueries({ queryKey: ["inventory"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+    },
+  });
 }
 
 // --- QC Sample Store — the pre-production sample lifecycle scoped to one

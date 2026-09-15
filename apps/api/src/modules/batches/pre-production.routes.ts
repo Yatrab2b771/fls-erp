@@ -45,6 +45,11 @@ preProductionRouter.get("/", async (req, res, next) => {
     const pagination = parsePagination(req);
     const where: Prisma.PreProductionWhereInput = {};
     if (typeof req.query.purchaseOrderItemId === "string") where.purchaseOrderItemId = req.query.purchaseOrderItemId;
+    // Plant Consumption's own "which runs are at my Plant" list (see
+    // plant-consumption.routes.ts) — not filtered by role/assignment,
+    // same "Plant is unrestricted" reasoning day-store-access.ts already
+    // documents for PRODUCTION/PPIC.
+    if (typeof req.query.plantId === "string") where.plantId = req.query.plantId;
 
     const [total, runs] = await Promise.all([
       prisma.preProduction.count({ where }),
