@@ -552,6 +552,11 @@ export function InventoryPage() {
   const canInwardQc = hasRole("QA_QC", "RND");
   const canDispatch = hasRole("DISPATCH"); // S9 — confirms an FG transfer actually went out
   const canInvoice = hasRole("ACCOUNTS"); // S9 — Finance raises the invoice once Dispatch confirms
+  // Transit is Production's own view too — GET /transit lists it
+  // alongside STORE/PPIC/QA_QC/RND (see inventory.routes.ts), since a
+  // Plant-bound delivery still in transit is exactly what Production is
+  // waiting on before Dispensing/manufacturing can use it.
+  const canSeeTransit = hasRole("PRODUCTION");
   // Same role list as the "Inventory" nav tab in AppLayout.tsx — the tab
   // being hidden doesn't stop a direct URL (or a stale route left over
   // from switching users in the same tab) from rendering this page, so
@@ -559,7 +564,7 @@ export function InventoryPage() {
   // actual early return sits at the bottom of this component, after
   // every hook below has run — an early return here would call those
   // hooks conditionally.
-  const canAccessInventory = canWrite || canRequest || canQc || canInwardQc || canDispatch || canInvoice;
+  const canAccessInventory = canWrite || canRequest || canQc || canInwardQc || canDispatch || canInvoice || canSeeTransit;
 
   // Per-tab visibility — each department only gets the slice of this
   // module its role actually has API access to (see inventory.routes.ts).
@@ -572,7 +577,9 @@ export function InventoryPage() {
     ISSUED_DAY_STORE: canWrite,
     ISSUED_PRODUCTION: canWrite,
     requests: canWrite || canRequest,
-    transit: canWrite || canRequest || canQc,
+    // PRODUCTION + RND both belong here too — see canSeeTransit/
+    // canInwardQc above, matching GET /transit's own role list exactly.
+    transit: canWrite || canRequest || canQc || canSeeTransit || canInwardQc,
     // STORE-only — the ₹ reconciliation view is an internal accounting
     // tool, same audience as the API route itself.
     reconciliation: canWrite,

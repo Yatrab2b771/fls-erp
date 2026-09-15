@@ -84,7 +84,7 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Warehouse & Quality",
     items: [
-      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "DISPATCH", "ACCOUNTS"] },
+      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS"] },
       { to: "/qc-dashboard", label: "QC Dashboard", icon: PauseCircle, roles: ["QA_QC"] },
       { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC", "PPIC"] },
     ],
