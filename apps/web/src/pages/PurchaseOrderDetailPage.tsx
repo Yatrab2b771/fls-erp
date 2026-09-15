@@ -572,16 +572,18 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
   const bomPlan = item.bomPlans?.[0];
   const rmPlan = item.rmPlans?.[0];
   // Who can SEE a plan's pill/result once it exists — BD included, so
-  // they can check status after approving. Separate from who can
-  // GENERATE one — BD can view, not trigger. RND owns the catalog both
-  // of these match against (Import Catalog / Import Recipes), so they
-  // get both see and generate on each — POST /bom/plans and POST
-  // /rm-costing/plans have no role gate at all on the backend, this is
-  // a frontend-only restriction that had never included RND.
+  // they can check status after approving, and RND too, so they can
+  // confirm their own catalog entry actually matched. Separate from who
+  // can GENERATE one — that's PPIC/Purchase/BD's own procurement-
+  // planning trigger, deliberately NOT RND: when no catalog match
+  // exists, Generate's fallback is "Awaiting R&D" — showing that to RND
+  // itself reads as waiting on themselves. RND's real path for a gap is
+  // R&D Requests (give an ETA, then fulfill via Import Catalog/Recipes),
+  // not this button.
   const canSeeBom = hasRole("PPIC", "PURCHASE", "BD", "RND");
   const canSeeRm = hasRole("PPIC", "BD", "RND");
-  const canGenerateBom = hasRole("PPIC", "PURCHASE", "RND");
-  const canGenerateRm = hasRole("PPIC", "RND");
+  const canGenerateBom = hasRole("PPIC", "PURCHASE");
+  const canGenerateRm = hasRole("PPIC");
 
   const needsBom = canGenerateBom && !bomPlan;
   const needsRm = canGenerateRm && !rmPlan;
