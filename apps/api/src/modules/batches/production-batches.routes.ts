@@ -2,9 +2,7 @@ import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
-import { notifyRoles } from "../../common/lib/notify";
-import { runSerializable } from "../../common/lib/serializable-transaction";
-import { productionBatchInclude, serializeProductionBatch, combinedLotInclude, serializeCombinedLot, type ProductionBatchWithRelations } from "./batch-include";
+import { productionBatchInclude, serializeProductionBatch, type ProductionBatchWithRelations } from "./batch-include";
 import {
   assignBatchNoSchema,
   createProductionBatchSchema,
@@ -14,25 +12,22 @@ import {
   type CreateProductionBatchInput,
   type ProductionBatchExecutionInput,
 } from "./batch.schemas";
-import { COMBINED_LOT_STAGE_ROLE } from "./combined-lot-stage";
 import { transitionProductionBatchStage } from "./production-batch-transition";
 import type { Prisma } from "@prisma/client";
 
 // --- Tier 2 of the three-tier pipeline (see schema.prisma's own comment
 // block above ProductionBatch): the small manufacturing runs a
 // PreProduction's material actually gets split across, limited by real
-// equipment capacity. No stage machine of its own — just IN_PROGRESS ->
-// COMPLETED — so this module is plain CRUD, not a transition endpoint.
-//
-// Completing a run (POST /:id/complete) is the one action with real
-// side effects: it adds this run's own outputQty to the parent
-// PreProduction's running combinedQty, and — the moment that running
-// total actually reaches the parent's plannedQty, i.e. every planned
-// run has now pooled in — creates the CombinedLot (Tier 3) that
-// everything from IPQC onward happens against exactly once. This is the
-// "automatic, incremental combine + running remaining-quantity tracking"
-// the client asked for, replacing the old single-Batch model's implicit
-// per-batch pipeline. ---
+// equipment capacity. Creation/execution here is plain CRUD (just
+// IN_PROGRESS -> COMPLETED) — the real pipeline (IPQC through Dispatch
+// Plan) is each batch's OWN, handled by production-batch-transition.ts
+// once a batch is COMPLETED, not a pooled CombinedLot any more (see that
+// model's own comment: "combine" stopped being the model per the
+// client — every batch packages, gets QC'd, and dispatches on its own).
+// Completing a run (POST /:id/complete) just adds its outputQty to the
+// parent PreProduction's running combinedQty — a "how much has this item
+// produced so far" figure the remaining-quantity rollup still uses,
+// nothing more. ---
 
 export const productionBatchesRouter = Router();
 
@@ -173,10 +168,17 @@ productionBatchesRouter.patch("/production-batches/:id", requireRole("PRODUCTION
 // only once that running total actually reaches the parent's plannedQty
 // — creates the CombinedLot every downstream stage (IPQC onward) happens
 // against. Requires outputQty to already be recorded; there's nothing
-// meaningful to pool into the parent without it. Runs inside a
-// SERIALIZABLE transaction: several small runs can complete around the
-// same moment, and only the one that actually pushes combinedQty over
-// plannedQty should be the one that creates the lot.
+// meaningful to add to the parent's running total without it.
+//
+// No longer auto-creates a CombinedLot — per the client, "combine" isn't
+// the model any more: every batch packages, gets QC'd, and dispatches on
+// its own (see production-batch-transition.ts), so there's nothing left
+// to pool into once this batch is done. combinedQty on the parent
+// PreProduction keeps incrementing as a running "how much has this item
+// produced so far" figure (still used for the remaining-quantity
+// rollup), it just never triggers a CombinedLot any more.
+// CombinedLot itself is untouched for any lot that already exists from
+// before this change — old data still reads and works exactly as it did.
 productionBatchesRouter.post("/production-batches/:id/complete", requireRole("PRODUCTION"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await requireBatch(req.params.id);
@@ -185,39 +187,15 @@ productionBatchesRouter.post("/production-batches/:id/complete", requireRole("PR
     if (existing.outputQty == null) return res.status(400).json({ error: "Record this run's output quantity before completing it." });
 
     const outputQty = existing.outputQty;
-    const result = await runSerializable(async (tx) => {
+    const batch = await prisma.$transaction(async (tx) => {
       await tx.productionBatch.update({ where: { id: existing.id }, data: { status: "COMPLETED", completedById: req.user!.id, completedAt: new Date() } });
-
-      const preProduction = await tx.preProduction.update({
-        where: { id: existing.preProductionId },
-        data: { combinedQty: { increment: outputQty } },
-      });
-
-      let combinedLot = null;
-      if (preProduction.combinedQty >= preProduction.plannedQty - 1e-6) {
-        const alreadyLot = await tx.combinedLot.findUnique({ where: { preProductionId: preProduction.id } });
-        if (!alreadyLot) {
-          combinedLot = await tx.combinedLot.create({ data: { preProductionId: preProduction.id }, include: combinedLotInclude });
-        }
-      }
-
-      const batch = await tx.productionBatch.findUniqueOrThrow({ where: { id: existing.id }, include: productionBatchInclude });
-      return { batch, combinedLot };
+      await tx.preProduction.update({ where: { id: existing.preProductionId }, data: { combinedQty: { increment: outputQty } } });
+      return tx.productionBatch.findUniqueOrThrow({ where: { id: existing.id }, include: productionBatchInclude });
     });
 
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.completed", entityType: "ProductionBatch", entityId: existing.id, metadata: { outputQty, combinedLotCreated: result.combinedLot != null } });
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.completed", entityType: "ProductionBatch", entityId: existing.id, metadata: { outputQty } });
 
-    if (result.combinedLot) {
-      await recordAudit({ actorId: req.user!.id, action: "combined_lot.created", entityType: "CombinedLot", entityId: result.combinedLot.id });
-      const productName = result.combinedLot.preProduction.purchaseOrderItem.productName;
-      await notifyRoles(
-        COMBINED_LOT_STAGE_ROLE.IPQC,
-        { title: `${productName} — fully combined`, body: "Every planned production run has pooled in — ready for IPQC.", link: `/combined-lots/${result.combinedLot.id}` },
-        req.user!.id,
-      ).catch((err) => req.log?.error({ err }, "notify failed: production_batch.completed"));
-    }
-
-    res.json({ productionBatch: serializeProductionBatch(result.batch), combinedLot: result.combinedLot ? serializeCombinedLot(result.combinedLot) : null });
+    res.json({ productionBatch: serializeProductionBatch(batch) });
   } catch (err) {
     next(err);
   }

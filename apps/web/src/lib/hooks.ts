@@ -622,19 +622,18 @@ export function useUpdateProductionBatch(preProductionId: string) {
   });
 }
 
-// The one action with real side effects: marks the run COMPLETED, adds
-// its outputQty to the parent's running combinedQty, and — only once
-// that total reaches the parent's plannedQty — creates the CombinedLot
-// every downstream stage happens against. Returns both the completed run
-// and the lot, if one was just created (null otherwise).
+// Marks the run COMPLETED and adds its outputQty to the parent's running
+// combinedQty (a progress figure only) — doesn't pool into anything any
+// more, the batch just becomes eligible for its own pipeline (see
+// useTransitionProductionBatchStage above).
 export function useCompleteProductionBatch(preProductionId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api<{ productionBatch: ProductionBatch; combinedLot: CombinedLot | null }>(`/api/production-batches/${id}/complete`, { method: "POST" }),
+    mutationFn: (id: string) => api<{ productionBatch: ProductionBatch }>(`/api/production-batches/${id}/complete`, { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
       qc.invalidateQueries({ queryKey: ["pre-productions", "detail", preProductionId] });
-      qc.invalidateQueries({ queryKey: ["combined-lots"] });
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
     },
   });
 }

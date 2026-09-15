@@ -696,18 +696,21 @@ enum ProductionBatchStatus {
 // (IPQC through Dispatch Plan — see combined-lot-stage.ts's own
 // CombinedLotStageId, reused here as-is rather than a parallel enum).
 //
-// Per the client's real floor practice: a batch doesn't have to wait for
-// every other batch on the same PreProduction to finish before it can be
-// packaged and shipped — completing one (status -> COMPLETED) still adds
-// its outputQty to PreProduction.combinedQty (a running progress figure),
-// but no longer auto-creates a CombinedLot. CombinedLot stays in the
-// schema and still works exactly as before for any lot that already
-// exists — it just isn't the only path a batch's material can take to
-// Dispatch any more; each batch is its own path by default. See
-// production-batch-transition.ts for the FORWARD/REJECT logic (same
-// shape as combined-lot-transition.ts) and purchase-orders.routes.ts's
-// computeCompletion for how a PO's own "done" definition now accounts
-// for both paths.
+// Per the client's real floor practice: "combine" isn't the model any
+// more — a batch doesn't wait for every other batch on the same
+// PreProduction to finish before it's packaged, QC'd and shipped.
+// Completing one (status -> COMPLETED) still adds its outputQty to
+// PreProduction.combinedQty (kept only as a running "how much has this
+// item produced so far" progress figure — the remaining-quantity rollup
+// still uses it), but it no longer auto-creates a CombinedLot; nothing
+// does any more. CombinedLot stays in the schema purely for any lot that
+// already existed before this change — still readable/actionable
+// exactly as before — but no new one is ever created; every batch is its
+// own path now. See production-batch-transition.ts for the FORWARD/
+// REJECT logic (same shape combined-lot-transition.ts already had) and
+// purchase-orders.routes.ts's computeCompletion for how a PO's own
+// "done" definition sums dispatched quantity across every batch (plus
+// any legacy CombinedLot) against the item's ordered quantity.
 //
 // batchNo is intentionally not required at creation — Production leaves
 // it blank; QC assigns the real batch number the first time it touches
@@ -802,11 +805,15 @@ enum CombinedLotStageId {
   DISPATCH_PLAN // Dispatch — terminal
 }
 
-// The pooled lot every one of a PreProduction's ProductionBatches
-// combines into — created once combinedQty reaches plannedQty (see
-// transition.ts). Everything from here on (testing, packaging, billing,
-// dispatch) happens exactly once against the whole combined quantity,
-// same field shapes as the old single-Batch pipeline's back half.
+// LEGACY — no longer created for new production. Used to be the pooled
+// lot every one of a PreProduction's ProductionBatches combined into
+// (auto-created once combinedQty reached plannedQty); per the client,
+// "combine" stopped being the model — every ProductionBatch now runs
+// its own IPQC-through-Dispatch pipeline instead (see that model's own
+// comment and production-batch-transition.ts). This model, its routes,
+// and its detail page stay exactly as they were purely so any lot that
+// already existed before this change keeps reading and working — new
+// PreProductions will never get one.
 model CombinedLot {
   id              String             @id @default(uuid())
   preProductionId String             @unique

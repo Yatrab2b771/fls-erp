@@ -1081,10 +1081,14 @@ function LinkedRecordsCard({ run }: { run: PreProduction }) {
 
 // --- Tier 2 — Production Execution. Only relevant once this run's own
 // gate (Sample QC Approval) has actually Approved — Production plans one
-// or more small manufacturing runs against the remaining quantity, and
-// completing each one automatically pools its output into combinedQty.
-// Once that reaches the full plannedQty, the CombinedLot (Tier 3) is
-// created automatically and every downstream stage happens there. ---
+// or more small manufacturing runs against the remaining quantity.
+// Completing one just adds its output to combinedQty (a running
+// produced-so-far figure) and makes it eligible for its OWN IPQC-
+// through-Dispatch pipeline (see ProductionBatchCard below) — "combine"
+// isn't the model any more, so nothing pools automatically. The
+// `run.combinedLot` branch below only ever fires for a PreProduction
+// that already had one from before this change — new runs never get
+// one. ---
 function ProductionBatchesSection({ run }: { run: PreProduction }) {
   const { hasRole } = useAuth();
   const navigate = useNavigate();
@@ -1103,7 +1107,7 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3 p-4">
           <p className="text-xs text-slate-500">
-            Every planned production run has pooled in ({run.combinedQty} / {run.plannedQty}) — Combined Lot created, everything from IPQC onward happens there now.
+            This run combined before batches started dispatching independently ({run.combinedQty} / {run.plannedQty}) — everything from IPQC onward still happens on that Combined Lot.
           </p>
           <button type="button" className="btn-primary btn-sm" onClick={() => navigate(`/combined-lots/${run.combinedLot!.id}`)}>
             Open Combined Lot <ArrowRight className="h-3.5 w-3.5" strokeWidth={2.5} />
@@ -1120,7 +1124,7 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
           <Layers className="h-3.5 w-3.5" /> Production Execution
         </h3>
         <span className="font-mono text-xs font-bold text-slate-600">
-          Combined {run.combinedQty} / {run.plannedQty} — remaining {run.remainingQty}
+          Produced {run.combinedQty} / {run.plannedQty} — remaining {run.remainingQty}
         </span>
       </div>
       <div className="space-y-3 p-4">
@@ -1200,10 +1204,10 @@ function ProductionBatchCard({ preProductionId, batch }: { preProductionId: stri
       toast.error("Record the output quantity before completing this run.");
       return;
     }
-    if (!window.confirm("Mark this production run completed? Its output will be added to the run's combined total.")) return;
+    if (!window.confirm("Mark this batch completed? It'll then have its own QC/Packaging/Dispatch pipeline to go through, independent of any other batch on this run.")) return;
     try {
-      const result = await complete.mutateAsync(batch.id);
-      toast.success(result.combinedLot ? "Completed — every planned run has now pooled in, Combined Lot created." : "Completed and combined.");
+      await complete.mutateAsync(batch.id);
+      toast.success("Completed — this batch now has its own pipeline to go through (see the link below).");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not complete");
     }
