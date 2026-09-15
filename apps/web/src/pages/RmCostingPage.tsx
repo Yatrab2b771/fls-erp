@@ -39,7 +39,7 @@ function RecipeMatchSuggestions({ planId, suggestions }: { planId: string; sugge
     if (!Number.isFinite(batchSizeKg) || batchSizeKg <= 0) return toast.error("Enter a valid batch size (Kg) first.");
     try {
       await addItem.mutateAsync({ recipeId: s.recipeId, batchSizeKg });
-      calculate.mutate();
+      calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Queued, but couldn't calculate — check this Recipe's ingredients.") });
       toast.success(`Queued "${s.recipeName}" — calculating.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not queue this Recipe");
@@ -169,12 +169,18 @@ export function RmCostingPage() {
       updateCosting.mutate(parsed);
       return;
     }
-    updateCosting.mutate(parsed, { onSuccess: () => calculate.mutate() });
+    updateCosting.mutate(parsed, {
+      onSuccess: () => calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Saved, but couldn't recalculate the plan.") }),
+    });
   }
 
   function handleRemoveItem(itemId: string, recipeName: string, remainingAfter: number) {
     if (!window.confirm(`Remove "${recipeName}" from this plan?`)) return;
-    removeItem.mutate(itemId, { onSuccess: () => remainingAfter > 0 && calculate.mutate() });
+    removeItem.mutate(itemId, {
+      onSuccess: () =>
+        remainingAfter > 0 &&
+        calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Removed, but couldn't recalculate the rest of the plan.") }),
+    });
   }
 
   async function handleSendToPreInventory(planName: string) {
@@ -257,10 +263,14 @@ export function RmCostingPage() {
                   disabled={!selectedPlanId}
                   onClick={async () => {
                     if (!recipeId || !batchSizeKg) return;
-                    await addItem.mutateAsync({ recipeId, batchSizeKg: Number(batchSizeKg) });
-                    setRecipeId("");
-                    setBatchSizeKg("");
-                    calculate.mutate();
+                    try {
+                      await addItem.mutateAsync({ recipeId, batchSizeKg: Number(batchSizeKg) });
+                      setRecipeId("");
+                      setBatchSizeKg("");
+                      calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Added, but couldn't calculate — check this Recipe's ingredients.") });
+                    } catch (err) {
+                      toast.error(err instanceof ApiError ? err.message : "Could not add this Recipe");
+                    }
                   }}
                 >
                   Add
@@ -341,7 +351,11 @@ export function RmCostingPage() {
                       </Link>
                     )}
                   </div>
-                  <button className="btn-primary" disabled={plan.items.length === 0 || calculate.isPending} onClick={() => calculate.mutate()}>
+                  <button
+                    className="btn-primary"
+                    disabled={plan.items.length === 0 || calculate.isPending}
+                    onClick={() => calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not calculate this plan") })}
+                  >
                     <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate Costing"}
                   </button>
                 </div>

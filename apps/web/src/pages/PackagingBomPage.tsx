@@ -41,7 +41,7 @@ function SkuMatchSuggestions({ planId, suggestions }: { planId: string; suggesti
   async function handleUse(s: SuggestedSku) {
     try {
       await addItem.mutateAsync({ skuId: s.skuId, targetYield: s.targetYield });
-      calculate.mutate();
+      calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Queued, but couldn't calculate — check this SKU's packaging spec.") });
       toast.success(`Queued "${s.productName}" — calculating.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not queue this SKU");
@@ -170,7 +170,11 @@ export function PackagingBomPage() {
 
   function handleRemoveItem(itemId: string, productName: string, remainingAfter: number) {
     if (!window.confirm(`Remove "${productName}" from this plan?`)) return;
-    removeItem.mutate(itemId, { onSuccess: () => remainingAfter > 0 && calculate.mutate() });
+    removeItem.mutate(itemId, {
+      onSuccess: () =>
+        remainingAfter > 0 &&
+        calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Removed, but couldn't recalculate the rest of the plan.") }),
+    });
   }
 
   async function handleSendToPreInventory(planName: string) {
@@ -247,7 +251,11 @@ export function PackagingBomPage() {
                       </Link>
                     )}
                   </div>
-                  <button className="btn-primary" disabled={plan.items.length === 0 || calculate.isPending} onClick={() => calculate.mutate()}>
+                  <button
+                    className="btn-primary"
+                    disabled={plan.items.length === 0 || calculate.isPending}
+                    onClick={() => calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not calculate this plan") })}
+                  >
                     <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate BOM"}
                   </button>
                 </div>
