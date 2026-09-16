@@ -11,6 +11,12 @@ interface ItemOption {
   // list. Ignored entirely when no item sets it, same flat look as
   // before this existed.
   group?: string;
+  // The RM/PM item's own code (e.g. "RM00292"), when the option is a
+  // real InventoryItem — shown alongside the name everywhere this picker
+  // is used for one, and searchable too (typing a code narrows the list
+  // same as typing a name). Absent for pickers over non-inventory lists
+  // (Category, Unit, Customer, ...), which just don't set it.
+  code?: string | null;
 }
 
 // A type-to-filter combobox for picking one item out of a real catalog —
@@ -50,6 +56,7 @@ export function ItemPicker({
   const rootRef = useRef<HTMLDivElement>(null);
 
   const selected = items.find((i) => i.id === value);
+  const displayName = (i: ItemOption) => (i.code ? `${i.code} — ${i.name}` : i.name);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -60,12 +67,13 @@ export function ItemPicker({
   }, []);
 
   const q = query.trim().toLowerCase();
+  const matchesQuery = (i: ItemOption) => i.name.toLowerCase().includes(q) || !!i.code?.toLowerCase().includes(q);
   // Capped at 50 rendered rows — with 1,000+ items, rendering every match
   // as the user types their first character would just recreate the
   // original problem in DOM form. A narrower query surfaces the real
   // item within a couple of keystrokes.
-  const matches = (q ? items.filter((i) => i.name.toLowerCase().includes(q)) : items).slice(0, 50);
-  const totalMatchCount = q ? items.filter((i) => i.name.toLowerCase().includes(q)).length : items.length;
+  const matches = (q ? items.filter(matchesQuery) : items).slice(0, 50);
+  const totalMatchCount = q ? items.filter(matchesQuery).length : items.length;
 
   function select(item: ItemOption) {
     onChange(item.id);
@@ -81,8 +89,8 @@ export function ItemPicker({
           type="text"
           className="field pl-9 pr-8"
           disabled={disabled}
-          placeholder={selected ? selected.name : placeholder}
-          value={open ? query : (selected?.name ?? "")}
+          placeholder={selected ? displayName(selected) : placeholder}
+          value={open ? query : (selected ? displayName(selected) : "")}
           onFocus={() => {
             setOpen(true);
             setQuery("");
@@ -119,9 +127,10 @@ export function ItemPicker({
                     type="button"
                     className={`flex w-full items-center gap-2 truncate px-3 py-1.5 text-left text-xs hover:bg-brand-50 ${item.id === value ? "bg-brand-50 font-bold text-brand-700" : "text-slate-700"}`}
                     onClick={() => select(item)}
-                    title={item.name}
+                    title={displayName(item)}
                   >
                     {Icon && <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" strokeWidth={2.25} />}
+                    {item.code && <span className="shrink-0 font-mono text-[10px] text-slate-400">{item.code}</span>}
                     <span className="truncate">{item.name}</span>
                   </button>
                 </div>

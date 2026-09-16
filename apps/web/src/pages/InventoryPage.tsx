@@ -1151,7 +1151,7 @@ export function InventoryPage() {
           <span className="mx-1 hidden h-4 w-px bg-slate-200 sm:block" />
           <label className="text-xs font-bold text-slate-500">Item breakdown</label>
           <div className="w-56">
-            <ItemPicker items={(stock ?? []).map((s) => ({ id: s.item.id, name: s.item.name }))} value={locationReportItemId} onChange={setLocationReportItemId} placeholder="— Pick an RM/PM item —" />
+            <ItemPicker items={(stock ?? []).map((s) => ({ id: s.item.id, name: s.item.name, code: s.item.code }))} value={locationReportItemId} onChange={setLocationReportItemId} placeholder="— Pick an RM/PM item —" />
           </div>
           <button className="btn-ghost" disabled={locationReportLoading} onClick={handleExportItemLocation} title="Download this item's stock split across Warehouse, every Day Store, and every Plant">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> {locationReportLoading ? "Loading…" : "By Location"}
@@ -1189,7 +1189,7 @@ export function InventoryPage() {
 }
 
 function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnType<typeof useInventoryStock>["data"]; empty: boolean }) {
-  if (loading) return <SkeletonRows rows={5} cols={8} />;
+  if (loading) return <SkeletonRows rows={5} cols={9} />;
   if (empty) return <EmptyState icon={Warehouse} title="No inventory items yet" hint="Log a received or issued entry to add the first item." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
@@ -1199,6 +1199,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
         <table className="table-modern w-full">
           <thead>
             <tr>
+              <th>Item Code</th>
               <th>Item</th>
               <th>Category</th>
               <th>Unit</th>
@@ -1213,6 +1214,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
           <tbody>
             {rows.map((s) => (
               <tr key={s.item.id}>
+                <td className="font-mono text-slate-500">{s.item.code ?? "—"}</td>
                 <td className="font-bold text-slate-800">{s.item.name}</td>
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
@@ -1241,7 +1243,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
 // nothing ever issued to/from this store don't show at all — the API
 // only returns items that actually have activity here.
 function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: DayStoreStockLine[] | undefined; empty: boolean }) {
-  if (loading) return <SkeletonRows rows={5} cols={6} />;
+  if (loading) return <SkeletonRows rows={5} cols={7} />;
   if (empty) return <EmptyState icon={Warehouse} title="Nothing issued to this store yet" hint="Issue stock to it from the Issued to Store tab, or import a sheet tagged to it." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
@@ -1251,6 +1253,7 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
         <table className="table-modern w-full">
           <thead>
             <tr>
+              <th>Item Code</th>
               <th>Item</th>
               <th>Category</th>
               <th>Unit</th>
@@ -1263,6 +1266,7 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
           <tbody>
             {rows.map((s) => (
               <tr key={s.item.id}>
+                <td className="font-mono text-slate-500">{s.item.code ?? "—"}</td>
                 <td className="font-bold text-slate-800">{s.item.name}</td>
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
@@ -1297,7 +1301,7 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
 // nets out anything moved out), so that's the only number shown — same
 // restraint PlantStockTable/DayStoreStockTable already use below.
 function WarehouseStockTable({ loading, rows, empty }: { loading: boolean; rows: InventoryStockLine[] | undefined; empty: boolean }) {
-  if (loading) return <SkeletonRows rows={5} cols={4} />;
+  if (loading) return <SkeletonRows rows={5} cols={5} />;
   if (empty) return <EmptyState icon={Warehouse} title="Nothing on hand at this warehouse yet" hint="Log a received entry, or import Opening Stock." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
@@ -1307,6 +1311,7 @@ function WarehouseStockTable({ loading, rows, empty }: { loading: boolean; rows:
         <table className="table-modern w-full">
           <thead>
             <tr>
+              <th>Item Code</th>
               <th>Item</th>
               <th>Category</th>
               <th>Unit</th>
@@ -1317,6 +1322,7 @@ function WarehouseStockTable({ loading, rows, empty }: { loading: boolean; rows:
           <tbody>
             {rows.map((s) => (
               <tr key={s.item.id}>
+                <td className="font-mono text-slate-500">{s.item.code ?? "—"}</td>
                 <td className="font-bold text-slate-800">{s.item.name}</td>
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
@@ -1336,7 +1342,7 @@ function WarehouseStockTable({ loading, rows, empty }: { loading: boolean; rows:
 }
 
 function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: PlantStockLine[] | undefined; empty: boolean }) {
-  if (loading) return <SkeletonRows rows={5} cols={4} />;
+  if (loading) return <SkeletonRows rows={5} cols={5} />;
   if (empty) return <EmptyState icon={Warehouse} title="Nothing issued to this plant yet" hint="Issue stock to it from Issued to Production, or log RM/PM consumption at a batch's Dispensing stage." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
@@ -1346,6 +1352,7 @@ function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: Pla
         <table className="table-modern w-full">
           <thead>
             <tr>
+              <th>Item Code</th>
               <th>Item</th>
               <th>Category</th>
               <th>Unit</th>
@@ -1356,6 +1363,7 @@ function PlantStockTable({ loading, rows, empty }: { loading: boolean; rows: Pla
           <tbody>
             {rows.map((s) => (
               <tr key={s.item.id}>
+                <td className="font-mono text-slate-500">{s.item.code ?? "—"}</td>
                 <td className="font-bold text-slate-800">{s.item.name}</td>
                 <td className="text-slate-600">{CATEGORY_LABEL[s.item.category]}</td>
                 <td className="text-slate-500">{s.item.unit ?? "—"}</td>
