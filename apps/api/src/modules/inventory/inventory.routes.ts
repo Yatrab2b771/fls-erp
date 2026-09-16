@@ -101,8 +101,8 @@ async function notifyTransitDispatched(params: {
 // path, this mirrors the existing "one leg triggers another" pattern
 // (Dispensing's WASTE consumption -> ISSUED_RECYCLE, SAMPLE -> a
 // QcSampleTransfer): the moment the RECEIVED row actually becomes
-// ACCEPTED — immediately for Opening Stock, or via POST
-// /transactions/:id/accept once QC clears it — a matching
+// ACCEPTED — via POST /transactions/:id/accept, once QC clears it (every
+// RECEIVED row goes through the QC gate now, no bypass) — a matching
 // ISSUED_DAY_STORE row is created for the same qty/unit/date, tagged to
 // that Day Store. Net effect on Warehouse on-hand is zero (the RECEIVED
 // inflow and the ISSUED_DAY_STORE outflow cancel out, since neither
@@ -607,13 +607,10 @@ inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS", "
 
 inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
   try {
-    const { type, rows, isOpeningStock, dayStoreId, isTransitTracked } = req.body as ImportInventoryTransactionsInput;
+    const { type, rows, dayStoreId, isTransitTracked } = req.body as ImportInventoryTransactionsInput;
 
     if (type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
       return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
-    }
-    if (isOpeningStock && type !== "RECEIVED") {
-      return res.status(400).json({ error: "Opening Stock only applies to Material Received rows." });
     }
     if (dayStoreId && type !== "ISSUED_DAY_STORE") {
       return res.status(400).json({ error: "Day Store only applies to Issued to Day Store rows." });
@@ -698,18 +695,14 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
       expiryDate: row.expiryDate,
       remark: row.remark,
       createdById: req.user!.id,
-      // Opening Stock skips the inward QC gate entirely — nothing was
-      // actually delivered today to inspect, it's existing stock being
-      // catalogued for the first time. Otherwise, same gate as a single
-      // manual entry — a bulk sheet doesn't get to skip QA/QC just
-      // because it came in as a batch.
-      receiptStatus: type === "RECEIVED" ? (isOpeningStock ? "ACCEPTED" : "PENDING_QC") : undefined,
-      isOpeningStock: !!isOpeningStock,
-      acceptedById: isOpeningStock ? req.user!.id : undefined,
-      acceptedAt: isOpeningStock ? new Date() : undefined,
-      // Transit gate — same batch-level flag as isOpeningStock, applied
-      // to every row in this sheet. See POST /transactions above for the
-      // per-row equivalent.
+      // Same inward QC gate as a single manual entry — a bulk sheet
+      // doesn't get to skip QA/QC just because it came in as a batch, not
+      // even a one-time stock migration (see POST /transactions above for
+      // why the old Opening Stock bypass was removed entirely).
+      receiptStatus: type === "RECEIVED" ? "PENDING_QC" : undefined,
+      // Transit gate — same batch-level flag, applied to every row in
+      // this sheet. See POST /transactions above for the per-row
+      // equivalent.
       isTransitTracked: !!isTransitTracked,
       deliveredAt: isTransitTracked ? null : new Date(),
       deliveredById: isTransitTracked ? null : req.user!.id,
@@ -746,34 +739,17 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
 
     await recordAudit({
       actorId: req.user!.id,
-      action: isOpeningStock ? "inventory.opening_stock_imported" : "inventory.transactions_imported",
+      action: "inventory.transactions_imported",
       entityType: "InventoryTransaction",
       metadata: { type, rowCount: result.count, itemsCreated, dayStoreId, dayStoresCreated, isTransitTracked: !!isTransitTracked },
     });
 
-    if (type === "RECEIVED" && !isOpeningStock && result.count > 0) {
+    if (type === "RECEIVED" && result.count > 0) {
       await notifyRoles(
         ["QA_QC"],
         { title: `${result.count} material received row(s) awaiting inward QC`, body: "Bulk import — check the Material Received tab.", link: "/inventory" },
         req.user!.id,
       ).catch(notifyFailed(req, "inventory.transactions_imported"));
-    }
-    if (isOpeningStock) {
-      // A bulk sheet can add stock for the same item across several
-      // rows — sum per item first so the crossing check (see
-      // notifyIfNewlyAvailable) sees the sheet's whole effect at once,
-      // not one row's worth in isolation.
-      const addedByItem = new Map<string, number>();
-      for (const row of rows) {
-        const id = itemIds.get(`${row.category}::${row.itemName}`)!;
-        addedByItem.set(id, (addedByItem.get(id) ?? 0) + row.quantity);
-      }
-      await Promise.all(
-        [...addedByItem.entries()].flatMap(([itemId, addedQty]) => [
-          notifyIfNewlyAvailable({ itemId, addedQty, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) }),
-          notifyIfPoNewlyReady({ itemId, addedQty, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) }),
-        ]),
-      );
     }
 
     res.status(201).json({ transactionsCreated: result.count, itemsCreated, dayStoresCreated });
@@ -794,9 +770,6 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     if (rest.type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
       return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
     }
-    if (rest.isOpeningStock && rest.type !== "RECEIVED") {
-      return res.status(400).json({ error: "Opening Stock only applies to Material Received rows." });
-    }
     if (rest.isTransitTracked && rest.type === "RECEIVED") {
       return res.status(400).json({ error: "Transit tracking only applies to Issued to Store / Issued to Production rows — a Material Received entry already has its own inward QC gate." });
     }
@@ -813,13 +786,14 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       itemId,
       ...rest,
       createdById: req.user!.id,
-      // Inward QC gate: a fresh RECEIVED row starts PENDING_QC and won't
+      // Inward QC gate: every RECEIVED row starts PENDING_QC and won't
       // count toward stock until QA/QC approves it and Store accepts it
       // (see PATCH /transactions/:id/qc and POST /transactions/:id/accept)
-      // — unless it's Opening Stock, which skips straight to ACCEPTED.
-      receiptStatus: rest.type === "RECEIVED" ? (rest.isOpeningStock ? "ACCEPTED" : "PENDING_QC") : undefined,
-      acceptedById: rest.isOpeningStock ? req.user!.id : undefined,
-      acceptedAt: rest.isOpeningStock ? new Date() : undefined,
+      // — no bypass, not even for a bulk/go-live load (the old Opening
+      // Stock flag that used to skip straight to ACCEPTED was removed;
+      // every delivery, including a one-time stock migration, now goes
+      // through the same real QC gate).
+      receiptStatus: rest.type === "RECEIVED" ? "PENDING_QC" : undefined,
       // Transit gate: tracked rows stay un-delivered until confirmed at
       // the destination (see POST /transactions/:id/confirm-delivery);
       // everything else is "delivered" the same instant it's created,
@@ -856,9 +830,8 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
         })
       : await prisma.inventoryTransaction.create({ data: createData, include: txnInclude });
 
-    const auditAction = rest.isOpeningStock
-      ? "inventory.opening_stock_logged"
-      : rest.type === "RECEIVED"
+    const auditAction =
+      rest.type === "RECEIVED"
         ? "inventory.material_received"
         : rest.type === "ISSUED_DAY_STORE"
           ? "inventory.material_issued_day_store"
@@ -872,22 +845,15 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       metadata: { itemId, quantity: rest.quantity, unit: rest.unit },
     });
 
-    if (rest.type === "RECEIVED" && !rest.isOpeningStock) {
+    if (rest.type === "RECEIVED") {
       await notifyRoles(["QA_QC"], { title: `${item.name} awaiting inward QC`, body: `${rest.quantity} ${rest.unit}`, link: "/inventory" }, req.user!.id).catch(
         notifyFailed(req, "inventory.material_received"),
       );
     }
-    if (rest.isOpeningStock) {
-      await notifyIfNewlyAvailable({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
-      await notifyIfPoNewlyReady({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
-    }
-    // Opening Stock skips straight to ACCEPTED at creation (see above) —
-    // that's the "just became ACCEPTED" moment for this row, so the
-    // direct-to-store leg fires right here. A normal (QC-gated) receipt
-    // fires it from POST /:id/accept instead, once it actually clears QC.
-    if (rest.type === "RECEIVED" && rest.isOpeningStock && rest.dayStoreId) {
-      await routeDirectReceiptToStore({ receivedTxn: { ...txn }, actorId: req.user!.id });
-    }
+    // A direct-to-store RECEIVED row's companion ISSUED_DAY_STORE leg
+    // (see routeDirectReceiptToStore's own comment) only fires once this
+    // row actually reaches ACCEPTED — every RECEIVED row now goes through
+    // the QC gate first, so that happens in POST /:id/accept, never here.
     if (rest.isTransitTracked) {
       await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }

@@ -103,9 +103,6 @@ export const createInventoryTransactionSchema = z.object({
   // grnNo below (Store's own GRN reference). §4.8.
   invoiceNo: z.string().max(120).optional(),
   invoiceDate: z.coerce.date().optional(),
-  // One-time go-live migration flag — RECEIVED rows only. Skips inward
-  // QC entirely (see schema.prisma comment on InventoryTransaction).
-  isOpeningStock: z.boolean().optional(),
   // Transit tracking — ISSUED_DAY_STORE/ISSUED_PRODUCTION rows only (see
   // schema.prisma comment on InventoryTransaction). When set, this entry
   // doesn't count as arrived at its destination until someone there
@@ -175,10 +172,6 @@ export const invoiceSchema = z.object({
 // item option.
 export const importInventoryTransactionsSchema = z.object({
   type: z.enum(TXN_TYPES),
-  // One-time go-live migration flag — applies to the whole sheet, not
-  // per row (a single upload is either Sanjay's opening-stock snapshot
-  // or it isn't). RECEIVED only, enforced at the route.
-  isOpeningStock: z.boolean().optional(),
   // Which Day Store this sheet's stock belongs to when the sheet doesn't
   // carry its own per-row Day Store column — a default for the batch,
   // same as picking it once on the manual Log Entry form's dropdown.

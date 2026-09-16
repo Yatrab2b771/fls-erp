@@ -609,10 +609,6 @@ export function InventoryPage() {
   const [tab, setTab] = useState<ViewTab>(() => [...visibleMaterialTabs, ...visibleDispatchTabs][0]?.key ?? "stock");
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
-  // Bulk-import counterpart of LogEntryForm's Opening Stock checkbox —
-  // Received tab only. A toolbar-level toggle since the import button
-  // has no per-row form of its own.
-  const [importOpeningStock, setImportOpeningStock] = useState(false);
   // Same idea for Issued to Day Store — which Day Store this sheet's
   // stock belongs to, picked once for the whole batch (a real sheet from
   // Sanjay's side is one Day Store's count, not several mixed together).
@@ -815,10 +811,9 @@ export function InventoryPage() {
         );
       }
 
-      const openingStock = tab === "RECEIVED" && importOpeningStock;
       const dayStoreId = tab === "ISSUED_DAY_STORE" && importDayStoreId ? importDayStoreId : undefined;
       const transitTracked = tab === "ISSUED_DAY_STORE" && importTransitTracked;
-      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, isOpeningStock: openingStock || undefined, dayStoreId, isTransitTracked: transitTracked || undefined });
+      const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, dayStoreId, isTransitTracked: transitTracked || undefined });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
       const hasPerRowStores = tab === "ISSUED_DAY_STORE" && rows.some((r) => r.dayStoreName);
       const dayStoreNote = hasPerRowStores
@@ -827,7 +822,7 @@ export function InventoryPage() {
           ? ` — tagged to ${dayStores?.find((d) => d.id === dayStoreId)?.name ?? "the selected Store"}.`
           : "";
       toast.success(
-        `${openingStock ? "Loaded" : "Imported"} ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}${openingStock ? " — counted immediately, no QC needed." : ""}${transitTracked ? " — in transit until confirmed at the other end." : ""}${dayStoreNote}`,
+        `Imported ${result.transactionsCreated} ${TXN_TYPE_LABEL[tab as InventoryTxnType].toLowerCase()} entr${result.transactionsCreated === 1 ? "y" : "ies"}${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}${transitTracked ? " — in transit until confirmed at the other end." : ""}${dayStoreNote}`,
       );
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
@@ -956,12 +951,6 @@ export function InventoryPage() {
                 <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importTxns.isPending ? "Importing…" : "Import Excel"}
               </button>
               <input ref={importFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportFile} />
-              {tab === "RECEIVED" && (
-                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-600" title="Existing warehouse stock, not a new delivery — skips QC and counts immediately.">
-                  <input type="checkbox" className="h-3 w-3" checked={importOpeningStock} onChange={(e) => setImportOpeningStock(e.target.checked)} />
-                  Opening Stock
-                </label>
-              )}
               {tab === "ISSUED_DAY_STORE" && (
                 <div className="w-40" title="Which Store this sheet's stock is for — tags every row on import, same as Sanjay's separate Store sheets.">
                   <ItemPicker items={(dayStores ?? []).map((d) => ({ id: d.id, name: d.name }))} value={importDayStoreId} onChange={setImportDayStoreId} placeholder="No Store tag" />
@@ -1303,7 +1292,7 @@ function DayStoreStockTable({ loading, rows, empty }: { loading: boolean; rows: 
 // restraint PlantStockTable/DayStoreStockTable already use below.
 function WarehouseStockTable({ loading, rows, empty }: { loading: boolean; rows: InventoryStockLine[] | undefined; empty: boolean }) {
   if (loading) return <SkeletonRows rows={5} cols={5} />;
-  if (empty) return <EmptyState icon={Warehouse} title="Nothing on hand at this warehouse yet" hint="Log a received entry, or import Opening Stock." accent="brand" />;
+  if (empty) return <EmptyState icon={Warehouse} title="Nothing on hand at this warehouse yet" hint="Log a received entry, or import a sheet, to get started." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
 
   return (
@@ -1567,7 +1556,6 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [size, setSize] = useState("");
   const [vendorName, setVendorName] = useState("");
   const [dayStoreId, setDayStoreId] = useState("");
-  const [isOpeningStock, setIsOpeningStock] = useState(false);
   const [isTransitTracked, setIsTransitTracked] = useState(false);
   const [batchNo, setBatchNo] = useState("");
   const [grnNo, setGrnNo] = useState("");
@@ -1638,10 +1626,8 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
     if (!finalItemId) return setError("Select or add an item first.");
     if (!date) return setError("Pick a date.");
     if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
-    // Rate is mandatory on a real delivery (Store Before/After Report
-    // §4.6) — exempt for Opening Stock, which is migrating existing
-    // stock, not a fresh vendor delivery with a rate to record.
-    if (type === "RECEIVED" && !isOpeningStock && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
+    // Rate is mandatory on a real delivery (Store Before/After Report §4.6).
+    if (type === "RECEIVED" && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
     if (type === "RECEIVED" && receiveDirectToStore && !dayStoreId) return setError("Pick which store this is being received at.");
 
     setSubmitting(true);
@@ -1655,7 +1641,6 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         size: size.trim() || undefined,
         vendorName: vendorName.trim() || undefined,
         dayStoreId: (type === "ISSUED_DAY_STORE" && dayStoreId) || (type === "RECEIVED" && receiveDirectToStore && dayStoreId) ? dayStoreId : undefined,
-        isOpeningStock: type === "RECEIVED" && isOpeningStock ? true : undefined,
         isTransitTracked: type === "ISSUED_DAY_STORE" && isTransitTracked ? true : undefined,
         batchNo: batchNo.trim() || undefined,
         grnNo: grnNo.trim() || undefined,
@@ -1668,9 +1653,7 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
       });
       toast.success(
         type === "RECEIVED"
-          ? isOpeningStock
-            ? "Opening stock logged — counted immediately, no QC needed."
-            : "Entry logged — awaiting inward QC."
+          ? "Entry logged — awaiting inward QC."
           : isTransitTracked
             ? `${TXN_TYPE_LABEL[type]} entry logged — in transit until confirmed at the other end.`
             : `${TXN_TYPE_LABEL[type]} entry logged.`,
@@ -1703,19 +1686,9 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
 
       {type === "RECEIVED" && (
         <div className="space-y-2">
-          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
-            <input type="checkbox" className="h-3.5 w-3.5" checked={isOpeningStock} onChange={(e) => setIsOpeningStock(e.target.checked)} />
-            Opening Stock — existing warehouse stock, not a new delivery
-          </label>
-          {isOpeningStock ? (
-            <p className="flex items-center gap-1.5 rounded-lg bg-brand-50 px-3 py-2 text-xs font-bold text-brand-700">
-              <CheckCircle2 className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Counted as stock immediately — no QC step, since nothing is actually being delivered today.
-            </p>
-          ) : (
-            <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-              <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
-            </p>
-          )}
+          <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+            <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
+          </p>
           <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
             <input type="checkbox" className="h-3.5 w-3.5" checked={receiveDirectToStore} onChange={(e) => setReceiveDirectToStore(e.target.checked)} />
             Received directly at a Store — bypasses the Warehouse
@@ -1808,7 +1781,7 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         {type === "RECEIVED" && (
           <>
             <div>
-              <label className="label">{isOpeningStock ? "Rate (optional)" : "Rate"}</label>
+              <label className="label">Rate</label>
               <input className="field font-mono" type="number" min="0" step="any" placeholder="Per unit" value={rate} onChange={(e) => setRate(e.target.value)} />
             </div>
             <div>

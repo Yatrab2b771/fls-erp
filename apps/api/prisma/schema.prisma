@@ -2097,15 +2097,16 @@ model InventoryTransaction {
   // stock-on-hand is quantity - rejectedQty (see stock.ts).
   rejectedQty Float?
 
-  // One-time go-live migration path — Warehouse's existing physical
-  // stock, entered once so day-to-day tracking has a real starting
-  // point. RECEIVED rows only. Skips the inward QC gate entirely
-  // (receiptStatus goes straight to ACCEPTED at creation, no vendor
-  // actually delivered anything today to inspect) — kept as its own
-  // flag rather than a new InventoryTxnType so it still counts toward
-  // stock-on-hand the same way a normal accepted receipt does, just
-  // visibly tagged everywhere it's shown so it's never mistaken for a
-  // real vendor delivery later.
+  // LEGACY / historical marker only — no longer settable on a new row.
+  // Used to be a one-time go-live migration bypass (skipped the inward
+  // QC gate entirely, receiptStatus went straight to ACCEPTED at
+  // creation) for entering Warehouse's existing physical stock without
+  // a vendor to inspect. Per the client, every delivery — including a
+  // bulk/go-live stock load — now goes through the same real QC gate, no
+  // exceptions, so createInventoryTransactionSchema/
+  // importInventoryTransactionsSchema no longer accept this as input.
+  // The column (and any row still carrying `true` from before this
+  // changed) stays so historical entries keep reading correctly.
   isOpeningStock Boolean @default(false)
 
   // Step 6 of the R&D sample lifecycle — leftover material Store confirms

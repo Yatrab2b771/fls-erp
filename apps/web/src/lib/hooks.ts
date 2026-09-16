@@ -1129,7 +1129,6 @@ export interface CreateInventoryTransactionPayload {
   size?: string;
   vendorName?: string;
   dayStoreId?: string;
-  isOpeningStock?: boolean;
   // Transit tracking — ISSUED_DAY_STORE/ISSUED_PRODUCTION only. See
   // useConfirmDelivery/useTransit below.
   isTransitTracked?: boolean;
@@ -1159,7 +1158,7 @@ export function useCreateInventoryTransaction() {
 export function useImportInventoryTransactions() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[]; isOpeningStock?: boolean; dayStoreId?: string; isTransitTracked?: boolean }) =>
+    mutationFn: (body: { type: InventoryTxnType; rows: ImportInventoryRow[]; dayStoreId?: string; isTransitTracked?: boolean }) =>
       api<{ transactionsCreated: number; itemsCreated: number; dayStoresCreated: number }>("/api/inventory/transactions/import", { method: "POST", body }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
