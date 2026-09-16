@@ -104,18 +104,16 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // pages are also where a plan gets *used*. Send to Pre-Inventory
       // is PPIC's button and lives here, not on the PO, so gating the
       // page to RND left PPIC unable to reach the one control the page
-      // grants them; and the PO detail page links BD/Purchase straight
-      // here from its calculated BOM/RM chips, which landed them on a
+      // grants them; and the PO detail page links Purchase straight here
+      // from its calculated BOM/RM chips, which landed them on a
       // restricted screen. Authoring stays RND-only inside the pages
       // themselves (canEditCosting / canManageCatalog), and every write
       // behind them is role-gated server-side, so opening the door here
-      // adds read access and nothing more.
-      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC", "PURCHASE", "BD"] },
-      // PPIC no longer gets a nav link here — Costing is being removed
-      // from their interface; they keep Packaging BOM above, and RND
-      // stays the one who triggers "Send to Pre-Inventory" off a
-      // calculated RM Costing plan going forward (see RmCostingPage.tsx).
-      { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["RND", "BD"] },
+      // adds read access and nothing more. BD no longer gets a nav link
+      // to either — Packaging BOM and Costing are being removed from
+      // their interface, same reasoning as PPIC's own Costing removal.
+      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC", "PURCHASE"] },
+      { to: "/rm-costing", label: "RM Costing", icon: FlaskConical, roles: ["RND"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND", "PPIC"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
     ],
