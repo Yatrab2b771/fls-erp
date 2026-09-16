@@ -49,6 +49,7 @@ import type {
   QcSampleTransfer,
   RecipeRequest,
   RecipeRequestStatus,
+  RecipeDetail,
   RecipeSummary,
   RecycleBinEntityType,
   RecycleBinRow,
@@ -952,10 +953,20 @@ export function useCatalogSkuCount(options?: { enabled?: boolean }) {
 export function useImportRecipes() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (recipes: { name: string; ingredients: { name: string; brand: string; costPerKg: number; gPerServing: number; proteinPct: number }[] }[]) =>
+    mutationFn: (recipes: { name: string; ingredients: { name: string; brand: string; itemCode?: string; costPerKg: number; gPerServing: number; proteinPct: number }[] }[]) =>
       api<{ recipesUpserted: number; ingredientsUpserted: number }>("/api/rm-costing/recipes/import", { method: "POST", body: { recipes } }),
+    // Prefix match — also catches any cached single-recipe detail (see
+    // useRecipe below), since the manual editor (RecipeEditor) saves
+    // through this same mutation and needs its own detail view refreshed.
     onSuccess: () => qc.invalidateQueries({ queryKey: ["rm-costing", "recipes"] }),
   });
+}
+
+// Full detail (every ingredient row) for one Recipe — used by the manual
+// "Browse & Edit Recipe" editor, same shape convention as Packaging BOM's
+// SkuEditor reading a single Sku's full spec.
+export function useRecipe(id: string | undefined) {
+  return useQuery({ queryKey: ["rm-costing", "recipes", "detail", id], queryFn: () => api<RecipeDetail>(`/api/rm-costing/recipes/${id}`), enabled: !!id });
 }
 
 export function useRmPlans() {

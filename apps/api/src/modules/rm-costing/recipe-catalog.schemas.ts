@@ -3,6 +3,9 @@ import { z } from "zod";
 const recipeIngredientSchema = z.object({
   name: z.string().min(1),
   brand: z.string().min(1),
+  // The RM item's own code, when known — see schema.prisma's comment on
+  // RecipeIngredient.itemCode.
+  itemCode: z.string().max(60).optional(),
   costPerKg: z.number().nonnegative(),
   gPerServing: z.number().positive(),
   // Accepts either a 0-1 fraction or a 0-100 percentage, same as the

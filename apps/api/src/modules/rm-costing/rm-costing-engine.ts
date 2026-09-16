@@ -12,6 +12,7 @@
 export interface RecipeIngredientInput {
   name: string;
   brand: string;
+  itemCode?: string | null;
   costPerKg: number;
   gPerServing: number;
   proteinPct: number;
@@ -45,6 +46,7 @@ export interface RmBatchLineInput {
 export interface BatchIngredientResult {
   name: string;
   brand: string;
+  itemCode?: string | null;
   proteinPct: number;
   costPerKg: number;
   ratePerGm: number;
@@ -124,6 +126,7 @@ export function calculateBatchCosting(recipe: RecipeInput, batchSizeKg: number, 
     return {
       name: ing.name,
       brand: ing.brand,
+      itemCode: ing.itemCode,
       proteinPct: ing.proteinPct,
       costPerKg: ing.costPerKg,
       ratePerGm,

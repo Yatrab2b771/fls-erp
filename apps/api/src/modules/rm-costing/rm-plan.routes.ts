@@ -187,7 +187,7 @@ rmPlanRouter.post("/plans", validateBody(createRmPlanSchema), async (req: Authed
             recipe: {
               name: recipe.name,
               totalServing: recipe.totalServing,
-              ingredients: ingredients.map((ing) => ({ name: ing.name, brand: ing.brand, costPerKg: ing.costPerKg, gPerServing: ing.gPerServing, proteinPct: ing.proteinPct })),
+              ingredients: ingredients.map((ing) => ({ name: ing.name, brand: ing.brand, itemCode: ing.itemCode, costPerKg: ing.costPerKg, gPerServing: ing.gPerServing, proteinPct: ing.proteinPct })),
             },
           },
         ];
@@ -346,6 +346,7 @@ rmPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: string
         ingredients: (ingredientsByRecipe.get(item.recipe.id) ?? []).map((ing) => ({
           name: ing.name,
           brand: ing.brand,
+          itemCode: ing.itemCode,
           costPerKg: ing.costPerKg,
           gPerServing: ing.gPerServing,
           proteinPct: ing.proteinPct,

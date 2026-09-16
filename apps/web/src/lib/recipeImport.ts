@@ -3,6 +3,7 @@ import * as XLSX from "xlsx";
 export interface ImportIngredientPayload {
   name: string;
   brand: string;
+  itemCode?: string;
   gPerServing: number;
   costPerKg: number;
   proteinPct: number;
@@ -42,6 +43,7 @@ export function parseRecipeWorkbook(buffer: ArrayBuffer): ImportRecipePayload[] 
     for (const row of parsedRows) {
       let name = "";
       let brand = "";
+      let itemCode = "";
       let gPerServing = 0;
       let costPerKg = 0;
       let proteinPct = 0;
@@ -49,6 +51,7 @@ export function parseRecipeWorkbook(buffer: ArrayBuffer): ImportRecipePayload[] 
         const k = key.toLowerCase().trim();
         if (k.includes("ingredient") || k.includes("material") || k === "item") name = String(val).trim();
         if (k.includes("brand") || k.includes("make")) brand = String(val).trim();
+        if (k.includes("code")) itemCode = String(val).trim();
         if (k.includes("g/serving") || k.includes("quantity")) gPerServing = parseFloat(String(val)) || 0;
         if (k.includes("cost") || k.includes("rate") || k.includes("price")) costPerKg = parseFloat(String(val)) || 0;
         if (k.includes("protein")) {
@@ -56,7 +59,7 @@ export function parseRecipeWorkbook(buffer: ArrayBuffer): ImportRecipePayload[] 
           proteinPct = pVal > 1 ? pVal / 100 : pVal;
         }
       }
-      if (name && gPerServing > 0) ingredients.push({ name, brand: brand || "Approved Vendor", gPerServing, costPerKg, proteinPct });
+      if (name && gPerServing > 0) ingredients.push({ name, brand: brand || "Approved Vendor", itemCode: itemCode || undefined, gPerServing, costPerKg, proteinPct });
     }
     if (ingredients.length) recipesPayload.push({ name: sheetName, ingredients });
   }
@@ -69,12 +72,12 @@ export function parseRecipeWorkbook(buffer: ArrayBuffer): ImportRecipePayload[] 
 // ingredient. Exists so R&D doesn't have to reverse-engineer the expected
 // columns from scratch for a brand-new formulation.
 export function downloadRecipeImportTemplate() {
-  const headers = ["Ingredient", "Brand/Make", "g/Serving", "Cost (per Kg)", "Protein %"];
+  const headers = ["Item Code", "Ingredient", "Brand/Make", "g/Serving", "Cost (per Kg)", "Protein %"];
   const sampleRows = [
-    { Ingredient: "Whey Protein Concentrate 80%", "Brand/Make": "Approved Vendor", "g/Serving": 25, "Cost (per Kg)": 650, "Protein %": 80 },
-    { Ingredient: "Cocoa Powder", "Brand/Make": "Approved Vendor", "g/Serving": 3, "Cost (per Kg)": 320, "Protein %": 0 },
-    { Ingredient: "Stevia Extract", "Brand/Make": "Approved Vendor", "g/Serving": 0.2, "Cost (per Kg)": 4500, "Protein %": 0 },
-    { Ingredient: "", "Brand/Make": "", "g/Serving": "", "Cost (per Kg)": "", "Protein %": "" },
+    { "Item Code": "RM00514", Ingredient: "Whey Protein Concentrate 80%", "Brand/Make": "Approved Vendor", "g/Serving": 25, "Cost (per Kg)": 650, "Protein %": 80 },
+    { "Item Code": "RM00551", Ingredient: "Cocoa Powder", "Brand/Make": "Approved Vendor", "g/Serving": 3, "Cost (per Kg)": 320, "Protein %": 0 },
+    { "Item Code": "RM00022", Ingredient: "Stevia Extract", "Brand/Make": "Approved Vendor", "g/Serving": 0.2, "Cost (per Kg)": 4500, "Protein %": 0 },
+    { "Item Code": "", Ingredient: "", "Brand/Make": "", "g/Serving": "", "Cost (per Kg)": "", "Protein %": "" },
   ];
 
   const recipeSheet = XLSX.utils.json_to_sheet(sampleRows, { header: headers });
@@ -83,7 +86,7 @@ export function downloadRecipeImportTemplate() {
     [""],
     ["1. One sheet = one Recipe. This workbook has one example sheet, named \"New Product Name\" below."],
     ["2. Rename that sheet's tab (double-click it) to the exact Product Name the PO/catalog uses — a Recipe is matched by product name only, across every customer, not per customer."],
-    ["3. Fill in one row per ingredient: Ingredient name, Brand/Make, how many grams go into one serving, cost per Kg, and protein % (leave 0 if not protein-bearing)."],
+    ["3. Fill in one row per ingredient: Item Code (optional, the RM's own item code if known), Ingredient name, Brand/Make, how many grams go into one serving, cost per Kg, and protein % (leave 0 if not protein-bearing)."],
     ["4. Need more than one recipe? Right-click the sheet tab -> Move or Copy -> Create a copy, then rename each copy to its own Product Name."],
     ["5. Upload the finished file via \"Import Recipes (RM BOM)\" on this page. Column names just need to contain the right word (e.g. any header with \"ingredient\", \"g/serving\", \"cost\", \"protein\") — exact header text isn't required."],
   ]);

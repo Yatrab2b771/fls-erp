@@ -26,14 +26,15 @@ export function buildBatchDispensingPdf(batch: BatchCostingResult): PDFKit.PDFDo
   doc.moveDown(0.5);
 
   const columns = [
-    { header: "S.No.", width: 40, align: "center" as const },
-    { header: "Ingredients", width: 220 },
-    { header: "Make", width: 140 },
-    { header: "UOM", width: 50, align: "center" as const },
-    { header: "Qty./Kg", width: 80, align: "right" as const },
-    { header: "Req./Batch", width: 90, align: "right" as const },
-    { header: "Issued", width: 70, align: "center" as const },
-    { header: "A.R. No.", width: 90, align: "center" as const },
+    { header: "S.No.", width: 35, align: "center" as const },
+    { header: "Item Code", width: 90 },
+    { header: "Ingredients", width: 175 },
+    { header: "Make", width: 130 },
+    { header: "UOM", width: 45, align: "center" as const },
+    { header: "Qty./Kg", width: 75, align: "right" as const },
+    { header: "Req./Batch", width: 85, align: "right" as const },
+    { header: "Issued", width: 65, align: "center" as const },
+    { header: "A.R. No.", width: 80, align: "center" as const },
   ];
 
   let totalPerKg = 0;
@@ -42,9 +43,9 @@ export function buildBatchDispensingPdf(batch: BatchCostingResult): PDFKit.PDFDo
     const prop = ing.gPerServing / batch.gmPerServing;
     totalPerKg += prop;
     totalBatchKg += ing.qtyInKg;
-    return [idx + 1, ing.name, ing.brand, "Kg", prop.toFixed(4), ing.qtyInKg.toFixed(3), "", ""];
+    return [idx + 1, ing.itemCode ?? "", ing.name, ing.brand, "Kg", prop.toFixed(4), ing.qtyInKg.toFixed(3), "", ""];
   });
-  rows.push(["", "TOTAL", "", "Kg", totalPerKg.toFixed(3), totalBatchKg.toFixed(3), "", ""]);
+  rows.push(["", "", "TOTAL", "", "Kg", totalPerKg.toFixed(3), totalBatchKg.toFixed(3), "", ""]);
 
   const endY = drawTable(doc, { x: doc.page.margins.left, startY: doc.y + 5, columns, rows });
 

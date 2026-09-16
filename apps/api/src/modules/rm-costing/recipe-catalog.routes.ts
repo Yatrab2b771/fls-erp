@@ -73,6 +73,7 @@ recipeCatalogRouter.post(
         const ingredients = recipeInput.ingredients.map((ing, index) => ({
           name: ing.name,
           brand: ing.brand,
+          itemCode: ing.itemCode,
           costPerKg: ing.costPerKg,
           gPerServing: ing.gPerServing,
           proteinPct: ing.proteinPct > 1 ? ing.proteinPct / 100 : ing.proteinPct,

@@ -1419,14 +1419,19 @@ model Recipe {
 // One row per formulation ingredient. Field names mirror the source
 // spreadsheet columns 1:1, same porting rule as Sku.
 model RecipeIngredient {
-  id          String @id @default(uuid())
+  id          String  @id @default(uuid())
   recipeId    String
   name        String
   brand       String
+  // The RM item's own code (e.g. "RM00292"), when known — matches
+  // SkuPackagingComponent.pmCode's own reasoning on the PM BOM side:
+  // free-text, not an FK to InventoryItem, since a recipe can be
+  // authored ahead of that item existing in the item master at all.
+  itemCode    String?
   costPerKg   Float
   gPerServing Float
-  proteinPct  Float  @default(0)
-  sortOrder   Int    @default(0)
+  proteinPct  Float   @default(0)
+  sortOrder   Int     @default(0)
 
   recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
 

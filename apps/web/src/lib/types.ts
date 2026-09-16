@@ -1054,6 +1054,29 @@ export interface RecipeSummary {
   ingredientCount: number;
 }
 
+// One ingredient row as stored, full detail — used by the manual
+// "Browse & Edit Recipe" editor (see RecipeEditor in RmCostingPage.tsx),
+// same shape convention as SkuPackagingComponent on the PM BOM side.
+export interface RecipeIngredientRow {
+  id: string;
+  name: string;
+  brand: string;
+  itemCode: string | null;
+  costPerKg: number;
+  gPerServing: number;
+  proteinPct: number;
+  sortOrder: number;
+}
+
+// GET /api/rm-costing/recipes/:id — a Recipe's full ingredient list, for
+// browsing/editing by hand instead of always re-uploading a whole sheet.
+export interface RecipeDetail {
+  id: string;
+  name: string;
+  totalServing: number;
+  ingredients: RecipeIngredientRow[];
+}
+
 export interface CostingParams {
   mfgLossPct: number;
   packSizeG: number;
@@ -1070,6 +1093,7 @@ export interface CostingParams {
 export interface BatchIngredientResult {
   name: string;
   brand: string;
+  itemCode: string | null;
   proteinPct: number;
   costPerKg: number;
   ratePerGm: number;
