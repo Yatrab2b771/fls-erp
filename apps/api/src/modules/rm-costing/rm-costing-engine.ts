@@ -91,6 +91,7 @@ export interface BatchCostingResult {
 export interface ProcurementLine {
   name: string;
   brand: string;
+  itemCode?: string | null;
   estCostPerKg: number;
   totalKg: number;
   /** Recipe name -> quantity contributed, e.g. "CHOCOLATE PLANT NUTRITION": 12.5 */
@@ -202,7 +203,7 @@ export function calculateMasterRMBOM(items: RmBatchLineInput[], costing: Costing
       const key = `${ing.name}_|_${ing.brand}`;
       let entry = procurementMap.get(key);
       if (!entry) {
-        entry = { name: ing.name, brand: ing.brand, estCostPerKg: ing.costPerKg, totalKg: 0, sources: {} };
+        entry = { name: ing.name, brand: ing.brand, itemCode: ing.itemCode, estCostPerKg: ing.costPerKg, totalKg: 0, sources: {} };
         procurementMap.set(key, entry);
       }
       entry.totalKg += ing.qtyInKg;

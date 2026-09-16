@@ -1125,6 +1125,7 @@ export interface BatchCostingResult {
 export interface ProcurementLine {
   name: string;
   brand: string;
+  itemCode: string | null;
   estCostPerKg: number;
   totalKg: number;
   sources: Record<string, number>;

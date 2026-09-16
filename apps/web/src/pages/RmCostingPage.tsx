@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { Beaker, Calculator, ClipboardList, FileSpreadsheet, FlaskConical, Link2, Pencil, Plus, Trash2, Upload, Wand2, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { downloadFile, ApiError } from "../lib/api";
-import { downloadRecipeImportTemplate, parseRecipeWorkbook } from "../lib/recipeImport";
+import { downloadRecipeImportTemplate, parseRecipeWorkbook, RECIPE_UOM } from "../lib/recipeImport";
 import { EmptyState } from "../components/EmptyState";
 import { RecipeRequestBanner } from "../components/RecipeRequestBanner";
 import { SearchBar } from "../components/SearchBar";
@@ -357,7 +357,7 @@ export function RmCostingPage() {
                     disabled={plan.items.length === 0 || calculate.isPending}
                     onClick={() => calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not calculate this plan") })}
                   >
-                    <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate Costing"}
+                    <Calculator className="h-4 w-4" strokeWidth={2.5} /> {calculate.isPending ? "Calculating…" : "Calculate RM BOM"}
                   </button>
                 </div>
                 <div className="overflow-x-auto">
@@ -395,13 +395,17 @@ export function RmCostingPage() {
 
               {plan.result && (
                 <>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-3">
                     {plan.result.batches.map((b, idx) => {
                       const item = plan.items.find((i) => i.recipeName === b.recipeName);
                       return (
-                        <div key={idx} className="card-hover card p-4">
-                          <div className="mb-2 flex items-center justify-between">
-                            <p className="font-bold text-slate-800">{b.recipeName}</p>
+                        <div key={idx} className="card overflow-hidden">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-amber-50/50 px-4 py-2.5">
+                            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                              <p className="font-bold text-slate-800">{b.recipeName}</p>
+                              <span className="font-mono text-[11px] text-slate-500">Batch {b.batchSizeKg} Kg</span>
+                              <span className="text-[11px] text-slate-400">RM Cost ₹{b.totalRmCost.toFixed(0)} · Price/Pouch ₹{b.pricePerPouch.toFixed(2)}</span>
+                            </div>
                             {item && (
                               <button
                                 className="flex items-center gap-1 text-[10px] font-bold text-amber-600 hover:underline"
@@ -411,14 +415,39 @@ export function RmCostingPage() {
                               </button>
                             )}
                           </div>
-                          <div className="grid grid-cols-2 gap-1 text-[11px] text-slate-500">
-                            <p>Batch Size: <span className="font-mono font-bold text-slate-700">{b.batchSizeKg} Kg</span></p>
-                            <p>Servings: <span className="font-mono font-bold text-slate-700">{b.servingsPerBatch.toFixed(1)}</span></p>
-                            <p>Protein %: <span className="font-mono font-bold text-slate-700">{b.proteinPctInBatch.toFixed(1)}%</span></p>
-                            <p>RM Cost: <span className="font-mono font-bold text-slate-700">₹{b.totalRmCost.toFixed(0)}</span></p>
-                            <p className="col-span-2 mt-1 border-t border-slate-100 pt-1 text-sm">
-                              Price / Pouch: <span className="font-mono font-black text-amber-700">₹{b.pricePerPouch.toFixed(2)}</span>
-                            </p>
+                          {/* Same S.No/Item Code/Ingredients/Make/UOM/Qty.Kg/Req.Batch
+                              shape as the downloaded Dispensing PDF (rm-pdf.ts) — shown
+                              on screen too now, not just in the PDF. */}
+                          <div className="overflow-x-auto">
+                            <table className="table-modern w-full text-xs">
+                              <thead>
+                                <tr>
+                                  <th className="text-center">S.No</th>
+                                  <th>Item Code</th>
+                                  <th>Ingredients</th>
+                                  <th>Make</th>
+                                  <th className="text-center">UOM</th>
+                                  <th className="text-right">Qty./Kg</th>
+                                  <th className="text-right">Req./Batch</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {b.ingredients.map((ing, i) => {
+                                  const propPerKg = ing.gPerServing / b.gmPerServing;
+                                  return (
+                                    <tr key={i}>
+                                      <td className="text-center font-mono text-slate-400">{i + 1}</td>
+                                      <td className="font-mono text-slate-600">{ing.itemCode || "—"}</td>
+                                      <td className="font-semibold text-slate-700">{ing.name}</td>
+                                      <td className="text-slate-500">{ing.brand}</td>
+                                      <td className="text-center text-slate-400">{RECIPE_UOM}</td>
+                                      <td className="text-right font-mono">{propPerKg.toFixed(4)}</td>
+                                      <td className="text-right font-mono font-bold text-amber-700">{ing.qtyInKg.toFixed(3)}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
                           </div>
                         </div>
                       );
@@ -456,6 +485,7 @@ export function RmCostingPage() {
                       <table className="table-modern w-full">
                         <thead>
                           <tr>
+                            <th>Item Code</th>
                             <th>Ingredient</th>
                             <th>Brand</th>
                             <th className="text-center">Total (KG)</th>
@@ -464,6 +494,7 @@ export function RmCostingPage() {
                         <tbody>
                           {plan.result.procurement.map((line, idx) => (
                             <tr key={idx}>
+                              <td className="font-mono text-slate-500">{line.itemCode || "—"}</td>
                               <td className="font-semibold text-slate-700">{line.name}</td>
                               <td className="text-slate-600">{line.brand}</td>
                               <td className="text-center font-mono font-bold text-amber-700">{line.totalKg.toFixed(3)}</td>
@@ -678,6 +709,7 @@ function RecipeEditor({ recipeId, recipeName }: { recipeId: string | null; recip
               <th className="px-2 py-1.5">Item Code</th>
               <th className="px-2 py-1.5">Ingredient</th>
               <th className="px-2 py-1.5">Make</th>
+              <th className="px-2 py-1.5 text-center">UOM</th>
               <th className="px-2 py-1.5 text-right">Qty/Kg</th>
               <th className="px-2 py-1.5 text-right">Cost/Kg</th>
               <th className="px-2 py-1.5 text-right">Protein %</th>
@@ -696,6 +728,7 @@ function RecipeEditor({ recipeId, recipeName }: { recipeId: string | null; recip
                 <td className="px-2 py-1">
                   <input className="field !h-7 !py-0 !text-xs" placeholder="Make" value={row.brand} onChange={(e) => updateRow(row.key, { brand: e.target.value })} />
                 </td>
+                <td className="px-2 py-1 text-center text-slate-400">{RECIPE_UOM}</td>
                 <td className="px-2 py-1">
                   <input
                     className="field !h-7 w-20 !py-0 !text-right !text-xs"
