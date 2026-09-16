@@ -355,6 +355,22 @@ export function useImportPurchaseOrders() {
   });
 }
 
+// BD's own correction of the PO header — PO Number, Order Date,
+// Expected Delivery Date, Regulatory Body/Status. Not customerId or
+// items — those have their own dedicated routes/hooks. Works at any PO
+// status, same as the backend route itself (no DRAFT-only gate here).
+export function useUpdatePurchaseOrder(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { poNumber?: string; orderDate?: string; expectedDeliveryDate?: string; regulatoryBody?: string; regulatoryStatus?: string }) =>
+      api<PurchaseOrder>(`/api/purchase-orders/${poId}`, { method: "PATCH", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["purchase-orders"] });
+      qc.invalidateQueries({ queryKey: ["purchase-orders", poId] });
+    },
+  });
+}
+
 // Draft → BD Approve/Reject. Production can't be started off any of this
 // PO's line items until it's approved (see useCreatePreProduction below).
 export function useReviewPurchaseOrder(poId: string) {

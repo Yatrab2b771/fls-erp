@@ -44,6 +44,7 @@ import {
   useReportCatalogMismatch,
   useReviewPurchaseOrder,
   useSkus,
+  useUpdatePurchaseOrder,
   useUpdatePurchaseOrderItem,
   useUploadPoDocument,
 } from "../lib/hooks";
@@ -126,15 +127,6 @@ export function PurchaseOrderDetailPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="pill border-slate-200 bg-slate-50 text-slate-600">
-              <ShieldCheck className="h-3 w-3" /> {po.regulatoryBody ?? "No body"} · {po.regulatoryStatus ?? "—"}
-            </span>
-            <span className="pill border-slate-200 bg-slate-50 text-slate-600">
-              <Calendar className="h-3 w-3" /> {po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "No date"}
-            </span>
-            <span className="pill border-slate-200 bg-slate-50 text-slate-600">
-              <Calendar className="h-3 w-3" /> Delivery: {po.expectedDeliveryDate ? new Date(po.expectedDeliveryDate).toLocaleDateString() : "No date"}
-            </span>
             <button
               className="btn-ghost btn-sm"
               onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
@@ -143,6 +135,8 @@ export function PurchaseOrderDetailPage() {
             </button>
           </div>
         </div>
+
+        <PoHeaderDetails po={po} />
 
         <ReviewPanel po={po} />
 
@@ -452,6 +446,124 @@ function MetricGroup({ label, children }: { label: string; children: React.React
     <div>
       <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-5">{children}</div>
+    </div>
+  );
+}
+
+const REGULATORY_STATUS_ITEMS = [
+  { id: "Applied", name: "Applied" },
+  { id: "Not Applied", name: "Not Applied" },
+  { id: "Issued", name: "Issued" },
+];
+
+// BD's own correction of the PO header (PO Number, Order Date, Expected
+// Delivery Date, Regulatory Body/Status) — everything the create form
+// collects except Customer and items, which have their own edit paths
+// (customer can't change after creation at all; items have Add/Remove/
+// rename). Works at any PO status, matching the backend route itself.
+function PoHeaderDetails({ po }: { po: PurchaseOrder }) {
+  const { hasRole } = useAuth();
+  const canEdit = hasRole("BD");
+  const update = useUpdatePurchaseOrder(po.id);
+  const toast = useToast();
+  const [editing, setEditing] = useState(false);
+  const [poNumber, setPoNumber] = useState(po.poNumber ?? "");
+  const [orderDate, setOrderDate] = useState(po.orderDate?.slice(0, 10) ?? "");
+  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState(po.expectedDeliveryDate?.slice(0, 10) ?? "");
+  const [regulatoryBody, setRegulatoryBody] = useState(po.regulatoryBody ?? "");
+  const [regulatoryBodyOptions, setRegulatoryBodyOptions] = useState(() => {
+    const base = [{ id: "FSSAI", name: "FSSAI" }, { id: "AYUSH", name: "AYUSH" }];
+    return po.regulatoryBody && !base.some((o) => o.id.toLowerCase() === po.regulatoryBody!.toLowerCase()) ? [...base, { id: po.regulatoryBody, name: po.regulatoryBody }] : base;
+  });
+  const [regulatoryStatus, setRegulatoryStatus] = useState(po.regulatoryStatus ?? "");
+
+  function startEdit() {
+    setPoNumber(po.poNumber ?? "");
+    setOrderDate(po.orderDate?.slice(0, 10) ?? "");
+    setExpectedDeliveryDate(po.expectedDeliveryDate?.slice(0, 10) ?? "");
+    setRegulatoryBody(po.regulatoryBody ?? "");
+    setRegulatoryStatus(po.regulatoryStatus ?? "");
+    setEditing(true);
+  }
+
+  async function handleSave() {
+    try {
+      await update.mutateAsync({
+        poNumber: poNumber.trim() || undefined,
+        orderDate: orderDate || undefined,
+        expectedDeliveryDate: expectedDeliveryDate || undefined,
+        regulatoryBody: regulatoryBody || undefined,
+        regulatoryStatus: regulatoryStatus || undefined,
+      });
+      toast.success("PO details updated.");
+      setEditing(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update the PO details");
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="mt-4 space-y-3 rounded-xl border border-brand-200 bg-brand-50/40 p-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <label className="label">PO Number</label>
+            <input className="field" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} placeholder="PO-2026-XXXX" />
+          </div>
+          <div>
+            <label className="label">Order Date</label>
+            <input type="date" className="field" value={orderDate} onChange={(e) => setOrderDate(e.target.value)} />
+          </div>
+          <div>
+            <label className="label">Expected Delivery Date</label>
+            <input type="date" className="field" value={expectedDeliveryDate} onChange={(e) => setExpectedDeliveryDate(e.target.value)} />
+          </div>
+          <div>
+            <PickerWithAdd
+              label="Regulatory Body"
+              placeholder="FSSAI, AYUSH, …"
+              options={regulatoryBodyOptions}
+              value={regulatoryBody}
+              onChange={setRegulatoryBody}
+              onCreate={async (name) => {
+                setRegulatoryBodyOptions((prev) => (prev.some((o) => o.id.toLowerCase() === name.toLowerCase()) ? prev : [...prev, { id: name, name }]));
+                return { id: name };
+              }}
+            />
+          </div>
+          <div>
+            <label className="label">Regulatory Status</label>
+            <ItemPicker items={REGULATORY_STATUS_ITEMS} value={regulatoryStatus} onChange={setRegulatoryStatus} />
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary btn-sm" disabled={update.isPending} onClick={handleSave}>
+            {update.isPending ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+      <span className="pill border-slate-200 bg-slate-50 text-slate-600">
+        <ShieldCheck className="h-3 w-3" /> {po.regulatoryBody ?? "No body"} · {po.regulatoryStatus ?? "—"}
+      </span>
+      <span className="pill border-slate-200 bg-slate-50 text-slate-600">
+        <Calendar className="h-3 w-3" /> {po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "No date"}
+      </span>
+      <span className="pill border-slate-200 bg-slate-50 text-slate-600">
+        <Calendar className="h-3 w-3" /> Delivery: {po.expectedDeliveryDate ? new Date(po.expectedDeliveryDate).toLocaleDateString() : "No date"}
+      </span>
+      {canEdit && (
+        <button className="btn-icon h-6 w-6" onClick={startEdit} title="Edit PO Number / dates / regulatory info">
+          <Pencil className="h-3 w-3" strokeWidth={2.25} />
+        </button>
+      )}
     </div>
   );
 }
