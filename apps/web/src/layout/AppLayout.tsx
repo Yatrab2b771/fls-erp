@@ -113,7 +113,7 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // to either — Packaging BOM and Costing are being removed from
       // their interface, same reasoning as PPIC's own Costing removal.
       { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC", "PURCHASE"] },
-      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND"] },
+      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND", "PPIC", "STORE"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND", "PPIC"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
     ],
