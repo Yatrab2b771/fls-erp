@@ -38,6 +38,7 @@ import type {
   Plant,
   PoBilling,
   PoReadinessRow,
+  PoFullReport,
   PoReconciliation,
   PoWastageRejectionRow,
   PreInventoryRequirement,
@@ -294,6 +295,17 @@ export function usePoReconciliation(id: string | undefined) {
   return useQuery({
     queryKey: ["purchase-orders", id, "reconciliation"],
     queryFn: () => api<PoReconciliation>(`/api/purchase-orders/${id}/reconciliation`),
+    enabled: !!id,
+  });
+}
+
+// The step-by-step Full Report — every product line's PreProduction walk
+// plus every ProductionBatch's own execution + Tier-3 walk. See
+// purchase-orders.routes.ts's GET /:id/full-report.
+export function usePoFullReport(id: string | undefined) {
+  return useQuery({
+    queryKey: ["purchase-orders", id, "full-report"],
+    queryFn: () => api<PoFullReport>(`/api/purchase-orders/${id}/full-report`),
     enabled: !!id,
   });
 }

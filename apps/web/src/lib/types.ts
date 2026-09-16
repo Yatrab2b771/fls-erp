@@ -1489,6 +1489,68 @@ export interface PreInventoryRequirement {
   purchaseNotifiedAt: string | null;
 }
 
+// --- PO Full Report — every product line's PreProduction (Tier 1) walk
+// plus every ProductionBatch under it (Tier 2 execution + Tier 3 walk),
+// each with its own field values and step-by-step stage history. See
+// po-full-report.ts's own comment for why this exists as its own
+// report. ---
+
+export interface StageHistoryRow {
+  action: string;
+  fromLabel: string;
+  toLabel: string;
+  actorName: string;
+  createdAt: string;
+  note: string | null;
+}
+
+export interface PoFullReportBatch {
+  id: string;
+  batchNo: string | null;
+  plannedQty: number;
+  status: string;
+  manufacturingStartDate: string | null;
+  manufacturingEndDate: string | null;
+  inputQty: number | null;
+  outputQty: number | null;
+  wastageQty: number | null;
+  currentStageId: string;
+  tier3Fields: Record<string, unknown>;
+  history: StageHistoryRow[];
+}
+
+export interface PoFullReportItem {
+  id: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  productType: string;
+  preProduction: {
+    id: string;
+    currentStageId: string;
+    plannedQty: number;
+    combinedQty: number;
+    tier1Fields: Record<string, unknown>;
+    history: StageHistoryRow[];
+  } | null;
+  batches: PoFullReportBatch[];
+  batchCount: number;
+  dispatchedTotal: number;
+}
+
+export interface PoFullReport {
+  po: {
+    id: string;
+    poNumber: string | null;
+    customerName: string;
+    orderDate: string | null;
+    expectedDeliveryDate: string | null;
+    status: string;
+  };
+  items: PoFullReportItem[];
+  totals: { itemCount: number; batchCount: number; plannedTotal: number; dispatchedTotal: number };
+}
+
 // --- Notifications ---
 
 export interface AppNotification {

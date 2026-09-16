@@ -127,6 +127,9 @@ export function PurchaseOrderDetailPage() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Link to={`/purchase-orders/${po.id}/full-report`} className="btn-ghost btn-sm">
+              <FileStack className="h-3 w-3" strokeWidth={2.5} /> Full Report
+            </Link>
             <button
               className="btn-ghost btn-sm"
               onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}

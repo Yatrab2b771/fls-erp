@@ -12,6 +12,7 @@ import { VendorPurchaseOrderDetailPage } from "./pages/VendorPurchaseOrderDetail
 import { StockTransfersPage } from "./pages/StockTransfersPage";
 import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
+import { PoFullReportPage } from "./pages/PoFullReportPage";
 import { PreProductionDetailPage } from "./pages/PreProductionDetailPage";
 import { CombinedLotDetailPage } from "./pages/CombinedLotDetailPage";
 import { ProductionBatchDetailPage } from "./pages/ProductionBatchDetailPage";
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/stock-transfers" element={<StockTransfersPage />} />
           <Route path="/plant-consumption" element={<PlantConsumptionPage />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetailPage />} />
+          <Route path="/purchase-orders/:id/full-report" element={<PoFullReportPage />} />
           <Route path="/pre-productions/:id" element={<PreProductionDetailPage />} />
           <Route path="/production-batches/:id" element={<ProductionBatchDetailPage />} />
           <Route path="/combined-lots/:id" element={<CombinedLotDetailPage />} />

@@ -9,6 +9,8 @@ import { validateBody } from "../../common/middleware/validate";
 import { detectFileType, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { buildPurchaseOrderPdf } from "./po-pdf";
+import { getPoFullReport } from "./po-full-report";
+import { buildPoFullReportPdf } from "./po-full-report-pdf";
 import {
   createPurchaseOrderSchema,
   generatePoInvoiceSchema,
@@ -460,6 +462,41 @@ purchaseOrdersRouter.get("/:id/export.pdf", async (req: AuthedRequest<{ id: stri
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="FLS_PO_${order.poNumber ?? order.id}.pdf"`);
+    doc.pipe(res);
+    doc.end();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The full, step-by-step story of this PO — every product line, its
+// PreProduction run's own Tier-1 walk, and every ProductionBatch under
+// it with its own Tier-2 execution + Tier-3 walk, each with field values
+// and full stage history. See po-full-report.ts's own comment for why
+// this exists separately from the older /reconciliation and
+// batch-report-pdf.ts (legacy CombinedLot-only) reports. Shared assembler
+// backs both this JSON route (the on-screen report page) and the PDF
+// export right below it, so they can never drift apart.
+purchaseOrdersRouter.get("/:id/full-report", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const report = await getPoFullReport(req.params.id);
+    if (!report) return res.status(404).json({ error: "Purchase order not found" });
+    res.json(report);
+  } catch (err) {
+    next(err);
+  }
+});
+
+purchaseOrdersRouter.get("/:id/full-report.pdf", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const report = await getPoFullReport(req.params.id);
+    if (!report) return res.status(404).json({ error: "Purchase order not found" });
+
+    const doc = buildPoFullReportPdf(report);
+    await recordAudit({ actorId: req.user!.id, action: "purchase_order.exported_full_report_pdf", entityType: "PurchaseOrder", entityId: report.po.id });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="FLS_PO_Full_Report_${report.po.poNumber ?? report.po.id}.pdf"`);
     doc.pipe(res);
     doc.end();
   } catch (err) {
