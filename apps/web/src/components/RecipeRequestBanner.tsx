@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { FlaskConical, Clock, CheckCircle2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useCreateRecipeRequest, useRecipeRequests } from "../lib/hooks";
@@ -15,6 +16,11 @@ export function RecipeRequestBanner({ purchaseOrderItemId }: { purchaseOrderItem
   const { data: requests } = useRecipeRequests({ purchaseOrderItemId });
   const createRequest = useCreateRecipeRequest();
   const canRequest = hasRole("PPIC");
+  // R&D is the one who owes this request, not the one waiting on it —
+  // "Awaiting R&D" below is PPIC's framing (they're the ones waiting).
+  // Shown to R&D itself (e.g. browsing RM BOM/Packaging BOM directly),
+  // it should read as a to-do with a way to act on it instead.
+  const isRnd = hasRole("RND");
 
   // Most recent one — a product could in principle have an old READY
   // request and nothing further to show once Generate has since matched.
@@ -55,14 +61,25 @@ export function RecipeRequestBanner({ purchaseOrderItemId }: { purchaseOrderItem
   }
 
   return (
-    <div className="rounded-xl border border-amber-200 bg-amber-50/60 px-3.5 py-2.5">
-      <p className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
-        <Clock className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
-        {request.status === "ETA_GIVEN" && request.etaDate
-          ? `Awaiting R&D — ETA ${new Date(request.etaDate).toLocaleDateString()}`
-          : "Awaiting R&D — no ETA given yet"}
-      </p>
-      {request.etaNote && <p className="mt-0.5 pl-5 text-[11px] text-amber-600">{request.etaNote}</p>}
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50/60 px-3.5 py-2.5">
+      <div>
+        <p className="flex items-center gap-1.5 text-xs font-bold text-amber-700">
+          <Clock className="h-3.5 w-3.5 shrink-0" strokeWidth={2.25} />
+          {isRnd
+            ? request.status === "ETA_GIVEN" && request.etaDate
+              ? `PPIC is waiting on this Recipe/BOM from you — ETA given ${new Date(request.etaDate).toLocaleDateString()}`
+              : "PPIC is waiting on this Recipe/BOM from you — no ETA given yet"
+            : request.status === "ETA_GIVEN" && request.etaDate
+              ? `Awaiting R&D — ETA ${new Date(request.etaDate).toLocaleDateString()}`
+              : "Awaiting R&D — no ETA given yet"}
+        </p>
+        {request.etaNote && <p className="mt-0.5 pl-5 text-[11px] text-amber-600">{request.etaNote}</p>}
+      </div>
+      {isRnd && (
+        <Link to="/rnd" className="btn-primary btn-sm shrink-0">
+          {request.status === "ETA_GIVEN" ? "Update ETA" : "Give ETA"}
+        </Link>
+      )}
     </div>
   );
 }
