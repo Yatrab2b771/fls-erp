@@ -1138,6 +1138,10 @@ export interface CreateInventoryTransactionPayload {
   mfgDate?: string;
   expiryDate?: string;
   remark?: string;
+  // RECEIVED only — see schema.prisma's comment on InventoryTransaction.rate.
+  rate?: number;
+  invoiceNo?: string;
+  invoiceDate?: string;
 }
 
 export function useCreateInventoryTransaction() {
@@ -1193,6 +1197,9 @@ export interface UpdateInventoryTransactionPayload {
   vendorName?: string;
   size?: string;
   remark?: string;
+  rate?: number;
+  invoiceNo?: string;
+  invoiceDate?: string;
 }
 
 export function useUpdateInventoryTransaction() {

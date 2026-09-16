@@ -1319,6 +1319,12 @@ export interface InventoryTransaction {
   mfgDate: string | null;
   expiryDate: string | null;
   remark: string | null;
+  // RECEIVED only — the vendor's rate for this specific delivery, and
+  // their own invoice number/date (distinct from grnNo, Store's own GRN
+  // reference). See schema.prisma's comment on InventoryTransaction.rate.
+  rate: number | null;
+  invoiceNo: string | null;
+  invoiceDate: string | null;
   // ERP Diagram doc's incoming-QC reject branch — Accounts' own paper
   // trail against a RECEIVED row that came back QC_REJECTED (or carries
   // a partial rejectedQty). Always present as an array (possibly empty),

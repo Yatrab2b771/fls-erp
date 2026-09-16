@@ -94,6 +94,49 @@ async function notifyTransitDispatched(params: {
   }
 }
 
+// A RECEIVED row tagged with a Day Store goes there directly, bypassing
+// the Warehouse — Store Before/After Report §6: "material can be
+// received directly at the day store, without passing through the
+// warehouse." Rather than give RECEIVED its own separate stock-math
+// path, this mirrors the existing "one leg triggers another" pattern
+// (Dispensing's WASTE consumption -> ISSUED_RECYCLE, SAMPLE -> a
+// QcSampleTransfer): the moment the RECEIVED row actually becomes
+// ACCEPTED — immediately for Opening Stock, or via POST
+// /transactions/:id/accept once QC clears it — a matching
+// ISSUED_DAY_STORE row is created for the same qty/unit/date, tagged to
+// that Day Store. Net effect on Warehouse on-hand is zero (the RECEIVED
+// inflow and the ISSUED_DAY_STORE outflow cancel out, since neither
+// side of getOnHandByItemId cares about dayStoreId) — the material never
+// sat at the Warehouse, exactly as intended — while the Day Store's own
+// ledger (getOnHandByDayStoreAndItem) picks up the ISSUED_DAY_STORE leg
+// like any other. Only called from a context where the RECEIVED row has
+// just, in this same request, transitioned into ACCEPTED for the first
+// time, so there's no separate idempotency guard needed here.
+async function routeDirectReceiptToStore(params: {
+  receivedTxn: { itemId: string; quantity: number; unit: string; dayStoreId: string | null; date: Date; batchNo: string | null; size: string | null };
+  actorId: string;
+}): Promise<void> {
+  const { receivedTxn, actorId } = params;
+  if (!receivedTxn.dayStoreId) return;
+  await prisma.inventoryTransaction.create({
+    data: {
+      itemId: receivedTxn.itemId,
+      type: "ISSUED_DAY_STORE",
+      date: receivedTxn.date,
+      unit: receivedTxn.unit,
+      quantity: receivedTxn.quantity,
+      size: receivedTxn.size,
+      dayStoreId: receivedTxn.dayStoreId,
+      batchNo: receivedTxn.batchNo,
+      remark: "Auto-created — received directly at this store",
+      createdById: actorId,
+      isTransitTracked: false,
+      deliveredAt: new Date(),
+      deliveredById: actorId,
+    },
+  });
+}
+
 // Unlike Order Tracking/BOM/RM Costing, this module is NOT open to every
 // authenticated user by default. Store owns the Warehouse tool this
 // ports, so the ledger (transactions, dispatch transfers) and item
@@ -838,6 +881,13 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       await notifyIfNewlyAvailable({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
       await notifyIfPoNewlyReady({ itemId, addedQty: rest.quantity, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
+    // Opening Stock skips straight to ACCEPTED at creation (see above) —
+    // that's the "just became ACCEPTED" moment for this row, so the
+    // direct-to-store leg fires right here. A normal (QC-gated) receipt
+    // fires it from POST /:id/accept instead, once it actually clears QC.
+    if (rest.type === "RECEIVED" && rest.isOpeningStock && rest.dayStoreId) {
+      await routeDirectReceiptToStore({ receivedTxn: { ...txn }, actorId: req.user!.id });
+    }
     if (rest.isTransitTracked) {
       await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
@@ -1248,6 +1298,18 @@ inventoryRouter.post("/transactions/:id/accept", requireRole("STORE"), async (re
       actorId: req.user!.id,
       onFail: (label) => notifyFailed(req, label),
     });
+
+    // This row just became ACCEPTED for the first time (the atomic
+    // updateMany above only succeeds once) — if it was tagged for direct
+    // Day Store receipt, this is the moment to fire the companion leg.
+    // The rejected portion (if any) never counted as received at all, so
+    // only the net accepted quantity moves on.
+    if (updated.dayStoreId) {
+      await routeDirectReceiptToStore({
+        receivedTxn: { ...updated, quantity: updated.quantity - (updated.rejectedQty ?? 0) },
+        actorId: req.user!.id,
+      });
+    }
 
     res.json(updated);
   } catch (err) {

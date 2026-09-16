@@ -79,6 +79,7 @@ import {
   useTransit,
   useUnassignDayStoreUser,
   useUpdateInventoryTransaction,
+  useVendors,
   useWarehouses,
 } from "../lib/hooks";
 import type {
@@ -1573,14 +1574,34 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [mfgDate, setMfgDate] = useState("");
   const [expiryDate, setExpiryDate] = useState("");
   const [remark, setRemark] = useState("");
+  // Store Before/After Report §4 — rate/invoice weren't captured on a
+  // direct (non-Vendor-PO) delivery before; §6 — a receipt can go
+  // straight to a Day Store instead of always passing through the
+  // Warehouse first.
+  const [rate, setRate] = useState("");
+  const [invoiceNo, setInvoiceNo] = useState("");
+  const [invoiceDate, setInvoiceDate] = useState("");
+  const [receiveDirectToStore, setReceiveDirectToStore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const { data: vendors } = useInventoryVendors();
+  const { data: vendorDirectory } = useVendors();
   const { data: dayStores } = useDayStores();
   const createItem = useCreateInventoryItem();
   const createTxn = useCreateInventoryTransaction();
   const createDayStore = useCreateDayStore();
+
+  // Vendor Master's own directory, plus every name ever typed on a past
+  // entry (so an ad-hoc source like "Blinkit" that isn't a formal vendor
+  // still shows up as a suggestion) — still free text underneath (this
+  // field isn't an FK to Vendor), just a richer suggestion list.
+  const vendorNameOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const v of vendorDirectory ?? []) names.add(v.name);
+    for (const n of vendors?.vendors ?? []) names.add(n);
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [vendorDirectory, vendors]);
 
   const sortedItems = useMemo(() => items ?? [], [items]);
 
@@ -1617,6 +1638,11 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
     if (!finalItemId) return setError("Select or add an item first.");
     if (!date) return setError("Pick a date.");
     if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
+    // Rate is mandatory on a real delivery (Store Before/After Report
+    // §4.6) — exempt for Opening Stock, which is migrating existing
+    // stock, not a fresh vendor delivery with a rate to record.
+    if (type === "RECEIVED" && !isOpeningStock && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
+    if (type === "RECEIVED" && receiveDirectToStore && !dayStoreId) return setError("Pick which store this is being received at.");
 
     setSubmitting(true);
     try {
@@ -1628,7 +1654,7 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         quantity: Number(quantity),
         size: size.trim() || undefined,
         vendorName: vendorName.trim() || undefined,
-        dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
+        dayStoreId: (type === "ISSUED_DAY_STORE" && dayStoreId) || (type === "RECEIVED" && receiveDirectToStore && dayStoreId) ? dayStoreId : undefined,
         isOpeningStock: type === "RECEIVED" && isOpeningStock ? true : undefined,
         isTransitTracked: type === "ISSUED_DAY_STORE" && isTransitTracked ? true : undefined,
         batchNo: batchNo.trim() || undefined,
@@ -1636,6 +1662,9 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         mfgDate: mfgDate || undefined,
         expiryDate: expiryDate || undefined,
         remark: remark.trim() || undefined,
+        rate: type === "RECEIVED" && rate ? Number(rate) : undefined,
+        invoiceNo: type === "RECEIVED" && invoiceNo.trim() ? invoiceNo.trim() : undefined,
+        invoiceDate: type === "RECEIVED" && invoiceDate ? invoiceDate : undefined,
       });
       toast.success(
         type === "RECEIVED"
@@ -1686,6 +1715,22 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
             <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
               <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
             </p>
+          )}
+          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
+            <input type="checkbox" className="h-3.5 w-3.5" checked={receiveDirectToStore} onChange={(e) => setReceiveDirectToStore(e.target.checked)} />
+            Received directly at a Store — bypasses the Warehouse
+          </label>
+          {receiveDirectToStore && (
+            <div className="max-w-sm">
+              <PickerWithAdd
+                label="Which Store"
+                placeholder="— Which store received this —"
+                options={dayStores ?? []}
+                value={dayStoreId}
+                onChange={setDayStoreId}
+                onCreate={(name) => createDayStore.mutateAsync(name)}
+              />
+            </div>
           )}
         </div>
       )}
@@ -1747,13 +1792,35 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         </div>
         <div className="sm:col-span-2">
           <label className="label">Vendor Name (optional)</label>
-          <input className="field" list="vendor-name-options" placeholder="Vendor / supplier" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
+          <input
+            className="field"
+            list="vendor-name-options"
+            placeholder="Vendor / supplier — pick from the list, or type one (e.g. a direct/Blinkit delivery)"
+            value={vendorName}
+            onChange={(e) => setVendorName(e.target.value)}
+          />
           <datalist id="vendor-name-options">
-            {vendors?.vendors.map((v) => (
+            {vendorNameOptions.map((v) => (
               <option key={v} value={v} />
             ))}
           </datalist>
         </div>
+        {type === "RECEIVED" && (
+          <>
+            <div>
+              <label className="label">{isOpeningStock ? "Rate (optional)" : "Rate"}</label>
+              <input className="field font-mono" type="number" min="0" step="any" placeholder="Per unit" value={rate} onChange={(e) => setRate(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Invoice No (optional)</label>
+              <input className="field" placeholder="Vendor's invoice number" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">Invoice Date (optional)</label>
+              <input type="date" className="field" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
+            </div>
+          </>
+        )}
         {type === "ISSUED_DAY_STORE" && (
           <PickerWithAdd
             label="Store (optional)"
@@ -2056,6 +2123,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
     vendorName: txn.vendorName ?? "",
     size: txn.size ?? "",
     remark: txn.remark ?? "",
+    rate: txn.rate != null ? String(txn.rate) : "",
+    invoiceNo: txn.invoiceNo ?? "",
+    invoiceDate: dateInputValue(txn.invoiceDate),
   }));
 
   async function handleApprove() {
@@ -2117,6 +2187,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
       vendorName: txn.vendorName ?? "",
       size: txn.size ?? "",
       remark: txn.remark ?? "",
+      rate: txn.rate != null ? String(txn.rate) : "",
+      invoiceNo: txn.invoiceNo ?? "",
+      invoiceDate: dateInputValue(txn.invoiceDate),
     });
     setEditing(true);
   }
@@ -2132,6 +2205,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
         vendorName: editDraft.vendorName.trim() || undefined,
         size: editDraft.size.trim() || undefined,
         remark: editDraft.remark.trim() || undefined,
+        rate: editDraft.rate ? Number(editDraft.rate) : undefined,
+        invoiceNo: editDraft.invoiceNo.trim() || undefined,
+        invoiceDate: editDraft.invoiceDate || undefined,
       });
       toast.success("Entry updated.");
       setEditing(false);
@@ -2165,6 +2241,13 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
               {txn.grnNo && <> · GRN {txn.grnNo}</>}
               {txn.mfgDate && <> · Mfg {new Date(txn.mfgDate).toLocaleDateString()}</>}
               {txn.expiryDate && <> · Exp {new Date(txn.expiryDate).toLocaleDateString()}</>}
+            </p>
+          )}
+          {(txn.rate != null || txn.invoiceNo || txn.invoiceDate) && (
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              {txn.rate != null && <>Rate ₹{txn.rate}</>}
+              {txn.invoiceNo && <> · Inv {txn.invoiceNo}</>}
+              {txn.invoiceDate && <> · Inv date {new Date(txn.invoiceDate).toLocaleDateString()}</>}
             </p>
           )}
           {txn.remark && <p className="mt-0.5 text-[11px] text-slate-500">Remark: {txn.remark}</p>}
@@ -2262,6 +2345,22 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
               <label className="label">Size</label>
               <input className="field" value={editDraft.size} onChange={(e) => setEditDraft((d) => ({ ...d, size: e.target.value }))} />
             </div>
+            {txn.type === "RECEIVED" && (
+              <>
+                <div>
+                  <label className="label">Rate</label>
+                  <input className="field font-mono" type="number" min="0" step="any" value={editDraft.rate} onChange={(e) => setEditDraft((d) => ({ ...d, rate: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="label">Invoice No.</label>
+                  <input className="field" value={editDraft.invoiceNo} onChange={(e) => setEditDraft((d) => ({ ...d, invoiceNo: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="label">Invoice Date</label>
+                  <input type="date" className="field" value={editDraft.invoiceDate} onChange={(e) => setEditDraft((d) => ({ ...d, invoiceDate: e.target.value }))} />
+                </div>
+              </>
+            )}
             <div className="col-span-2">
               <label className="label">Remark</label>
               <input className="field" value={editDraft.remark} onChange={(e) => setEditDraft((d) => ({ ...d, remark: e.target.value }))} />

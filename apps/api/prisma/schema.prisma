@@ -2146,6 +2146,17 @@ model InventoryTransaction {
   expiryDate DateTime?
   remark     String?
 
+  // Store department's own GRN gaps (Software Before/After Report,
+  // 16 Sept 2026, §4) — the vendor's rate for this specific delivery
+  // (RECEIVED only; a Vendor-PO-linked receipt already has one on its
+  // VendorPurchaseOrderItem, but a direct/ad-hoc delivery with no PO
+  // behind it never had anywhere to record it) and the vendor's own
+  // invoice number/date, distinct from grnNo (Store's own GRN reference)
+  // above.
+  rate        Float?
+  invoiceNo   String?
+  invoiceDate DateTime?
+
   // Soft delete — every stock-on-hand calculation in stock.ts filters
   // deletedAt: null, so a "deleted" receipt/issue stops counting toward
   // stock the instant it's removed, same as a hard delete used to —

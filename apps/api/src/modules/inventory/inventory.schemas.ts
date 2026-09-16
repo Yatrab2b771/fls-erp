@@ -88,8 +88,21 @@ export const createInventoryTransactionSchema = z.object({
   quantity: z.coerce.number().positive(),
   size: z.string().max(120).optional(), // Optional, per the tool — e.g. Inch / ft / Kg / Ltr sizing note
   vendorName: z.string().max(200).optional(),
-  // S6 — which Day Store received this, ISSUED_DAY_STORE rows only.
+  // S6 — which Day Store received this (ISSUED_DAY_STORE rows), or which
+  // Day Store a RECEIVED row should land at directly, bypassing the
+  // Warehouse (see the route's own comment on the auto-issue leg this
+  // triggers once the receipt is accepted — Software Before/After
+  // Report §6, "material can be received directly at the day store").
   dayStoreId: z.string().uuid().optional(),
+  // RECEIVED only — the vendor's rate for this specific delivery. A
+  // Vendor-PO-linked receipt already has a rate on its
+  // VendorPurchaseOrderItem; this is for a direct/ad-hoc delivery with
+  // no PO behind it (Software Before/After Report §4.6).
+  rate: z.coerce.number().nonnegative().optional(),
+  // RECEIVED only — the vendor's own invoice number/date, distinct from
+  // grnNo below (Store's own GRN reference). §4.8.
+  invoiceNo: z.string().max(120).optional(),
+  invoiceDate: z.coerce.date().optional(),
   // One-time go-live migration flag — RECEIVED rows only. Skips inward
   // QC entirely (see schema.prisma comment on InventoryTransaction).
   isOpeningStock: z.boolean().optional(),
@@ -125,6 +138,9 @@ export const updateInventoryTransactionSchema = z
     vendorName: z.string().max(200).optional(),
     size: z.string().max(120).optional(),
     remark: z.string().max(500).optional(),
+    rate: z.coerce.number().nonnegative().optional(),
+    invoiceNo: z.string().max(120).optional(),
+    invoiceDate: z.coerce.date().optional(),
   })
   .refine((v) => Object.values(v).some((val) => val !== undefined), { message: "Provide at least one field to update" });
 
