@@ -513,7 +513,18 @@ model PurchaseOrderItem {
   deletedAt       DateTime?
   deletedById     String?
 
+  // PPIC's own planning call, made before Production ever creates a run —
+  // per the client, different product types are made at different Plants
+  // (each paired 1:1 with a real Store, see Plant.dayStoreId's own
+  // comment), so PPIC decides which one this product belongs to as part
+  // of planning, not Production picking one ad hoc at creation time. Once
+  // set, PreProduction creation locks onto it (see pre-production.routes.ts
+  // POST /) — Production no longer chooses. Nullable/settable any time
+  // before that run exists (PATCH /:id/planned-plant, PPIC-only).
+  plannedPlantId String?
+
   purchaseOrder  PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  plannedPlant   Plant?          @relation(fields: [plannedPlantId], references: [id])
   preProduction  PreProduction?
   // Optional read-only cross-links into the planning modules — see
   // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
@@ -1718,6 +1729,9 @@ model DayStore {
   assignments       DayStoreAssignment[]
   stockTransfersOut StockTransfer[]        @relation("StockTransferSource")
   stockTransfersIn  StockTransfer[]        @relation("StockTransferDestination")
+  // The paired Plant created alongside this Store — see Plant.dayStoreId's
+  // own comment.
+  pairedPlant       Plant?
 
   @@map("day_stores")
 }
@@ -1751,13 +1765,28 @@ model Plant {
   createdById String
   createdAt   DateTime @default(now())
 
-  createdBy         User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
-  transactions      InventoryTransaction[]
-  requests          InventoryRequest[]
-  dispatchTransfers DispatchTransfer[]
-  preProductions    PreProduction[]
-  stockTransfersIn  StockTransfer[]        @relation("StockTransferDestPlant")
-  stockTransfersOut StockTransfer[]        @relation("StockTransferSourcePlant")
+  // Per the client, production always happens physically inside a Store
+  // — there's no separate "Plant building." Rather than collapse Plant
+  // into DayStore (a much bigger change touching Plant Consumption's own
+  // stock formula, StockTransfer's PLANT source/dest legs, and the
+  // dispensing hard-gate — see stock.ts's getOnHandByPlantAndItem vs
+  // getOnHandByDayStoreAndItem, deliberately different ledgers), each
+  // Store gets a paired Plant instead (same name, created together — see
+  // POST /day-stores), so the UI can present them as one place while
+  // every existing Plant-scoped ledger/route keeps working unchanged.
+  // Nullable/unique: a Plant created before this pairing existed (or an
+  // admin one-off) simply isn't paired to anything.
+  dayStoreId String? @unique
+
+  createdBy          User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
+  dayStore           DayStore?              @relation(fields: [dayStoreId], references: [id])
+  transactions       InventoryTransaction[]
+  requests           InventoryRequest[]
+  dispatchTransfers  DispatchTransfer[]
+  preProductions     PreProduction[]
+  plannedForPoItems  PurchaseOrderItem[]
+  stockTransfersIn   StockTransfer[]        @relation("StockTransferDestPlant")
+  stockTransfersOut  StockTransfer[]        @relation("StockTransferSourcePlant")
 
   @@map("plants")
 }

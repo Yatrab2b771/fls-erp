@@ -419,6 +419,18 @@ export function useUpdatePurchaseOrderItem(poId: string) {
   });
 }
 
+// PPIC's own planning call — which Plant this product's production will
+// happen at, set ahead of Production ever creating a run. See
+// purchase-orders.routes.ts PATCH /:id/items/:itemId/planned-plant.
+export function useAssignPlannedPlant(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, plantId }: { itemId: string; plantId: string | null }) =>
+      api(`/api/purchase-orders/${poId}/items/${itemId}/planned-plant`, { method: "PATCH", body: { plantId } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+  });
+}
+
 // --- PO Material Readiness — see PoMaterialRequirement in schema.prisma.
 // pageSize is pinned at the API's max (200) rather than paginated in the
 // UI — matches the scale the requirement was raised for (hundreds of

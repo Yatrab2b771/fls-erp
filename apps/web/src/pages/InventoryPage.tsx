@@ -1126,9 +1126,15 @@ export function InventoryPage() {
           <div className="w-56">
             <ItemPicker
               items={[
-                ...(warehouses ?? []).map((w) => ({ id: `wh:${w.id}`, name: w.name })),
-                ...(dayStores ?? []).map((d) => ({ id: `ds:${d.id}`, name: `Store — ${d.name}` })),
-                ...(plants ?? []).map((p) => ({ id: `pl:${p.id}`, name: `Plant — ${p.name}` })),
+                ...(warehouses ?? []).map((w) => ({ id: `wh:${w.id}`, name: w.name, group: "Warehouse (RM + PM)" })),
+                ...(dayStores ?? []).map((d) => ({ id: `ds:${d.id}`, name: d.name, group: "Store" })),
+                // Only Plants not already paired with a Store show up here
+                // — a paired one is reachable as that Store's own row
+                // above (production happens inside the Store, per the
+                // client — see Plant.dayStoreId's own schema comment). An
+                // unpaired one (created before pairing existed) still
+                // needs a way in, so it keeps its own group.
+                ...(plants ?? []).filter((p) => !dayStores?.some((d) => d.pairedPlant?.id === p.id)).map((p) => ({ id: `pl:${p.id}`, name: p.name, group: "Plant (unpaired)" })),
               ]}
               value={stockLocation}
               onChange={setStockLocation}

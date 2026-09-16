@@ -77,13 +77,22 @@ preProductionRouter.post("/", requireRole("PRODUCTION"), async (req: AuthedReque
   try {
     const parsed = createPreProductionSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
-    const { purchaseOrderItemId, plantId, confirmNotReady } = parsed.data as CreatePreProductionInput;
+    const { purchaseOrderItemId, plantId: requestedPlantId, confirmNotReady } = parsed.data as CreatePreProductionInput;
 
     const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, include: { purchaseOrder: { select: { id: true, status: true } }, preProduction: true } });
     if (!item) return res.status(400).json({ error: "Unknown purchase order item" });
     if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item." });
     if (item.purchaseOrder.status !== "APPROVED") {
       return res.status(400).json({ error: "This purchase order hasn't been approved yet — BD must approve it before production can start against it." });
+    }
+
+    // PPIC's own planning call locks the Plant, once set — Production no
+    // longer picks one for this run (see PurchaseOrderItem.plannedPlantId's
+    // own schema comment). Falls back to whatever Production sends when
+    // PPIC hasn't planned ahead, same behavior as before this existed.
+    const plantId = item.plannedPlantId ?? requestedPlantId;
+    if (requestedPlantId && item.plannedPlantId && requestedPlantId !== item.plannedPlantId) {
+      return res.status(400).json({ error: "PPIC has already planned this product for a different Plant — Production can't override it here." });
     }
     if (plantId && !(await prisma.plant.findUnique({ where: { id: plantId } }))) {
       return res.status(400).json({ error: "Unknown Plant" });

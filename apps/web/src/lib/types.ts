@@ -175,6 +175,12 @@ export interface PurchaseOrderItem {
   // for this specific product, if any.
   bomPlans?: PlanSummary[];
   rmPlans?: PlanSummary[];
+  // PPIC's own planning call — which Plant (paired 1:1 with a real
+  // Store, see Plant.dayStoreId) this product's production will happen
+  // at. Set before Production ever creates a PreProduction run — see
+  // PATCH /:id/items/:itemId/planned-plant.
+  plannedPlantId?: string | null;
+  plannedPlant?: { id: string; name: string } | null;
 }
 
 export interface PurchaseOrderDocument {
@@ -1220,6 +1226,10 @@ export interface DayStore {
   id: string;
   name: string;
   createdAt: string;
+  // The Plant created alongside this Store — see Plant.dayStoreId's own
+  // schema comment. Every Store created from now on gets one
+  // automatically; a Store from before this existed may not have one.
+  pairedPlant?: { id: string; name: string } | null;
 }
 
 export interface Plant {

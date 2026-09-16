@@ -29,12 +29,14 @@ import { useAuth } from "../lib/auth";
 import {
   useAddPurchaseOrderItem,
   useAllProductNames,
+  useAssignPlannedPlant,
   usePreProductions,
   useCreatePreProduction,
   useCreateBomPlan,
   useCreatePlant,
   useCreateRmPlan,
   useCreateSku,
+  useDayStores,
   useGeneratePoInvoice,
   usePlants,
   usePoBilling,
@@ -940,6 +942,8 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
   const createPreProduction = useCreatePreProduction();
   const removeItem = useRemovePurchaseOrderItem(poId);
   const updateItem = useUpdatePurchaseOrderItem(poId);
+  const { data: dayStores } = useDayStores();
+  const assignPlannedPlant = useAssignPlannedPlant(poId);
   const toast = useToast();
   const [plantId, setPlantId] = useState("");
   const [showStart, setShowStart] = useState(false);
@@ -1074,12 +1078,48 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
 
       <ProductionPipeline item={item} hasStarted={!!run} />
 
+      {/* PPIC's own planning call — which Store (and its paired Plant)
+          this product will be made at, decided ahead of Production ever
+          starting a run, since different product types are made at
+          different Stores. Locked once production actually starts (see
+          the backend's own guard) — shown read-only after that. */}
+      {hasRole("PPIC") && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          {run ? (
+            <p className="text-[11px] text-slate-500">
+              Producing at <span className="font-bold text-slate-700">{item.plannedPlant?.name ?? "—"}</span>
+            </p>
+          ) : (
+            <div className="max-w-sm">
+              <ItemPicker
+                items={(dayStores ?? []).filter((s) => s.pairedPlant).map((s) => ({ id: s.pairedPlant!.id, name: s.name }))}
+                value={item.plannedPlantId ?? ""}
+                onChange={async (plantId) => {
+                  try {
+                    await assignPlannedPlant.mutateAsync({ itemId: item.id, plantId: plantId || null });
+                    toast.success(plantId ? "Store assigned." : "Store cleared.");
+                  } catch (err) {
+                    toast.error(err instanceof ApiError ? err.message : "Could not assign the store");
+                  }
+                }}
+                placeholder="— Assign a Store —"
+                icon={Package}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {showStart && !run && (
         <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
           <p className="text-[11px] text-slate-500">
             Starts one production run covering this item's full ordered quantity — <span className="font-mono font-bold text-slate-600">{item.quantity} {item.unit}</span>.
           </p>
-          <PickerWithAdd label="Plant (optional — can be set later)" placeholder="— Which plant runs this —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+          {item.plannedPlant ? (
+            <p className="text-[11px] font-bold text-slate-600">Producing at {item.plannedPlant.name} — set by PPIC.</p>
+          ) : (
+            <PickerWithAdd label="Plant (optional — can be set later)" placeholder="— Which plant runs this —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+          )}
           <div className="flex justify-end">
             <button className="btn-primary btn-sm" disabled={createPreProduction.isPending} onClick={() => handleStartProduction()}>
               {createPreProduction.isPending ? "Starting…" : "Start Production"}

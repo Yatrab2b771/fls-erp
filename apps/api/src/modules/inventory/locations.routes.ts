@@ -35,20 +35,32 @@ plantsRouter.use(requireAuth);
 // list to pick from.
 dayStoresRouter.get("/", async (_req, res, next) => {
   try {
-    res.json(await prisma.dayStore.findMany({ orderBy: { name: "asc" } }));
+    res.json(await prisma.dayStore.findMany({ orderBy: { name: "asc" }, include: { pairedPlant: { select: { id: true, name: true } } } }));
   } catch (err) {
     next(err);
   }
 });
 
+// Creates the Store's own paired Plant alongside it, same name, in one
+// transaction — per the client, production always happens physically
+// inside a Store (there's no separate Plant building), so every Store
+// from here on gets one automatically instead of Store/Production having
+// to remember to create a matching Plant by hand. See Plant.dayStoreId's
+// own schema comment for why this is a pairing, not a full merge of the
+// two models.
 dayStoresRouter.post("/", requireRole("STORE"), validateBody(createLocationSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { name } = req.body as CreateLocationInput;
-    const existing = await prisma.dayStore.findUnique({ where: { name } });
-    if (existing) return res.status(409).json({ error: "A day store with this name already exists" });
+    const [existingStore, existingPlant] = await Promise.all([prisma.dayStore.findUnique({ where: { name } }), prisma.plant.findUnique({ where: { name } })]);
+    if (existingStore) return res.status(409).json({ error: "A day store with this name already exists" });
+    if (existingPlant) return res.status(409).json({ error: "A plant with this name already exists — pick a different Store name." });
 
-    const dayStore = await prisma.dayStore.create({ data: { name, createdById: req.user!.id } });
-    await recordAudit({ actorId: req.user!.id, action: "day_store.created", entityType: "DayStore", entityId: dayStore.id });
+    const dayStore = await prisma.$transaction(async (tx) => {
+      const created = await tx.dayStore.create({ data: { name, createdById: req.user!.id } });
+      await tx.plant.create({ data: { name, createdById: req.user!.id, dayStoreId: created.id } });
+      return tx.dayStore.findUniqueOrThrow({ where: { id: created.id }, include: { pairedPlant: { select: { id: true, name: true } } } });
+    });
+    await recordAudit({ actorId: req.user!.id, action: "day_store.created", entityType: "DayStore", entityId: dayStore.id, metadata: { pairedPlantId: dayStore.pairedPlant?.id } });
 
     res.status(201).json(dayStore);
   } catch (err) {

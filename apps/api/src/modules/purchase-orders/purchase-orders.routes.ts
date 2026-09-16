@@ -17,6 +17,7 @@ import {
   importPurchaseOrdersSchema,
   reviewPurchaseOrderSchema,
   updatePurchaseOrderItemSchema,
+  assignPlannedPlantSchema,
   updatePurchaseOrderSchema,
   type CreatePurchaseOrderInput,
   type GeneratePoInvoiceInput,
@@ -24,6 +25,7 @@ import {
   type ReviewPurchaseOrderInput,
   type UpdatePurchaseOrderInput,
   type UpdatePurchaseOrderItemInput,
+  type AssignPlannedPlantInput,
 } from "./purchase-orders.schemas";
 import type { Prisma } from "@prisma/client";
 
@@ -72,6 +74,9 @@ const poInclude = {
       // strip that ties all four modules together).
       bomPlans: { select: { id: true, name: true, status: true }, orderBy: { createdAt: "desc" } },
       rmPlans: { select: { id: true, name: true, status: true }, orderBy: { createdAt: "desc" } },
+      // PPIC's own planning call — see PurchaseOrderItem.plannedPlantId's
+      // own schema comment and PATCH /:id/items/:itemId/planned-plant.
+      plannedPlant: { select: { id: true, name: true } },
       // Just enough to compute completion below (and to know whether
       // production has started at all, for the delete guard further
       // down) — not the run's full record, that's what GET
@@ -903,6 +908,41 @@ purchaseOrdersRouter.patch(
         entityId: req.params.id,
         metadata: { itemId: updated.id, before, after: data, hasPreProduction: item.preProduction != null },
       });
+
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// PPIC's own planning call, made ahead of Production ever creating a run
+// — see PurchaseOrderItem.plannedPlantId's own schema comment. Once set,
+// PreProduction creation (pre-production.routes.ts POST /) locks onto
+// this Plant instead of letting Production choose one; clears back to
+// unplanned with plantId: null. Not gated on PO/item status — PPIC can
+// plan ahead of approval, or change their mind, right up until
+// Production actually creates the run (item.preProduction check mirrors
+// every other PO-item edit's own "no real production against it yet"
+// guard).
+purchaseOrdersRouter.patch(
+  "/:id/items/:itemId/planned-plant",
+  requireRole("PPIC"),
+  validateBody(assignPlannedPlantSchema),
+  async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+    try {
+      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { preProduction: { select: { id: true } } } });
+      if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+      if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item — the Plant is locked in." });
+
+      const { plantId } = req.body as AssignPlannedPlantInput;
+      if (plantId) {
+        const plant = await prisma.plant.findUnique({ where: { id: plantId } });
+        if (!plant) return res.status(400).json({ error: "Unknown Plant" });
+      }
+
+      const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data: { plannedPlantId: plantId }, include: { plannedPlant: { select: { id: true, name: true } } } });
+      await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_planned_plant_set", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: updated.id, plantId } });
 
       res.json(updated);
     } catch (err) {

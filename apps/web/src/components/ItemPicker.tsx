@@ -4,6 +4,13 @@ import { Search, X, type LucideIcon } from "lucide-react";
 interface ItemOption {
   id: string;
   name: string;
+  // Optional group label — when set, a plain sticky header is printed
+  // above the first row of each consecutive run sharing the same group
+  // (callers should already sort items by group), so a mixed list (e.g.
+  // Warehouse rows vs Store rows) reads as sections instead of one flat
+  // list. Ignored entirely when no item sets it, same flat look as
+  // before this existed.
+  group?: string;
 }
 
 // A type-to-filter combobox for picking one item out of a real catalog —
@@ -103,17 +110,21 @@ export function ItemPicker({
             <p className="px-3 py-2 text-xs text-slate-400">No items match "{query}".</p>
           ) : (
             <>
-              {matches.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`flex w-full items-center gap-2 truncate px-3 py-1.5 text-left text-xs hover:bg-brand-50 ${item.id === value ? "bg-brand-50 font-bold text-brand-700" : "text-slate-700"}`}
-                  onClick={() => select(item)}
-                  title={item.name}
-                >
-                  {Icon && <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" strokeWidth={2.25} />}
-                  <span className="truncate">{item.name}</span>
-                </button>
+              {matches.map((item, i) => (
+                <div key={item.id}>
+                  {item.group && item.group !== matches[i - 1]?.group && (
+                    <p className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wide text-slate-400 first:pt-1">{item.group}</p>
+                  )}
+                  <button
+                    type="button"
+                    className={`flex w-full items-center gap-2 truncate px-3 py-1.5 text-left text-xs hover:bg-brand-50 ${item.id === value ? "bg-brand-50 font-bold text-brand-700" : "text-slate-700"}`}
+                    onClick={() => select(item)}
+                    title={item.name}
+                  >
+                    {Icon && <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" strokeWidth={2.25} />}
+                    <span className="truncate">{item.name}</span>
+                  </button>
+                </div>
               ))}
               {totalMatchCount > matches.length && (
                 <p className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-400">

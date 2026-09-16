@@ -41,6 +41,11 @@ export const updatePurchaseOrderSchema = createPurchaseOrderSchema.omit({ custom
 
 export const updatePurchaseOrderItemSchema = purchaseOrderItemSchema.partial();
 
+// PPIC's own planning call — which Plant (paired 1:1 with a real Store,
+// see Plant.dayStoreId) this product's production will happen at, set
+// before Production ever creates a PreProduction run. null clears it.
+export const assignPlannedPlantSchema = z.object({ plantId: z.string().uuid().nullable() });
+
 // BD Approve/Reject — the one review action a Draft PO gets before it's
 // forwarded to PPIC/RM to release and plan against. A reason is required
 // on reject, same "don't bounce it back silently" rule the Batch pipeline
@@ -103,3 +108,4 @@ export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;
 export type UpdatePurchaseOrderItemInput = z.infer<typeof updatePurchaseOrderItemSchema>;
 export type ReviewPurchaseOrderInput = z.infer<typeof reviewPurchaseOrderSchema>;
+export type AssignPlannedPlantInput = z.infer<typeof assignPlannedPlantSchema>;
