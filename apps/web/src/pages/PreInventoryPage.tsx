@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { CheckCircle2, Clock, ClipboardList, Download, FileSpreadsheet, Package, Plus, Send, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
+import { CheckCircle2, ClipboardList, Download, FileSpreadsheet, Package, Plus, Send, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useCreateInventoryItem,
@@ -15,7 +15,7 @@ import {
 } from "../lib/hooks";
 import type { InventoryCategory, PreInventoryRequirement } from "../lib/types";
 import { parsePurchaseLogWorkbook, parseRequirementWorkbook } from "../lib/inventoryImport";
-import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportPurchaseAgingReport, exportRequirementsReport } from "../lib/inventoryExport";
+import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportRequirementsReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -118,15 +118,6 @@ export function PreInventoryPage() {
     toast.success("Report downloaded.");
   }
 
-  // Report #7 — PO logged with a vendor & ETA, material still short.
-  function handleExportPoAging() {
-    if (!filtered?.length) return toast.error("Nothing to export — no requirements match.");
-    const pending = filtered.filter((r) => !!r.poNumber && r.shortQty > 0);
-    if (!pending.length) return toast.error("Nothing pending — every logged PO has fully arrived.");
-    exportPurchaseAgingReport(filtered);
-    toast.success(`PO aging report downloaded — ${pending.length} still-short PO(s).`);
-  }
-
   async function handleImportFile(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -187,9 +178,6 @@ export function PreInventoryPage() {
         <div className="flex flex-wrap items-center gap-2">
           <button className="btn-ghost" onClick={handleExport} title="Download the vendor / requirement list as an Excel report">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
-          </button>
-          <button className="btn-ghost" onClick={handleExportPoAging} title="Requirements with a PO already logged, sorted by how long the material has been overdue">
-            <Clock className="h-3.5 w-3.5" strokeWidth={2.5} /> PO Aging
           </button>
           {canRequest && (
             <>
