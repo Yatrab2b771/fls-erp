@@ -1768,6 +1768,7 @@ export interface QcSampleTransfer {
   direction: QcSampleDirection;
   itemId: string;
   itemName: string;
+  itemCode: string | null;
   category: InventoryCategory;
   quantity: number;
   unit: string;
@@ -1786,6 +1787,7 @@ export interface QcSampleTransaction {
   id: string;
   itemId: string;
   itemName: string;
+  itemCode: string | null;
   category: InventoryCategory;
   type: QcSampleTxnType;
   quantity: number;

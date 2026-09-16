@@ -21,7 +21,7 @@ export const qcSampleRouter = Router();
 qcSampleRouter.use(requireAuth);
 
 const transferInclude = {
-  item: { select: { id: true, category: true, name: true } },
+  item: { select: { id: true, category: true, name: true, code: true } },
   sentBy: { select: { fullName: true, email: true } },
   confirmedBy: { select: { fullName: true, email: true } },
 } as const;
@@ -36,7 +36,7 @@ function serializeTransfer(t: {
   note: string | null;
   sentAt: Date;
   confirmedAt: Date | null;
-  item: { id: string; category: string; name: string };
+  item: { id: string; category: string; name: string; code: string | null };
   sentBy: { fullName: string; email: string };
   confirmedBy: { fullName: string; email: string } | null;
 }) {
@@ -46,6 +46,7 @@ function serializeTransfer(t: {
     direction: t.direction,
     itemId: t.itemId,
     itemName: t.item.name,
+    itemCode: t.item.code,
     category: t.item.category,
     quantity: t.quantity,
     unit: t.unit,
@@ -212,7 +213,7 @@ qcSampleRouter.get(
         prisma.qcSampleTransfer.findMany({ where: { preProductionId: run.id, deletedAt: null }, include: transferInclude, orderBy: { sentAt: "desc" } }),
         prisma.qcSampleTransaction.findMany({
           where: { preProductionId: run.id, deletedAt: null },
-          include: { item: { select: { id: true, category: true, name: true } }, createdBy: { select: { fullName: true, email: true } } },
+          include: { item: { select: { id: true, category: true, name: true, code: true } }, createdBy: { select: { fullName: true, email: true } } },
           orderBy: { createdAt: "desc" },
         }),
       ]);
@@ -225,6 +226,7 @@ qcSampleRouter.get(
           id: t.id,
           itemId: t.itemId,
           itemName: t.item.name,
+          itemCode: t.item.code,
           category: t.item.category,
           type: t.type,
           quantity: t.quantity,

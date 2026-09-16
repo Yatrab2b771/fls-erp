@@ -648,10 +648,10 @@ function QcSampleApprovalPanel({ preProductionId }: { preProductionId: string })
   const onHandRows = Object.entries(summary.onHand)
     .map(([itemId, qty]) => {
       const txn = summary.transactions.find((t) => t.itemId === itemId);
-      return { itemId, itemName: txn?.itemName ?? itemId.slice(0, 8), unit: txn?.unit ?? "", onHand: qty };
+      return { itemId, itemName: txn?.itemName ?? itemId.slice(0, 8), itemCode: txn?.itemCode ?? null, unit: txn?.unit ?? "", onHand: qty };
     })
     .filter((r) => r.onHand !== 0);
-  const itemOptions = onHandRows.map((r) => ({ id: r.itemId, name: `${r.itemName} (${r.onHand} ${r.unit} on hand)` }));
+  const itemOptions = onHandRows.map((r) => ({ id: r.itemId, name: `${r.itemName} (${r.onHand} ${r.unit} on hand)`, code: r.itemCode }));
   const pendingToQc = summary.transfers.filter((t) => t.direction === "TO_QC" && t.status === "PENDING");
 
   async function handleConsume() {
@@ -946,7 +946,7 @@ function IndentRequestLinesEditor({ preProductionId, lines, onChange }: { prePro
 
 function MaterialReceiptLinker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
   const { data: receipts } = useInventoryTransactions({ type: "RECEIVED" });
-  const items = (receipts ?? []).map((r) => ({ id: r.id, name: `${r.item.name} · ${r.grnNo || "no GRN no."} · ${r.quantity} ${r.unit} · ${new Date(r.date).toLocaleDateString()}` }));
+  const items = (receipts ?? []).map((r) => ({ id: r.id, name: `${r.item.name} · ${r.grnNo || "no GRN no."} · ${r.quantity} ${r.unit} · ${new Date(r.date).toLocaleDateString()}`, code: r.item.code }));
   return (
     <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
       <label className="label flex items-center gap-1.5">
