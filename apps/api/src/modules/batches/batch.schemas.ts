@@ -211,6 +211,13 @@ export const assignBatchNoSchema = z.object({ batchNo: z.string().max(120) });
 export const productionBatchIpqcFieldsSchema = z.object({
   ipqcStatus: z.enum(IPQC_STATUSES).optional(),
   ipqcRemarks: z.string().max(1000).optional(),
+  // Bulk Reconciliation — Production Process Flow.docx's "Bulk /
+  // Semi-Finished Product" step, applies per batch too now (see
+  // schema.prisma's comment on ProductionBatch.bulkTheoreticalWeight).
+  bulkTheoreticalWeight: z.coerce.number().nonnegative().optional(),
+  bulkActualWeight: z.coerce.number().nonnegative().optional(),
+  bulkQcSampleWeight: z.coerce.number().nonnegative().optional(),
+  bulkTransferToPackingQty: z.coerce.number().nonnegative().optional(),
 });
 
 export const productionBatchQaGateMfgFieldsSchema = z.object({
@@ -243,6 +250,22 @@ export const productionBatchQaGatePackagingFieldsSchema = z.object({
   packWastageQty: z.coerce.number().nonnegative().optional(),
 });
 
+// FG_STORE — Production Process Flow.docx: finished goods physically
+// received into the FG store, distinct from Packaging itself.
+export const productionBatchFgStoreFieldsSchema = z.object({
+  fgStoreReceivedDate: dateField,
+  fgStoreRemarks: z.string().max(1000).optional(),
+});
+
+// FG_QC_RELEASE — a finished-goods-level QC + release sign-off, same
+// Hold-blocks-forward gate shape as QA_GATE_MFG/QA_GATE_PACKAGING (see
+// isFgQaGateHeld in production-batch-transition.ts).
+export const productionBatchFgQcReleaseFieldsSchema = z.object({
+  fgQaStatus: z.enum(PACK_APPROVAL_STATUSES).optional(),
+  fgQcStatus: z.enum(PACK_APPROVAL_STATUSES).optional(),
+  fgRemarks: z.string().max(1000).optional(),
+});
+
 export const productionBatchBillingEwayBillFieldsSchema = z.object({
   invoiceNo: z.string().max(120).optional(),
   invoiceDate: dateField,
@@ -259,6 +282,13 @@ export const productionBatchDispatchPlanFieldsSchema = z.object({
   transportType: z.enum(TRANSPORT_TYPES).optional(),
   remainingQty: z.coerce.number().nonnegative().optional(),
   anyRemarks: z.string().max(1000).optional(),
+  // FG Picking & Loading — Production Process Flow.docx's own step,
+  // captured here rather than as a separate stage since it's the same
+  // Dispatch department doing it right before the dispatch itself.
+  pickedBy: z.string().max(200).optional(),
+  pickingDate: dateField,
+  loadedBy: z.string().max(200).optional(),
+  loadingDate: dateField,
 });
 
 export const PRODUCTION_BATCH_STAGE_FIELD_SCHEMA: Partial<Record<CombinedLotStageId, z.AnyZodObject>> = {
@@ -267,6 +297,8 @@ export const PRODUCTION_BATCH_STAGE_FIELD_SCHEMA: Partial<Record<CombinedLotStag
   BULK_QC: productionBatchBulkQcFieldsSchema,
   PACKAGING: productionBatchPackagingFieldsSchema,
   QA_GATE_PACKAGING: productionBatchQaGatePackagingFieldsSchema,
+  FG_STORE: productionBatchFgStoreFieldsSchema,
+  FG_QC_RELEASE: productionBatchFgQcReleaseFieldsSchema,
   BILLING_EWAY_BILL: productionBatchBillingEwayBillFieldsSchema,
   DISPATCH_PLAN: productionBatchDispatchPlanFieldsSchema,
 };

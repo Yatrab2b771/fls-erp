@@ -522,7 +522,16 @@ export interface TransitItem {
 
 export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "LINE_CLEARANCE" | "DISPENSING" | "SAMPLE_QC_APPROVAL";
 
-export type CombinedLotStageId = "IPQC" | "QA_GATE_MFG" | "BULK_QC" | "PACKAGING" | "QA_GATE_PACKAGING" | "BILLING_EWAY_BILL" | "DISPATCH_PLAN";
+export type CombinedLotStageId =
+  | "IPQC"
+  | "QA_GATE_MFG"
+  | "BULK_QC"
+  | "PACKAGING"
+  | "QA_GATE_PACKAGING"
+  | "FG_STORE"
+  | "FG_QC_RELEASE"
+  | "BILLING_EWAY_BILL"
+  | "DISPATCH_PLAN";
 
 export interface StageDelay {
   isDelayed: boolean;
@@ -622,12 +631,16 @@ export interface ProductionBatch {
     };
   };
   // This batch's OWN Tier-3 pipeline (IPQC through Dispatch Plan) — same
-  // shape as CombinedLot's below, minus Bulk Reconciliation and the COA
-  // sign-off chain (pooled-lot-only concepts, see schema.prisma's
-  // comment on ProductionBatch). Only reachable once status is COMPLETED.
+  // shape as CombinedLot's below, minus the COA sign-off chain (a
+  // pooled-lot-only concept, see schema.prisma's comment on
+  // ProductionBatch). Only reachable once status is COMPLETED.
   currentStageId: CombinedLotStageId;
   ipqcStatus: string | null;
   ipqcRemarks: string | null;
+  bulkTheoreticalWeight: number | null;
+  bulkActualWeight: number | null;
+  bulkQcSampleWeight: number | null;
+  bulkTransferToPackingQty: number | null;
   mfgQaStatus: string | null;
   mfgQcStatus: string | null;
   mfgRemarks: string | null;
@@ -646,6 +659,11 @@ export interface ProductionBatch {
   packApprovedQty: number | null;
   packRejectedQty: number | null;
   packWastageQty: number | null;
+  fgStoreReceivedDate: string | null;
+  fgStoreRemarks: string | null;
+  fgQaStatus: string | null;
+  fgQcStatus: string | null;
+  fgRemarks: string | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
   ewayBillNo: string | null;
@@ -658,6 +676,10 @@ export interface ProductionBatch {
   transportType: string | null;
   remainingQty: number | null;
   anyRemarks: string | null;
+  pickedBy: string | null;
+  pickingDate: string | null;
+  loadedBy: string | null;
+  loadingDate: string | null;
 }
 
 // Tier 1 — one run per PO line item.

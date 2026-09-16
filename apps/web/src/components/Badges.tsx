@@ -20,6 +20,8 @@ const STAGE_COLOR: Record<AnyStageId, string> = {
   BULK_QC: "bg-sky-50 text-sky-700 border-sky-200",
   PACKAGING: "bg-violet-50 text-violet-700 border-violet-200",
   QA_GATE_PACKAGING: "bg-violet-50 text-violet-700 border-violet-200",
+  FG_STORE: "bg-amber-50 text-amber-700 border-amber-200",
+  FG_QC_RELEASE: "bg-violet-50 text-violet-700 border-violet-200",
   BILLING_EWAY_BILL: "bg-emerald-50 text-emerald-700 border-emerald-200",
   DISPATCH_PLAN: "bg-emerald-50 text-emerald-700 border-emerald-200",
 };
@@ -35,6 +37,8 @@ const STAGE_DOT: Record<AnyStageId, string> = {
   BULK_QC: "bg-sky-500",
   PACKAGING: "bg-violet-500",
   QA_GATE_PACKAGING: "bg-violet-500",
+  FG_STORE: "bg-amber-500",
+  FG_QC_RELEASE: "bg-violet-500",
   BILLING_EWAY_BILL: "bg-emerald-500",
   DISPATCH_PLAN: "bg-emerald-500",
 };

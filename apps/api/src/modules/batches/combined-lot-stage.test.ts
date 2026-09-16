@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { actorCanActOnStage, COMBINED_LOT_STAGE_ORDER, COMBINED_LOT_STAGE_ROLE, getForwardTarget, getRejectTarget } from "./combined-lot-stage";
 
 describe("combined lot stage order", () => {
-  it("has 7 stages, IPQC through Dispatch Plan", () => {
-    expect(COMBINED_LOT_STAGE_ORDER).toHaveLength(7);
+  it("has 9 stages, IPQC through Dispatch Plan", () => {
+    expect(COMBINED_LOT_STAGE_ORDER).toHaveLength(9);
     expect(COMBINED_LOT_STAGE_ORDER[0]).toBe("IPQC");
     expect(COMBINED_LOT_STAGE_ORDER.at(-1)).toBe("DISPATCH_PLAN");
   });
@@ -32,7 +32,9 @@ describe("getForwardTarget", () => {
     expect(getForwardTarget("QA_GATE_MFG")).toBe("BULK_QC");
     expect(getForwardTarget("BULK_QC")).toBe("PACKAGING");
     expect(getForwardTarget("PACKAGING")).toBe("QA_GATE_PACKAGING");
-    expect(getForwardTarget("QA_GATE_PACKAGING")).toBe("BILLING_EWAY_BILL");
+    expect(getForwardTarget("QA_GATE_PACKAGING")).toBe("FG_STORE");
+    expect(getForwardTarget("FG_STORE")).toBe("FG_QC_RELEASE");
+    expect(getForwardTarget("FG_QC_RELEASE")).toBe("BILLING_EWAY_BILL");
     expect(getForwardTarget("BILLING_EWAY_BILL")).toBe("DISPATCH_PLAN");
   });
 
@@ -45,6 +47,8 @@ describe("getRejectTarget", () => {
   it("sends every stage back to whichever stage precedes it", () => {
     expect(getRejectTarget("QA_GATE_PACKAGING")).toBe("PACKAGING");
     expect(getRejectTarget("PACKAGING")).toBe("BULK_QC");
+    expect(getRejectTarget("FG_STORE")).toBe("QA_GATE_PACKAGING");
+    expect(getRejectTarget("FG_QC_RELEASE")).toBe("FG_STORE");
     expect(getRejectTarget("DISPATCH_PLAN")).toBe("BILLING_EWAY_BILL");
   });
 

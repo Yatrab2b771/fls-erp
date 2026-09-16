@@ -750,13 +750,23 @@ model ProductionBatch {
   // --- This batch's own Tier-3 pipeline, only reachable once COMPLETED.
   // Same field shapes as CombinedLot's own (see that model's comments for
   // the full reasoning behind each) — deliberately NOT carrying
-  // CombinedLot's Bulk Reconciliation fields (bulkTheoreticalWeight etc.)
-  // or its COA sign-off chain: those stay pooled-lot-only concepts, not
-  // meaningful against one small run. ---
+  // CombinedLot's COA sign-off chain (stays a pooled-lot-only concept,
+  // not meaningful against one small run), but DOES carry Bulk
+  // Reconciliation (bulkTheoreticalWeight etc.) — Production Process
+  // Flow.docx's "Bulk / Semi-Finished Product" step applies per batch
+  // too, not just per pooled lot. ---
   currentStageId CombinedLotStageId @default(IPQC)
 
   ipqcStatus  String?
   ipqcRemarks String?
+  // Bulk Reconciliation (BMR-1.docx 8.0 / Production Process Flow.docx's
+  // "Bulk / Semi-Finished Product" step) — captured here since IPQC is
+  // the first stage to weigh the batch's own bulk. yieldPct/processLoss
+  // derived, never stored — see computeBulkReconciliation in batch.engine.ts.
+  bulkTheoreticalWeight   Float?
+  bulkActualWeight        Float?
+  bulkQcSampleWeight      Float?
+  bulkTransferToPackingQty Float?
 
   mfgQaStatus    String?
   mfgQcStatus    String?
@@ -780,6 +790,18 @@ model ProductionBatch {
   packRejectedQty Float?
   packWastageQty  Float?
 
+  // FG_STORE — Production Process Flow.docx: finished goods physically
+  // received into the FG store, distinct from Packaging itself.
+  fgStoreReceivedDate DateTime?
+  fgStoreRemarks      String?
+
+  // FG_QC_RELEASE — a finished-goods-level QC + release sign-off,
+  // distinct from Packaging QC above. Same Hold-blocks-forward gate
+  // shape as the other QA gates.
+  fgQaStatus String?
+  fgQcStatus String?
+  fgRemarks  String?
+
   invoiceNo      String?
   invoiceDate    DateTime?
   ewayBillNo     String?
@@ -793,6 +815,14 @@ model ProductionBatch {
   transportType      String?
   remainingQty       Float?
   anyRemarks         String?
+  // FG Picking & Loading — Production Process Flow.docx's own step,
+  // captured as extra fields on Dispatch Plan rather than a separate
+  // stage, since it's the same Dispatch department doing it immediately
+  // before recording the dispatch itself.
+  pickedBy    String?
+  pickingDate DateTime?
+  loadedBy    String?
+  loadingDate DateTime?
 
   createdById String
   createdAt   DateTime @default(now())
@@ -812,6 +842,8 @@ enum CombinedLotStageId {
   BULK_QC // QA_QC — bulk QC sampling & testing, before Packaging
   PACKAGING // Production
   QA_GATE_PACKAGING // QA_QC — post-packaging gate
+  FG_STORE // Store — finished goods physically received into the FG store (Production Process Flow.docx)
+  FG_QC_RELEASE // QA_QC — finished-goods-level QC + release sign-off, distinct from Packaging QC
   BILLING_EWAY_BILL // Accounts
   DISPATCH_PLAN // Dispatch — terminal
 }

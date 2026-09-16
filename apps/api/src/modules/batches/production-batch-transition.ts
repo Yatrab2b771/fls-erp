@@ -68,7 +68,8 @@ export async function transitionProductionBatchStage(params: {
   const isQaGateHeld =
     action === "FORWARD" &&
     ((currentStage === "QA_GATE_MFG" && [fieldData.mfgQaStatus ?? batch.mfgQaStatus, fieldData.mfgQcStatus ?? batch.mfgQcStatus].includes("Hold")) ||
-      (currentStage === "QA_GATE_PACKAGING" && [fieldData.packQaStatus ?? batch.packQaStatus, fieldData.packQcStatus ?? batch.packQcStatus].includes("Hold")));
+      (currentStage === "QA_GATE_PACKAGING" && [fieldData.packQaStatus ?? batch.packQaStatus, fieldData.packQcStatus ?? batch.packQcStatus].includes("Hold")) ||
+      (currentStage === "FG_QC_RELEASE" && [fieldData.fgQaStatus ?? batch.fgQaStatus, fieldData.fgQcStatus ?? batch.fgQcStatus].includes("Hold")));
 
   const isIpqcBlocked = action === "FORWARD" && currentStage === "IPQC" && (fieldData.ipqcStatus ?? batch.ipqcStatus) !== "Approved";
   const isBulkQcBlocked = action === "FORWARD" && currentStage === "BULK_QC" && (fieldData.bulkQcStatus ?? batch.bulkQcStatus) !== "Approved";

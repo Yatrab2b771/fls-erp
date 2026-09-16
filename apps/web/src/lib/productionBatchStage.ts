@@ -3,13 +3,13 @@ import type { CombinedLotStageId } from "./types";
 
 // Field definitions for a ProductionBatch's OWN Tier-3 pipeline — reuses
 // CombinedLotStageId/COMBINED_LOT_STAGE_LABEL/COMBINED_LOT_STAGE_ROLE/
-// COMBINED_LOT_STAGE_ORDER from combinedLotStage.ts as-is (same 7 stages,
+// COMBINED_LOT_STAGE_ORDER from combinedLotStage.ts as-is (same 9 stages,
 // same role map), but trims the field list to match
-// PRODUCTION_BATCH_STAGE_FIELD_SCHEMA on the API side: no Bulk
-// Reconciliation (IPQC) and no COA fields (BULK_QC) — both stay
-// pooled-CombinedLot-only concepts, not meaningful against one small
-// run. See schema.prisma's comment on ProductionBatch for the full
-// reasoning.
+// PRODUCTION_BATCH_STAGE_FIELD_SCHEMA on the API side: no COA fields
+// (BULK_QC) — stays a pooled-CombinedLot-only concept, not meaningful
+// against one small run. Bulk Reconciliation (IPQC) and FG
+// Store/QC-Release DO apply per batch — see schema.prisma's comment on
+// ProductionBatch for the full reasoning.
 
 const IPQC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
@@ -42,6 +42,10 @@ export const PRODUCTION_BATCH_STAGE_FIELDS: Partial<Record<CombinedLotStageId, F
   IPQC: [
     { name: "ipqcStatus", label: "IPQC Status", type: "select", options: IPQC_STATUSES },
     { name: "ipqcRemarks", label: "Remarks", type: "text" },
+    { name: "bulkTheoreticalWeight", label: "Theoretical Weight of Bulk (a)", type: "number" },
+    { name: "bulkActualWeight", label: "Actual Weight of Bulk (b)", type: "number" },
+    { name: "bulkQcSampleWeight", label: "QC Sample (c)", type: "number" },
+    { name: "bulkTransferToPackingQty", label: "Total Bulk Transfer to Packing", type: "number" },
   ],
   QA_GATE_MFG: [
     { name: "mfgQaStatus", label: "QA Status", type: "select", options: MFG_APPROVAL_STATUSES },
@@ -69,6 +73,15 @@ export const PRODUCTION_BATCH_STAGE_FIELDS: Partial<Record<CombinedLotStageId, F
     { name: "packRejectedQty", label: "Rejected Qty (quality)", type: "number" },
     { name: "packWastageQty", label: "Wastage Qty", type: "number" },
   ],
+  FG_STORE: [
+    { name: "fgStoreReceivedDate", label: "Received Date", type: "date" },
+    { name: "fgStoreRemarks", label: "Remarks", type: "text" },
+  ],
+  FG_QC_RELEASE: [
+    { name: "fgQaStatus", label: "QA Status", type: "select", options: PACK_APPROVAL_STATUSES },
+    { name: "fgQcStatus", label: "QC Status", type: "select", options: PACK_APPROVAL_STATUSES },
+    { name: "fgRemarks", label: "Remarks", type: "text" },
+  ],
   BILLING_EWAY_BILL: [
     { name: "invoiceNo", label: "Invoice No.", type: "text" },
     { name: "invoiceDate", label: "Invoice Date", type: "date" },
@@ -84,5 +97,9 @@ export const PRODUCTION_BATCH_STAGE_FIELDS: Partial<Record<CombinedLotStageId, F
     { name: "transportType", label: "Type of Transport", type: "select", options: TRANSPORT_TYPES },
     { name: "remainingQty", label: "Remaining Qty", type: "number" },
     { name: "anyRemarks", label: "Any Remarks", type: "text" },
+    { name: "pickedBy", label: "Picked By", type: "text" },
+    { name: "pickingDate", label: "Picking Date", type: "date" },
+    { name: "loadedBy", label: "Loaded By", type: "text" },
+    { name: "loadingDate", label: "Loading Date", type: "date" },
   ],
 };

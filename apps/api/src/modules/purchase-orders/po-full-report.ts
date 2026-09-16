@@ -96,6 +96,10 @@ const TIER1_FIELD_KEYS = [
 const TIER3_FIELD_KEYS = [
   "ipqcStatus",
   "ipqcRemarks",
+  "bulkTheoreticalWeight",
+  "bulkActualWeight",
+  "bulkQcSampleWeight",
+  "bulkTransferToPackingQty",
   "mfgQaStatus",
   "mfgQcStatus",
   "mfgRemarks",
@@ -114,6 +118,11 @@ const TIER3_FIELD_KEYS = [
   "packApprovedQty",
   "packRejectedQty",
   "packWastageQty",
+  "fgStoreReceivedDate",
+  "fgStoreRemarks",
+  "fgQaStatus",
+  "fgQcStatus",
+  "fgRemarks",
   "invoiceNo",
   "invoiceDate",
   "ewayBillNo",
@@ -126,6 +135,10 @@ const TIER3_FIELD_KEYS = [
   "transportType",
   "remainingQty",
   "anyRemarks",
+  "pickedBy",
+  "pickingDate",
+  "loadedBy",
+  "loadingDate",
 ] as const;
 
 function pick(obj: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {

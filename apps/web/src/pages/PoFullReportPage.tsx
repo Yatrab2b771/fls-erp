@@ -32,6 +32,10 @@ const TIER1_LABELS: Record<string, string> = {
 const TIER3_LABELS: Record<string, string> = {
   ipqcStatus: "IPQC Status",
   ipqcRemarks: "IPQC Remarks",
+  bulkTheoreticalWeight: "Bulk Theoretical Weight",
+  bulkActualWeight: "Bulk Actual Weight",
+  bulkQcSampleWeight: "Bulk QC Sample Weight",
+  bulkTransferToPackingQty: "Bulk Transfer to Packing Qty",
   mfgQaStatus: "QA Gate (Mfg) — QA Status",
   mfgQcStatus: "QA Gate (Mfg) — QC Status",
   mfgRemarks: "QA Gate (Mfg) Remarks",
@@ -50,6 +54,11 @@ const TIER3_LABELS: Record<string, string> = {
   packApprovedQty: "Pack Approved Qty",
   packRejectedQty: "Pack Rejected Qty",
   packWastageQty: "Pack Wastage Qty",
+  fgStoreReceivedDate: "FG Store Received Date",
+  fgStoreRemarks: "FG Store Remarks",
+  fgQaStatus: "FG QC & Release — QA Status",
+  fgQcStatus: "FG QC & Release — QC Status",
+  fgRemarks: "FG QC & Release Remarks",
   invoiceNo: "Invoice No.",
   invoiceDate: "Invoice Date",
   ewayBillNo: "E-Way Bill No.",
@@ -62,6 +71,10 @@ const TIER3_LABELS: Record<string, string> = {
   transportType: "Transport Type",
   remainingQty: "Remaining Qty",
   anyRemarks: "Any Remarks",
+  pickedBy: "Picked By",
+  pickingDate: "Picking Date",
+  loadedBy: "Loaded By",
+  loadingDate: "Loading Date",
 };
 
 function fmt(v: unknown): string {

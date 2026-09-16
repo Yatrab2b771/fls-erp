@@ -7,7 +7,17 @@ import type { CombinedLotStageId, RoleName } from "./types";
 // ProductionBatch has completed and combined — see
 // production-batches.routes.ts on the API side).
 
-export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING", "QA_GATE_PACKAGING", "BILLING_EWAY_BILL", "DISPATCH_PLAN"];
+export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = [
+  "IPQC",
+  "QA_GATE_MFG",
+  "BULK_QC",
+  "PACKAGING",
+  "QA_GATE_PACKAGING",
+  "FG_STORE",
+  "FG_QC_RELEASE",
+  "BILLING_EWAY_BILL",
+  "DISPATCH_PLAN",
+];
 
 // One or more roles per stage — BULK_QC is the one stage with two:
 // Production Process Flow.docx tags "Bulk QC Sampling & Testing" as
@@ -19,6 +29,8 @@ export const COMBINED_LOT_STAGE_ROLE: Record<CombinedLotStageId, RoleName[]> = {
   BULK_QC: ["QA_QC", "RND"],
   PACKAGING: ["PRODUCTION"],
   QA_GATE_PACKAGING: ["QA_QC"],
+  FG_STORE: ["STORE"],
+  FG_QC_RELEASE: ["QA_QC"],
   BILLING_EWAY_BILL: ["ACCOUNTS"],
   DISPATCH_PLAN: ["DISPATCH"],
 };
@@ -29,6 +41,8 @@ export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
   BULK_QC: "Bulk QC",
   PACKAGING: "Packaging",
   QA_GATE_PACKAGING: "QA Gate — Packaging",
+  FG_STORE: "FG Store",
+  FG_QC_RELEASE: "Finished Goods QC & Release",
   BILLING_EWAY_BILL: "Billing & E-Way Bill",
   DISPATCH_PLAN: "Dispatch Plan",
 };
@@ -118,6 +132,12 @@ export const COMBINED_LOT_STAGE_FIELDS: Partial<Record<CombinedLotStageId, Field
     { name: "packRejectedQty", label: "Rejected Qty (quality)", type: "number" },
     { name: "packWastageQty", label: "Wastage Qty (to Recycle Store)", type: "number" },
   ],
+  // FG_STORE/FG_QC_RELEASE have no field list here on purpose — CombinedLot
+  // (legacy, no new lots created) never got matching DB columns, only
+  // ProductionBatch did (see productionBatchStage.ts). A lingering old
+  // CombinedLot can still structurally walk through these two stages
+  // (COMBINED_LOT_STAGE_ORDER includes them), it just has nothing to
+  // capture there — same as any stage this map has no entry for.
   BILLING_EWAY_BILL: [
     { name: "invoiceNo", label: "Invoice No.", type: "text" },
     { name: "invoiceDate", label: "Invoice Date", type: "date" },

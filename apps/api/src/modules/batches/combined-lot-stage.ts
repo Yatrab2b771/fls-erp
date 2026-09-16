@@ -11,9 +11,28 @@
 
 import type { RoleName } from "@prisma/client";
 
-export type CombinedLotStageId = "IPQC" | "QA_GATE_MFG" | "BULK_QC" | "PACKAGING" | "QA_GATE_PACKAGING" | "BILLING_EWAY_BILL" | "DISPATCH_PLAN";
+export type CombinedLotStageId =
+  | "IPQC"
+  | "QA_GATE_MFG"
+  | "BULK_QC"
+  | "PACKAGING"
+  | "QA_GATE_PACKAGING"
+  | "FG_STORE"
+  | "FG_QC_RELEASE"
+  | "BILLING_EWAY_BILL"
+  | "DISPATCH_PLAN";
 
-export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING", "QA_GATE_PACKAGING", "BILLING_EWAY_BILL", "DISPATCH_PLAN"];
+export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = [
+  "IPQC",
+  "QA_GATE_MFG",
+  "BULK_QC",
+  "PACKAGING",
+  "QA_GATE_PACKAGING",
+  "FG_STORE",
+  "FG_QC_RELEASE",
+  "BILLING_EWAY_BILL",
+  "DISPATCH_PLAN",
+];
 
 // One or more roles per stage — BULK_QC has two. Production Process
 // Flow.docx tags "Bulk QC Sampling & Testing" as R&D's own work, not
@@ -25,6 +44,8 @@ export const COMBINED_LOT_STAGE_ROLE: Record<CombinedLotStageId, RoleName[]> = {
   BULK_QC: ["QA_QC", "RND"],
   PACKAGING: ["PRODUCTION"],
   QA_GATE_PACKAGING: ["QA_QC"],
+  FG_STORE: ["STORE"],
+  FG_QC_RELEASE: ["QA_QC"],
   BILLING_EWAY_BILL: ["ACCOUNTS"],
   DISPATCH_PLAN: ["DISPATCH"],
 };
@@ -35,6 +56,8 @@ export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
   BULK_QC: "Bulk QC",
   PACKAGING: "Packaging",
   QA_GATE_PACKAGING: "QA Gate — Packaging",
+  FG_STORE: "FG Store",
+  FG_QC_RELEASE: "Finished Goods QC & Release",
   BILLING_EWAY_BILL: "Billing & E-Way Bill",
   DISPATCH_PLAN: "Dispatch Plan",
 };
