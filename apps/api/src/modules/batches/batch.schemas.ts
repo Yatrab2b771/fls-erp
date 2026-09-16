@@ -55,8 +55,11 @@ export const materialReceivedFieldsSchema = z.object({
 });
 
 // Also carries the former Production Plan stage's fields (unit, dispatch
-// plan date) — PPIC already owned both stages, so they're merged onto the
-// one PPIC checkpoint that's left in the simplified pipeline.
+// plan date), merged onto this one checkpoint in the simplified
+// pipeline. Owned by PRODUCTION (see pre-production-stage.ts's own
+// comment on PRE_PRODUCTION_STAGE_ROLE.INDENT_ISSUE), matching
+// Production Process Flow.docx's "Batch Indent/Requisition (By
+// Production)".
 export const indentIssueFieldsSchema = z.object({
   prodIndentSlipSign: z.string().max(200).optional(),
   productionPlanDate: dateField,

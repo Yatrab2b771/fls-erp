@@ -16,9 +16,12 @@ export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "LINE_
 
 export const PRE_PRODUCTION_STAGE_ORDER: PreProductionStageId[] = ["MATERIAL_RECEIVED", "INDENT_ISSUE", "LINE_CLEARANCE", "DISPENSING", "SAMPLE_QC_APPROVAL"];
 
+// INDENT_ISSUE is owned by PRODUCTION, per Production Process Flow.docx
+// ("Batch Indent/Requisition (By Production)") — it used to be PPIC's,
+// before this was checked against the doc.
 export const PRE_PRODUCTION_STAGE_ROLE: Record<PreProductionStageId, RoleName[]> = {
   MATERIAL_RECEIVED: ["STORE"],
-  INDENT_ISSUE: ["PPIC"],
+  INDENT_ISSUE: ["PRODUCTION"],
   LINE_CLEARANCE: ["QA_QC"],
   DISPENSING: ["STORE"],
   SAMPLE_QC_APPROVAL: ["QA_QC"],
