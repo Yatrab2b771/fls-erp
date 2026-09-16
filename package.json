@@ -13,6 +13,7 @@
     "dev:web": "npm run dev --workspace apps/web",
     "build:api": "npm run build --workspace apps/api",
     "build:web": "npm run build --workspace apps/web",
+    "build:prod": "npm run build:prod --workspace apps/api && npm run build:prod --workspace apps/web",
     "start:api": "npm run start --workspace apps/api",
     "test:api": "npm run test --workspace apps/api",
     "test:web": "npm run test --workspace apps/web",

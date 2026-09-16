@@ -12,4 +12,11 @@ export default defineConfig({
       "/api": "http://localhost:4000",
     },
   },
+  build: {
+    // esbuild is Vite's own default minifier — set explicitly rather
+    // than left implicit, so it's obvious this is a deliberate choice,
+    // not an unconfigured default. cssnano handles CSS minification
+    // separately, via postcss.config.js.
+    minify: "esbuild",
+  },
 });
