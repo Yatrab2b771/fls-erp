@@ -400,7 +400,7 @@ function PoBillingPanel({ poId, canGenerate }: { poId: string; canGenerate: bool
                       </>
                     ) : (
                       <td className="py-1.5 text-right text-slate-400" colSpan={3}>
-                        No RM Costing plan yet — can't be priced this way
+                        No RM BOM plan yet — can't be priced this way
                       </td>
                     )}
                   </tr>
@@ -718,10 +718,10 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
     try {
       const [bom, rm] = await Promise.all([
         needsBom ? createBomPlan.mutateAsync({ name: `${item.productName} — BOM`, purchaseOrderItemId: item.id }) : Promise.resolve(undefined),
-        needsRm ? createRmPlan.mutateAsync({ name: `${item.productName} — RM Costing`, purchaseOrderItemId: item.id }) : Promise.resolve(undefined),
+        needsRm ? createRmPlan.mutateAsync({ name: `${item.productName} — RM BOM`, purchaseOrderItemId: item.id }) : Promise.resolve(undefined),
       ]);
       setJustGenerated({ bom, rm });
-      const calculated = [bom?.status === "CALCULATED" && "BOM", rm?.status === "CALCULATED" && "RM Costing"].filter(Boolean);
+      const calculated = [bom?.status === "CALCULATED" && "BOM", rm?.status === "CALCULATED" && "RM BOM"].filter(Boolean);
       toast.success(calculated.length ? `Generated — ${calculated.join(" + ")} calculated instantly.` : "Plan(s) created — no catalog match yet, add the SKU/Recipe by hand.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate");
@@ -750,11 +750,11 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
           <>
             {rmPlan ? (
               <Link to={`/rm-costing?plan=${rmPlan.id}`} className="pill shrink-0 border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
-                <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM Costing · {rmPlan.status === "CALCULATED" ? "Calculated" : "Draft"}
+                <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM BOM · {rmPlan.status === "CALCULATED" ? "Calculated" : "Draft"}
               </Link>
             ) : justGenerated.rm ? (
               <Link to={`/rm-costing?plan=${justGenerated.rm.id}`} className="pill shrink-0 border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
-                <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM Costing · {justGenerated.rm.status === "CALCULATED" ? "Calculated" : "Draft"}
+                <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM BOM · {justGenerated.rm.status === "CALCULATED" ? "Calculated" : "Draft"}
               </Link>
             ) : null}
             {(rmPlan || justGenerated.rm) && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" strokeWidth={2.5} />}
@@ -1018,7 +1018,7 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
               <p className="flex items-center gap-1.5 font-bold text-slate-800">
                 {item.productName}
                 {item.productType === "NEW" && (
-                  <span className="pill border-violet-200 bg-violet-50 text-[10px] text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM Costing can run.">
+                  <span className="pill border-violet-200 bg-violet-50 text-[10px] text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM BOM can run.">
                     New Product
                   </span>
                 )}

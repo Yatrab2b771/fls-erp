@@ -231,7 +231,7 @@ export function LoginPage() {
             </p>
           </div>
 
-          <p className="mt-6 text-center text-[11px] text-slate-400">© 2026 FLS Mitr — Order Tracking, Packaging BOM &amp; RM Costing</p>
+          <p className="mt-6 text-center text-[11px] text-slate-400">© 2026 FLS Mitr — Order Tracking, Packaging BOM &amp; RM BOM</p>
         </div>
       </div>
     </div>

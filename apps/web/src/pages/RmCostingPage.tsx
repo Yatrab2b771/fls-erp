@@ -203,7 +203,7 @@ export function RmCostingPage() {
           <FlaskConical className="h-5 w-5" strokeWidth={2} />
         </div>
         <div>
-          <h1 className="text-2xl font-black tracking-tight text-slate-900">RM Costing</h1>
+          <h1 className="text-2xl font-black tracking-tight text-slate-900">RM BOM</h1>
           <p className="text-sm text-slate-500">Scale a formulation to a batch size and cost it end to end, RM through GST.</p>
         </div>
       </div>
@@ -280,7 +280,7 @@ export function RmCostingPage() {
 
             <div className="card p-4">
               <p className="label flex items-center gap-1.5">
-                <Beaker className="h-3.5 w-3.5" /> Import Recipes (RM Costing)
+                <Beaker className="h-3.5 w-3.5" /> Import Recipes (RM BOM)
               </p>
               <p className="mb-2 text-[10px] text-slate-400">One sheet per recipe. Any row with an Ingredient/Material and a g/serving or Quantity column is picked up automatically.</p>
               <button type="button" className="btn-ghost mb-1.5 block w-full text-center" onClick={downloadRecipeImportTemplate}>
@@ -325,7 +325,7 @@ export function RmCostingPage() {
           <EmptyState
             icon={Beaker}
             title="No plan open"
-            hint={'Every RM Costing plan is generated straight off a PO — open one via "Generate" (or the RM Costing pill) on the PO\'s detail page.'}
+            hint={'Every RM BOM plan is generated straight off a PO — open one via "Generate" (or the RM BOM pill) on the PO\'s detail page.'}
             accent="amber"
           />
         ) : (

@@ -85,7 +85,7 @@ export function downloadRecipeImportTemplate() {
     ["2. Rename that sheet's tab (double-click it) to the exact Product Name the PO/catalog uses — a Recipe is matched by product name only, across every customer, not per customer."],
     ["3. Fill in one row per ingredient: Ingredient name, Brand/Make, how many grams go into one serving, cost per Kg, and protein % (leave 0 if not protein-bearing)."],
     ["4. Need more than one recipe? Right-click the sheet tab -> Move or Copy -> Create a copy, then rename each copy to its own Product Name."],
-    ["5. Upload the finished file via \"Import Recipes (RM Costing)\" on this page. Column names just need to contain the right word (e.g. any header with \"ingredient\", \"g/serving\", \"cost\", \"protein\") — exact header text isn't required."],
+    ["5. Upload the finished file via \"Import Recipes (RM BOM)\" on this page. Column names just need to contain the right word (e.g. any header with \"ingredient\", \"g/serving\", \"cost\", \"protein\") — exact header text isn't required."],
   ]);
   instructionsSheet["!cols"] = [{ wch: 100 }];
 

@@ -241,7 +241,7 @@ export function PurchaseOrdersPage() {
                   <th>PO Number</th>
                   <th>Customer</th>
                   <th className="text-center">Products</th>
-                  <th className="text-center" title="Calculated Packaging BOM / RM Costing plans, out of this PO's product count">BOM / Recipe</th>
+                  <th className="text-center" title="Calculated Packaging BOM / RM BOM plans, out of this PO's product count">BOM / Recipe</th>
                   <th>Order Date</th>
                   <th>Status</th>
                   <th>Completion</th>
@@ -309,7 +309,7 @@ function PoBomRecipeStatus({ items }: { items: { bomPlans?: { status: string }[]
       <span className={`pill text-[10px] ${pillClass(bomCount)}`} title="Products with a calculated Packaging BOM">
         BOM {bomCount}/{items.length}
       </span>
-      <span className={`pill text-[10px] ${pillClass(rmCount)}`} title="Products with a calculated RM Costing (Recipe)">
+      <span className={`pill text-[10px] ${pillClass(rmCount)}`} title="Products with a calculated RM BOM (Recipe)">
         Recipe {rmCount}/{items.length}
       </span>
     </div>
