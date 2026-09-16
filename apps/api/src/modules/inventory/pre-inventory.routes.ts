@@ -338,15 +338,17 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
 
 // PPIC's own explicit "Send to Purchase" — per the client, a shortfall
 // existing isn't reason enough for the system to tell Purchase on its
-// own; PPIC decides when it's actually worth raising. Doesn't touch the
-// row itself (no new field, no state to track) — this is purely the
-// notification POST /:id/purchase's own success already sends for other
-// events, just triggerable by hand instead of tied to creation.
+// own; PPIC decides when it's actually worth raising. One-time per
+// requirement — purchaseNotifiedAt is stamped on success and the route
+// (and the button, client-side) refuses a repeat until Purchase actually
+// logs a PO, so a PPIC user double/triple-clicking doesn't spam Purchase
+// with duplicate notifications for the same shortfall.
 preInventoryRouter.post("/:id/notify-purchase", requireRole("PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id }, include: requirementInclude });
     if (!existing || existing.deletedAt) return res.status(404).json({ error: "Requirement not found" });
     if (existing.purchaseAt) return res.status(409).json({ error: "A PO has already been logged against this one." });
+    if (existing.purchaseNotifiedAt) return res.status(409).json({ error: "Purchase has already been notified about this shortfall." });
 
     const [withStock] = await withLiveStock([existing]);
     if (withStock!.shortQty <= 0) return res.status(400).json({ error: "This item isn't actually short against live stock right now — nothing to send." });
@@ -357,9 +359,12 @@ preInventoryRouter.post("/:id/notify-purchase", requireRole("PPIC"), async (req:
       req.user!.id,
     );
 
+    const updated = await prisma.preInventoryRequirement.update({ where: { id: existing.id }, data: { purchaseNotifiedAt: new Date() }, include: requirementInclude });
+
     await recordAudit({ actorId: req.user!.id, action: "pre_inventory.sent_to_purchase", entityType: "PreInventoryRequirement", entityId: existing.id, metadata: { shortQty: withStock!.shortQty } });
 
-    res.json(withStock);
+    const [withStockUpdated] = await withLiveStock([updated]);
+    res.json(withStockUpdated);
   } catch (err) {
     next(err);
   }

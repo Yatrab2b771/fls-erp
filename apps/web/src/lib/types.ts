@@ -1484,6 +1484,9 @@ export interface PreInventoryRequirement {
   purchaseById: string | null;
   purchaseAt: string | null;
   purchaseBy: PersonRef | null;
+  // PPIC's one-time "Send to Purchase" notify — set once, then the
+  // button disables so repeat clicks don't spam Purchase.
+  purchaseNotifiedAt: string | null;
 }
 
 // --- Notifications ---

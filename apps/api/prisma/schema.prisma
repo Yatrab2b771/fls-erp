@@ -1900,6 +1900,11 @@ model PreInventoryRequirement {
   purchaseById String?
   purchaseAt   DateTime?
 
+  // PPIC's one-time "Send to Purchase" notify click — records so the
+  // button can't be clicked repeatedly and spam Purchase with duplicate
+  // notifications for the same shortfall (see POST /:id/notify-purchase).
+  purchaseNotifiedAt DateTime?
+
   // Soft delete
   deletedAt   DateTime?
   deletedById String?

@@ -459,8 +459,15 @@ function RequirementCard({
 
         <div className="flex flex-wrap items-center gap-2">
           {canNotifyPurchase && status === "SHORTFALL" && (
-            <button type="button" className="btn-ghost btn-sm" disabled={notifyPurchase.isPending} onClick={handleNotifyPurchase}>
-              <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {notifyPurchase.isPending ? "Sending…" : "Send to Purchase"}
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              disabled={notifyPurchase.isPending || !!requirement.purchaseNotifiedAt}
+              title={requirement.purchaseNotifiedAt ? `Notified ${new Date(requirement.purchaseNotifiedAt).toLocaleString()}` : undefined}
+              onClick={handleNotifyPurchase}
+            >
+              <Send className="h-3.5 w-3.5" strokeWidth={2.5} />{" "}
+              {notifyPurchase.isPending ? "Sending…" : requirement.purchaseNotifiedAt ? "Notified" : "Send to Purchase"}
             </button>
           )}
           {canPurchase && status === "SHORTFALL" && !showPurchase && (
