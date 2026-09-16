@@ -127,6 +127,12 @@ export function RmCostingPage() {
   const [newPlanName, setNewPlanName] = useState("");
   const [showNewPlan, setShowNewPlan] = useState(false);
 
+  // With many batches on one plan, showing every recipe's full ingredient
+  // table at once makes the page scroll forever — instead, show a compact
+  // picker row of every recipe and only render the selected one's table.
+  const [selectedBatchIdx, setSelectedBatchIdx] = useState(0);
+  useEffect(() => setSelectedBatchIdx(0), [selectedPlanId]);
+
   // Recipe Catalog — manually queue any known Recipe straight into the
   // open plan, without waiting on a PO's own auto-match.
   const { data: recipes } = useRecipes();
@@ -395,64 +401,84 @@ export function RmCostingPage() {
 
               {plan.result && (
                 <>
-                  <div className="space-y-3">
-                    {plan.result.batches.map((b, idx) => {
-                      const item = plan.items.find((i) => i.recipeName === b.recipeName);
-                      return (
-                        <div key={idx} className="card overflow-hidden">
-                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-amber-50/50 px-4 py-2.5">
-                            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                              <p className="font-bold text-slate-800">{b.recipeName}</p>
-                              <span className="font-mono text-[11px] text-slate-500">Batch {b.batchSizeKg} Kg</span>
-                              <span className="text-[11px] text-slate-400">RM Cost ₹{b.totalRmCost.toFixed(0)} · Price/Pouch ₹{b.pricePerPouch.toFixed(2)}</span>
-                            </div>
-                            {item && (
-                              <button
-                                className="flex items-center gap-1 text-[10px] font-bold text-amber-600 hover:underline"
-                                onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/items/${item.id}/dispensing.pdf`, `BMR_${b.recipeName}.pdf`)}
-                              >
-                                <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Dispensing PDF
-                              </button>
-                            )}
-                          </div>
-                          {/* Same S.No/Item Code/Ingredients/Make/UOM/Qty.Kg/Req.Batch
-                              shape as the downloaded Dispensing PDF (rm-pdf.ts) — shown
-                              on screen too now, not just in the PDF. */}
-                          <div className="overflow-x-auto">
-                            <table className="table-modern w-full text-xs">
-                              <thead>
-                                <tr>
-                                  <th className="text-center">S.No</th>
-                                  <th>Item Code</th>
-                                  <th>Ingredients</th>
-                                  <th>Make</th>
-                                  <th className="text-center">UOM</th>
-                                  <th className="text-right">Qty./Kg</th>
-                                  <th className="text-right">Req./Batch</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {b.ingredients.map((ing, i) => {
-                                  const propPerKg = ing.gPerServing / b.gmPerServing;
-                                  return (
-                                    <tr key={i}>
-                                      <td className="text-center font-mono text-slate-400">{i + 1}</td>
-                                      <td className="font-mono text-slate-600">{ing.itemCode || "—"}</td>
-                                      <td className="font-semibold text-slate-700">{ing.name}</td>
-                                      <td className="text-slate-500">{ing.brand}</td>
-                                      <td className="text-center text-slate-400">{RECIPE_UOM}</td>
-                                      <td className="text-right font-mono">{propPerKg.toFixed(4)}</td>
-                                      <td className="text-right font-mono font-bold text-amber-700">{ing.qtyInKg.toFixed(3)}</td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
+                  <div className="flex flex-wrap gap-1.5">
+                    {plan.result.batches.map((b, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        className={`rounded-lg border px-3 py-1.5 text-xs font-bold transition ${
+                          idx === selectedBatchIdx
+                            ? "border-amber-400 bg-amber-50 text-amber-800"
+                            : "border-slate-200 bg-white text-slate-600 hover:border-amber-300 hover:text-amber-700"
+                        }`}
+                        onClick={() => setSelectedBatchIdx(idx)}
+                      >
+                        {b.recipeName}
+                      </button>
+                    ))}
                   </div>
+
+                  {plan.result.batches[selectedBatchIdx] && (
+                    <div className="card overflow-hidden">
+                      {(() => {
+                        const b = plan.result.batches[selectedBatchIdx]!;
+                        const item = plan.items.find((i) => i.recipeName === b.recipeName);
+                        return (
+                          <>
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-amber-50/50 px-4 py-2.5">
+                              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                                <p className="font-bold text-slate-800">{b.recipeName}</p>
+                                <span className="font-mono text-[11px] text-slate-500">Batch {b.batchSizeKg} Kg</span>
+                                <span className="text-[11px] text-slate-400">RM Cost ₹{b.totalRmCost.toFixed(0)} · Price/Pouch ₹{b.pricePerPouch.toFixed(2)}</span>
+                              </div>
+                              {item && (
+                                <button
+                                  className="flex items-center gap-1 text-[10px] font-bold text-amber-600 hover:underline"
+                                  onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/items/${item.id}/dispensing.pdf`, `BMR_${b.recipeName}.pdf`)}
+                                >
+                                  <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Dispensing PDF
+                                </button>
+                              )}
+                            </div>
+                            {/* Same S.No/Item Code/Ingredients/Make/UOM/Qty.Kg/Req.Batch
+                                shape as the downloaded Dispensing PDF (rm-pdf.ts) — shown
+                                on screen too now, not just in the PDF. */}
+                            <div className="overflow-x-auto">
+                              <table className="table-modern w-full text-xs">
+                                <thead>
+                                  <tr>
+                                    <th className="text-center">S.No</th>
+                                    <th>Item Code</th>
+                                    <th>Ingredients</th>
+                                    <th>Make</th>
+                                    <th className="text-center">UOM</th>
+                                    <th className="text-right">Qty./Kg</th>
+                                    <th className="text-right">Req./Batch</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {b.ingredients.map((ing, i) => {
+                                    const propPerKg = ing.gPerServing / b.gmPerServing;
+                                    return (
+                                      <tr key={i}>
+                                        <td className="text-center font-mono text-slate-400">{i + 1}</td>
+                                        <td className="font-mono text-slate-600">{ing.itemCode || "—"}</td>
+                                        <td className="font-semibold text-slate-700">{ing.name}</td>
+                                        <td className="text-slate-500">{ing.brand}</td>
+                                        <td className="text-center text-slate-400">{RECIPE_UOM}</td>
+                                        <td className="text-right font-mono">{propPerKg.toFixed(4)}</td>
+                                        <td className="text-right font-mono font-bold text-amber-700">{ing.qtyInKg.toFixed(3)}</td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
 
                   <div className="card overflow-hidden">
                     <div className="flex items-center justify-between border-b border-slate-100 bg-gradient-to-r from-amber-50/60 to-white px-5 py-4">
