@@ -77,15 +77,9 @@ export async function transitionPreProductionStage(params: {
     if (!receipt || receipt.type !== "RECEIVED") return { ok: false, status: 400, error: "That GRN reference doesn't match a real Warehouse receipt." };
   }
 
-  // Same hard-gate shape as Sample QC Approval below, for Line Clearance
-  // — see the client's Production Process Flow doc and
-  // pre-production-stage.ts's own comment on why it was added.
-  const isLineClearanceBlocked =
-    action === "FORWARD" && currentStage === "LINE_CLEARANCE" && (fieldData.lineClearanceStatus ?? run.lineClearanceStatus) !== "Approved";
-
-  // The pre-production hard gate — Production simply cannot start on a
-  // sample QC hasn't actually Approved, so this blocks on anything other
-  // than a literal "Approved".
+  // The pre-production hard gate — Production simply cannot start until
+  // this Line Clearance has actually Approved, so this blocks on
+  // anything other than a literal "Approved".
   const isSampleQcBlocked = action === "FORWARD" && currentStage === "SAMPLE_QC_APPROVAL" && (fieldData.sampleQcStatus ?? run.sampleQcStatus) !== "Approved";
 
   // Real material-indent lines — Indent Issue only, optional (a run can
@@ -233,7 +227,7 @@ export async function transitionPreProductionStage(params: {
     // really "used in the batch" against this requirement (see
     // BatchConsumptionPurpose's own comment).
     let dispensingShortfall: (DispensingRequirementStatus & { covered: false })[] = [];
-    let effectiveTarget = isLineClearanceBlocked || isSampleQcBlocked ? currentStage : target;
+    let effectiveTarget = isSampleQcBlocked ? currentStage : target;
     if (requiredDispensingItems.length > 0) {
       const consumedRows = await tx.batchMaterialConsumption.groupBy({ by: ["itemId"], where: { preProductionId: run.id, purpose: "PRODUCTION" }, _sum: { quantity: true } });
       const consumedByItem = new Map(consumedRows.map((c) => [c.itemId, c._sum.quantity ?? 0]));

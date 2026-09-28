@@ -2,7 +2,8 @@ import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
-import { productionBatchInclude, serializeProductionBatch, type ProductionBatchWithRelations } from "./batch-include";
+import { productionBatchInclude, preProductionInclude, serializeProductionBatch, serializePreProduction, type ProductionBatchWithRelations } from "./batch-include";
+import { buildBmrReportPdf } from "./bmr-report-pdf";
 import {
   assignBatchNoSchema,
   createProductionBatchSchema,
@@ -249,6 +250,44 @@ productionBatchesRouter.patch("/production-batches/:id/stage", async (req: Authe
       return res.status(result.status).json({ error: result.error, ...(result.details !== undefined ? { details: result.details } : {}) });
     }
     res.json(serializeProductionBatch(result.updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The full Batch Manufacturing Record (BMR) for this run — see
+// bmr-report-pdf.ts for what it pulls together. Available any time, not
+// gated on the batch reaching a particular stage — a still-in-progress
+// batch's report just shows blanks for what hasn't happened yet, same
+// "print what's there" shape the client's own paper form has.
+productionBatchesRouter.get("/production-batches/:id/bmr-report.pdf", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const batch = await requireBatch(req.params.id);
+    if (!batch) return res.status(404).json({ error: "Production run not found" });
+
+    const preProduction = await prisma.preProduction.findUnique({ where: { id: batch.preProductionId }, include: preProductionInclude });
+    if (!preProduction) return res.status(404).json({ error: "Parent pre-production run not found" });
+    const serializedPreProduction = serializePreProduction(preProduction);
+
+    const dispensingSheet = serializedPreProduction.consumptions.map((c) => ({
+      itemName: c.item.name,
+      purpose: c.purpose,
+      quantity: c.quantity,
+      unit: c.unit,
+      grossWeight: c.grossWeight,
+      tareWeight: c.tareWeight,
+      netWeight: c.netWeight,
+      arNo: c.arNo,
+    }));
+
+    const doc = buildBmrReportPdf(batch, serializedPreProduction.bulkMfgLineClearanceChecklist, preProduction.sampleQcStatus, preProduction.sampleQcRemarks, dispensingSheet);
+
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.bmr_report_exported", entityType: "ProductionBatch", entityId: batch.id });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="BMR_${(batch.batchNo ?? batch.id).replace(/[^a-zA-Z0-9]/g, "_")}.pdf"`);
+    doc.pipe(res);
+    doc.end();
   } catch (err) {
     next(err);
   }

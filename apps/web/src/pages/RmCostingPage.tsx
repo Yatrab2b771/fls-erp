@@ -264,7 +264,7 @@ export function RmCostingPage() {
                 ))}
               </select>
               <div className="flex gap-2">
-                <input type="number" step="any" placeholder="Batch KG" className="field font-mono" value={batchSizeKg} onChange={(e) => setBatchSizeKg(e.target.value)} />
+                <input type="number" min="0" step="any" placeholder="Batch KG" className="field font-mono" value={batchSizeKg} onChange={(e) => setBatchSizeKg(e.target.value)} />
                 <button
                   className="btn-primary shrink-0"
                   disabled={!selectedPlanId}
@@ -310,6 +310,7 @@ export function RmCostingPage() {
                       <label className="mb-0.5 block text-[9px] font-bold text-slate-400">{f.label}</label>
                       <input
                         type="number"
+                        min="0"
                         step="any"
                         className="field !py-1.5 text-xs"
                         value={costingDraft[f.key] ?? ""}

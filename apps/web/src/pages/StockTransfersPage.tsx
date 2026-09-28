@@ -18,8 +18,10 @@ import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import type { StockTransfer, StockTransferDestinationType } from "../lib/types";
 
+// Day Store -> Day Store was removed — a store sending unused material
+// only ever goes back to the Warehouse or on to a Plant now, never
+// sideways to another store.
 const DESTINATION_OPTIONS: { id: StockTransferDestinationType; name: string }[] = [
-  { id: "DAY_STORE", name: "Another Day Store" },
   { id: "WAREHOUSE", name: "Warehouse" },
   { id: "PLANT", name: "Plant" },
 ];
@@ -38,11 +40,12 @@ function destinationLabel(t: StockTransfer): string {
   return t.destPlantName ?? "—";
 }
 
-// Day Store -> Day Store, Day Store -> Warehouse, or Day Store -> Plant —
-// a direct store-to-store lane distinct from the Warehouse's own
-// issue-to-store/issue-to-production flows (Inventory page) and from
-// R&D's two-way lane (R&D Store page). Sender-creates/receiver-confirms,
-// same shape as both of those.
+// Day Store -> Warehouse or Day Store -> Plant — distinct from the
+// Warehouse's own issue-to-store/issue-to-production flows (Inventory
+// page) and from R&D's two-way lane (R&D Store page). Sender-creates/
+// receiver-confirms, same shape as both of those. Day-Store-to-Day-Store
+// was removed — a store only ever sends unused material back to the
+// Warehouse or on to a Plant now.
 export function StockTransfersPage() {
   const { hasRole } = useAuth();
   const canSend = hasRole("STORE");
@@ -62,7 +65,7 @@ export function StockTransfersPage() {
         </div>
         <div>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">Stock Transfers</h1>
-          <p className="text-sm text-slate-500">Move RM/PM directly between Day Stores, back to the Warehouse, or on to a Plant.</p>
+          <p className="text-sm text-slate-500">Move RM/PM from a Day Store back to the Warehouse, or on to a Plant.</p>
         </div>
       </div>
 
@@ -194,19 +197,16 @@ function SendTransferForm() {
   const [itemId, setItemId] = useState("");
   const [quantity, setQuantity] = useState("");
   const [unit, setUnit] = useState("");
-  const [destinationType, setDestinationType] = useState<StockTransferDestinationType>("DAY_STORE");
-  const [destDayStoreId, setDestDayStoreId] = useState("");
+  const [destinationType, setDestinationType] = useState<StockTransferDestinationType>("WAREHOUSE");
   const [destPlantId, setDestPlantId] = useState("");
   const [note, setNote] = useState("");
 
   const stockItems = (sourceStock?.stock ?? []).map((line) => ({ id: line.item.id, name: `${line.item.name} (${line.onHand} ${line.item.unit ?? ""} on hand)`.trim(), unit: line.item.unit }));
-  const destDayStoreOptions = (dayStores ?? []).filter((d) => d.id !== sourceDayStoreId).map((d) => ({ id: d.id, name: d.name }));
 
   function reset() {
     setItemId("");
     setQuantity("");
     setUnit("");
-    setDestDayStoreId("");
     setDestPlantId("");
     setNote("");
   }
@@ -216,7 +216,6 @@ function SendTransferForm() {
       toast.error("Select a source store, an item, and a quantity.");
       return;
     }
-    if (destinationType === "DAY_STORE" && !destDayStoreId) return toast.error("Select a destination Day Store.");
     if (destinationType === "PLANT" && !destPlantId) return toast.error("Select a destination Plant.");
 
     const body: CreateStockTransferPayload = {
@@ -227,7 +226,6 @@ function SendTransferForm() {
       sourceType: "DAY_STORE",
       sourceDayStoreId,
       destinationType,
-      destDayStoreId: destinationType === "DAY_STORE" ? destDayStoreId : undefined,
       destPlantId: destinationType === "PLANT" ? destPlantId : undefined,
     };
     try {
@@ -291,14 +289,6 @@ function SendTransferForm() {
           </label>
           <ItemPicker items={DESTINATION_OPTIONS} value={destinationType} onChange={(v) => setDestinationType(v as StockTransferDestinationType)} clearable={false} icon={WarehouseIcon} />
         </div>
-        {destinationType === "DAY_STORE" && (
-          <div>
-            <label className="label">
-              Destination Day Store <span className="text-rose-500">*</span>
-            </label>
-            <ItemPicker items={destDayStoreOptions} value={destDayStoreId} onChange={setDestDayStoreId} placeholder="— Select a Day Store —" />
-          </div>
-        )}
         {destinationType === "PLANT" && (
           <div>
             <label className="label">

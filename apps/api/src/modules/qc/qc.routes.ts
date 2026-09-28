@@ -25,7 +25,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
       heldMfgLotsRaw,
       heldPackLotsRaw,
       pendingSampleQcRunsRaw,
-      pendingLineClearanceRunsRaw,
       pendingIpqcLotsRaw,
       pendingBulkQcLotsRaw,
     ] = await Promise.all([
@@ -56,9 +55,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
         where: { currentStageId: "SAMPLE_QC_APPROVAL", OR: [{ sampleQcStatus: null }, { sampleQcStatus: { not: "Approved" } }] },
         include: preProductionInclude,
       }),
-      // Same "every run sitting here needs QC's attention" rule as Sample
-      // QC Approval above — Line Clearance is the same hard-gate shape.
-      prisma.preProduction.findMany({ where: { currentStageId: "LINE_CLEARANCE" }, include: preProductionInclude }),
       // Same rule again, for the CombinedLot side's own hard gates.
       prisma.combinedLot.findMany({ where: { currentStageId: "IPQC" }, include: combinedLotInclude }),
       prisma.combinedLot.findMany({ where: { currentStageId: "BULK_QC" }, include: combinedLotInclude }),
@@ -67,7 +63,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
     const heldMfgLots = heldMfgLotsRaw.map(serializeCombinedLot);
     const heldPackLots = heldPackLotsRaw.map(serializeCombinedLot);
     const pendingSampleQcRuns = pendingSampleQcRunsRaw.map(serializePreProduction);
-    const pendingLineClearanceRuns = pendingLineClearanceRunsRaw.map(serializePreProduction);
     const pendingIpqcLots = pendingIpqcLotsRaw.map(serializeCombinedLot);
     const pendingBulkQcLots = pendingBulkQcLotsRaw.map(serializeCombinedLot);
 
@@ -81,7 +76,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
         onHoldMfgBatches: heldMfgLots.length,
         onHoldPackBatches: heldPackLots.length,
         pendingSampleQcBatches: pendingSampleQcRuns.length,
-        pendingLineClearanceBatches: pendingLineClearanceRuns.length,
         pendingIpqcBatches: pendingIpqcLots.length,
         pendingBulkQcBatches: pendingBulkQcLots.length,
       },
@@ -91,7 +85,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
         onHoldMfg: heldMfgLots,
         onHoldPack: heldPackLots,
         pendingSampleQc: pendingSampleQcRuns,
-        pendingLineClearance: pendingLineClearanceRuns,
         pendingIpqc: pendingIpqcLots,
         pendingBulkQc: pendingBulkQcLots,
       },

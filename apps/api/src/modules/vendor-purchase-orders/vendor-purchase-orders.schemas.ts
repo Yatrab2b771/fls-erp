@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateMfgExpiryDates } from "../../common/lib/mfg-expiry-validation";
 
 const dateField = z.coerce.date().optional();
 
@@ -33,15 +34,17 @@ export const updateVendorPurchaseOrderItemSchema = vendorPurchaseOrderItemInputS
 // inventory.routes.ts POST /transactions) — quantity here is how much
 // physically arrived, which may be less than the line's ordered qty
 // (partial delivery) and is received across multiple calls if so.
-export const receiveVendorPurchaseOrderItemSchema = z.object({
-  quantity: z.coerce.number().positive(),
-  unit: z.string().min(1).max(40).optional(),
-  batchNo: z.string().max(100).optional(),
-  grnNo: z.string().max(100).optional(),
-  mfgDate: dateField,
-  expiryDate: dateField,
-  remark: z.string().max(500).optional(),
-});
+export const receiveVendorPurchaseOrderItemSchema = z
+  .object({
+    quantity: z.coerce.number().positive(),
+    unit: z.string().min(1).max(40).optional(),
+    batchNo: z.string().max(100).optional(),
+    grnNo: z.string().max(100).optional(),
+    mfgDate: dateField,
+    expiryDate: dateField,
+    remark: z.string().max(500).optional(),
+  })
+  .superRefine(validateMfgExpiryDates);
 
 export const addVendorPurchaseOrderFreightSchema = z.object({
   freightCharges: z.coerce.number().nonnegative(),

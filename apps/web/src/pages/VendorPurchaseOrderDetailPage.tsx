@@ -18,6 +18,11 @@ import { ApiError } from "../lib/api";
 import type { VendorPurchaseOrder, VendorPurchaseOrderItem } from "../lib/types";
 
 const fmtCurrency = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+// Same calendar rule as InventoryPage.tsx's own TODAY constant — Mfg
+// Date can't be later than today, Expiry Date can't be before Mfg Date
+// (or, absent that, today). Matches validateMfgExpiryDates on the API
+// side.
+const TODAY = new Date().toISOString().slice(0, 10);
 
 export function VendorPurchaseOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -335,11 +340,11 @@ function ReceiveItemForm({ poId, item, onDone }: { poId: string; item: VendorPur
       </div>
       <div>
         <label className="label !mb-1 text-[10px]">Mfg. Date</label>
-        <input className="field" type="date" value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
+        <input className="field" type="date" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
       </div>
       <div>
         <label className="label !mb-1 text-[10px]">Expiry Date</label>
-        <input className="field" type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
+        <input className="field" type="date" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
       </div>
       <div className="flex items-end gap-2">
         <button className="btn-primary btn-sm" disabled={receiveItem.isPending} onClick={submit}>

@@ -5,8 +5,10 @@ import {
   ArrowUpFromLine,
   Beaker,
   Boxes,
+  Building2,
   Check,
   CheckCircle2,
+  ClipboardCheck,
   ClipboardList,
   Download,
   Eye,
@@ -61,6 +63,9 @@ import {
   useInventoryItems,
   useInventoryRequests,
   useInventoryStock,
+  useFgStock,
+  useQuarantineStock,
+  useReleaseExpiry,
   useInventoryTransactions,
   useInventoryVendors,
   useInvoiceDispatchTransfer,
@@ -92,6 +97,8 @@ import type {
   InventoryRequestPurpose,
   InventoryTransaction,
   InventoryStockLine,
+  FgStockRow,
+  QuarantineRow,
   InventoryTxnType,
   MaterialReconciliationRow,
   Plant,
@@ -115,10 +122,12 @@ import {
   exportPlantStockReport,
   exportRequestsReport,
   exportStockReport,
+  exportFgStockReport,
   exportTransactionReport,
   exportTransitReport,
 } from "../lib/inventoryExport";
 import { ApiError, api } from "../lib/api";
+import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
 import type { CustomerReconciliationRow, ItemStockByLocation } from "../lib/types";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -126,6 +135,13 @@ import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
 import { RequestStatusBadge } from "../components/Badges";
+
+// Calendar bound for every Mfg Date/Expiry Date pair in this file — Mfg
+// Date can't be later than today, Expiry Date can't be before Mfg Date
+// (or, absent that, today). Matches validateMfgExpiryDates on the API
+// side; this is just the same rule surfaced in the date picker itself
+// so an invalid combination is never even selectable.
+const TODAY = new Date().toISOString().slice(0, 10);
 
 const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
 const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
@@ -520,10 +536,12 @@ function RenameWarehouse({ warehouse }: { warehouse: WarehouseLocation }) {
 
 // ISSUED_RND deliberately excluded — that ledger has its own page
 // (/rnd-store), not a tab here.
-type ViewTab = "stock" | Exclude<InventoryTxnType, "ISSUED_RND"> | DispatchTransferType | "requests" | "transit" | "reconciliation";
+type ViewTab = "stock" | "fg-stock" | "quarantine" | Exclude<InventoryTxnType, "ISSUED_RND"> | DispatchTransferType | "requests" | "transit" | "reconciliation";
 
 const MATERIAL_TABS: { key: ViewTab; label: string; icon: typeof Warehouse }[] = [
   { key: "stock", label: "Stock on Hand", icon: Warehouse },
+  { key: "fg-stock", label: "FG Stock on Hand", icon: PackageCheck },
+  { key: "quarantine", label: "Quarantine Store", icon: ShieldAlert },
   { key: "RECEIVED", label: "Material Received", icon: ArrowDownToLine },
   { key: "ISSUED_DAY_STORE", label: "Issued to Store", icon: ArrowUpFromLine },
   { key: "ISSUED_PRODUCTION", label: "Issued to Production", icon: ArrowUpFromLine },
@@ -558,6 +576,11 @@ export function InventoryPage() {
   // Plant-bound delivery still in transit is exactly what Production is
   // waiting on before Dispensing/manufacturing can use it.
   const canSeeTransit = hasRole("PRODUCTION");
+  // Purchase gets Stock on Hand only — they need to see what's actually
+  // on the shelf (and its cost) to plan buying, but own no write access
+  // anywhere else in this module. See inventory.routes.ts's GET /stock
+  // role list.
+  const canPurchaseViewStock = hasRole("PURCHASE");
   // Same role list as the "Inventory" nav tab in AppLayout.tsx — the tab
   // being hidden doesn't stop a direct URL (or a stale route left over
   // from switching users in the same tab) from rendering this page, so
@@ -565,7 +588,7 @@ export function InventoryPage() {
   // actual early return sits at the bottom of this component, after
   // every hook below has run — an early return here would call those
   // hooks conditionally.
-  const canAccessInventory = canWrite || canRequest || canQc || canInwardQc || canDispatch || canInvoice || canSeeTransit;
+  const canAccessInventory = canWrite || canRequest || canQc || canInwardQc || canDispatch || canInvoice || canSeeTransit || canPurchaseViewStock;
 
   // Per-tab visibility — each department only gets the slice of this
   // module its role actually has API access to (see inventory.routes.ts).
@@ -573,7 +596,15 @@ export function InventoryPage() {
     // ACCOUNTS on both: they can edit item pricing (needs Stock on Hand
     // to browse into an item) and raise a debit note against a Received
     // row (needs to actually see that row) — see inventory.routes.ts.
-    stock: canWrite || canRequest || canInvoice,
+    // PURCHASE gets Stock on Hand too, read-only, to see what's on hand
+    // (and its cost) before buying more.
+    stock: canWrite || canRequest || canInvoice || canPurchaseViewStock,
+    // Same audience as GET /inventory/fg-stock's own role list, plus
+    // Dispatch (they're the ones shipping this out, so they need to know
+    // what's actually sitting in the warehouse to plan a dispatch).
+    "fg-stock": canWrite || canRequest || canInvoice || canPurchaseViewStock || canDispatch,
+    // Same audience as GET /inventory/quarantine's own role list.
+    quarantine: canWrite || canInwardQc || canInvoice || canRequest,
     // PPIC gets Received too — their own date-wise GRN report — but not
     // the two Issued tabs, those stay Store's own ledger.
     RECEIVED: canWrite || canInwardQc || canInvoice || canRequest,
@@ -609,6 +640,11 @@ export function InventoryPage() {
   const [tab, setTab] = useState<ViewTab>(() => [...visibleMaterialTabs, ...visibleDispatchTabs][0]?.key ?? "stock");
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
+  // FG Stock on Hand's own two filters — on top of the shared search box
+  // above, since "every detail, filterable by customer or product" needs
+  // a real picker, not just free-text search across both fields at once.
+  const [fgCustomerId, setFgCustomerId] = useState("");
+  const [fgProductName, setFgProductName] = useState("");
   // Same idea for Issued to Day Store — which Day Store this sheet's
   // stock belongs to, picked once for the whole batch (a real sheet from
   // Sanjay's side is one Day Store's count, not several mixed together).
@@ -661,6 +697,8 @@ export function InventoryPage() {
   const { data: warehouseStock, isLoading: warehouseStockLoading } = useInventoryStock(selectedWarehouse?.category, {
     enabled: tabVisible.stock && !!stockWarehouseId,
   });
+  const { data: fgStock, isLoading: fgStockLoading } = useFgStock({ enabled: tabVisible["fg-stock"] && tab === "fg-stock" });
+  const { data: quarantineStock, isLoading: quarantineLoading } = useQuarantineStock({ enabled: tabVisible.quarantine && tab === "quarantine" });
   const { data: transactions, isLoading: txnLoading } = useInventoryTransactions(materialTab ? { type: tab as InventoryTxnType } : undefined, {
     enabled: materialTab && tabVisible[tab],
   });
@@ -698,6 +736,22 @@ export function InventoryPage() {
 
   const q = search.trim().toLowerCase();
   const filteredStock = stock?.filter((s) => !q || s.item.name.toLowerCase().includes(q));
+  const fgCustomerOptions = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const r of fgStock ?? []) if (!seen.has(r.customerId)) seen.set(r.customerId, r.customerName);
+    return [...seen.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [fgStock]);
+  const fgProductOptions = useMemo(() => {
+    const names = new Set((fgStock ?? []).map((r) => r.productName));
+    return [...names].sort((a, b) => a.localeCompare(b)).map((name) => ({ id: name, name }));
+  }, [fgStock]);
+  const filteredFgStock = fgStock?.filter(
+    (r) =>
+      (!q || r.productName.toLowerCase().includes(q) || r.customerName.toLowerCase().includes(q) || r.label.toLowerCase().includes(q) || (r.poNumber ?? "").toLowerCase().includes(q)) &&
+      (!fgCustomerId || r.customerId === fgCustomerId) &&
+      (!fgProductName || r.productName === fgProductName),
+  );
+  const filteredQuarantine = quarantineStock?.filter((t) => !q || t.item.name.toLowerCase().includes(q) || (t.vendorName ?? "").toLowerCase().includes(q));
   const filteredWarehouseStock = warehouseStock?.filter((s) => !q || s.item.name.toLowerCase().includes(q));
   const filteredDayStoreStock = dayStoreStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
   const filteredPlantStock = plantStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
@@ -742,6 +796,12 @@ export function InventoryPage() {
     } else if (tab === "stock") {
       if (!filteredStock?.length) return toast.error("Nothing to export — no stock rows match.");
       exportStockReport(filteredStock);
+    } else if (tab === "fg-stock") {
+      if (!filteredFgStock?.length) return toast.error("Nothing to export — no finished goods on hand match.");
+      exportFgStockReport(filteredFgStock);
+    } else if (tab === "quarantine") {
+      if (!filteredQuarantine?.length) return toast.error("Nothing to export — quarantine is empty.");
+      exportTransactionReport(filteredQuarantine, "Quarantine Store", "Quarantine_Store");
     } else if (dispatchTab) {
       if (!filteredDispatch?.length) return toast.error("Nothing to export — no entries match.");
       exportDispatchReport(filteredDispatch, DISPATCH_TYPE_LABEL[tab], DISPATCH_TYPE_LABEL[tab].replace(/\s+/g, "_"));
@@ -1149,6 +1209,17 @@ export function InventoryPage() {
         </div>
       )}
 
+      {tab === "fg-stock" && (
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="w-56">
+            <ItemPicker items={fgCustomerOptions} value={fgCustomerId} onChange={setFgCustomerId} placeholder="— Filter by customer —" icon={Building2} />
+          </div>
+          <div className="w-56">
+            <ItemPicker items={fgProductOptions} value={fgProductName} onChange={setFgProductName} placeholder="— Filter by product —" icon={PackageCheck} />
+          </div>
+        </div>
+      )}
+
       {tab === "stock" ? (
         stockDayStoreId ? (
           <DayStoreStockTable loading={dayStoreStockLoading} rows={filteredDayStoreStock} empty={!dayStoreStock?.stock.length} />
@@ -1159,6 +1230,10 @@ export function InventoryPage() {
         ) : (
           <StockTable loading={stockLoading} rows={filteredStock} empty={!stock?.length} />
         )
+      ) : tab === "fg-stock" ? (
+        <FgStockTable loading={fgStockLoading} rows={filteredFgStock} empty={!fgStock?.length} />
+      ) : tab === "quarantine" ? (
+        <QuarantinePanel loading={quarantineLoading} rows={filteredQuarantine} empty={!quarantineStock?.length} canQc={canInwardQc} canWrite={canWrite} canDebitNote={canInvoice} />
       ) : tab === "RECEIVED" ? (
         <ReceivedList loading={txnLoading} rows={filteredTxns} empty={!transactions?.length} canQc={canInwardQc} canWrite={canWrite} canDebitNote={canInvoice} />
       ) : tab === "FG" ? (
@@ -1179,6 +1254,13 @@ export function InventoryPage() {
 }
 
 function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnType<typeof useInventoryStock>["data"]; empty: boolean }) {
+  // Cost Price mirrors item-pricing.ts's own PRICING_VISIBLE_ROLES — the
+  // API strips item.costPrice entirely (not nulled) for every other
+  // role, so showing the column at all is itself the gate; no per-row
+  // check needed.
+  const { hasRole } = useAuth();
+  const canViewPricing = hasRole("PURCHASE") || hasRole("ACCOUNTS") || hasRole("STORE");
+
   if (loading) return <SkeletonRows rows={5} cols={9} />;
   if (empty) return <EmptyState icon={Warehouse} title="No inventory items yet" hint="Log a received or issued entry to add the first item." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching items" hint="Try a different search." accent="slate" />;
@@ -1198,6 +1280,7 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
               <th className="text-right">Issued (Store)</th>
               <th className="text-right">Issued (Production)</th>
               <th className="text-right">On Hand</th>
+              {canViewPricing && <th className="text-right">Cost Price</th>}
               <th />
             </tr>
           </thead>
@@ -1213,10 +1296,76 @@ function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnTy
                 <td className="text-right font-mono text-amber-600">{s.issuedDayStoreQty}</td>
                 <td className="text-right font-mono text-amber-600">{s.issuedProductionQty}</td>
                 <td className={`text-right font-mono font-bold ${s.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{s.onHand}</td>
+                {canViewPricing && <td className="text-right font-mono text-slate-600">{s.item.costPrice != null ? `₹${s.item.costPrice.toLocaleString("en-IN")}` : "—"}</td>}
                 <td className="text-right">
                   <Link to={`/inventory/items/${s.item.id}`} className="btn-ghost btn-sm inline-flex" title="See everything received/issued for this item">
                     <Eye className="h-3.5 w-3.5" strokeWidth={2.25} /> View
                   </Link>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Finished Goods on hand — see GET /api/inventory/fg-stock's own
+// comment for how onHandQty is computed. One row per batch/legacy
+// CombinedLot (every detail — PO, batch/lot, stage, produced vs.
+// dispatched), filterable by Customer/Product above, not pre-aggregated —
+// that's the actual traceable unit, a batch, not a rolled-up total.
+function FgStockTable({ loading, rows, empty }: { loading: boolean; rows: FgStockRow[] | undefined; empty: boolean }) {
+  if (loading) return <SkeletonRows rows={5} cols={9} />;
+  if (empty) return <EmptyState icon={PackageCheck} title="No finished goods on hand" hint="Nothing has reached FG Store yet, or everything's already been dispatched." accent="brand" />;
+  if (!rows?.length) return <EmptyState icon={PackageCheck} title="No matching items" hint="Try a different search or filter." accent="slate" />;
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="table-modern w-full">
+          <thead>
+            <tr>
+              <th>Customer</th>
+              <th>Product</th>
+              <th>PO Number</th>
+              <th>Batch / Lot</th>
+              <th>Stage</th>
+              <th className="text-right">Produced</th>
+              <th className="text-right">Dispatched</th>
+              <th className="text-right">On Hand</th>
+              <th>Reached FG Store</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td className="text-slate-600">{r.customerName}</td>
+                <td className="font-bold text-slate-800">{r.productName}</td>
+                <td className="font-mono text-slate-500">{r.poNumber ?? "—"}</td>
+                <td className="text-slate-600">
+                  {r.label}
+                  {r.kind === "COMBINED_LOT" && <span className="pill ml-1.5 border-slate-200 bg-slate-50 text-[10px] text-slate-400">Legacy</span>}
+                </td>
+                <td>
+                  <span className="pill border-brand-200 bg-brand-50 text-brand-700">{COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId}</span>
+                </td>
+                <td className="text-right font-mono text-slate-600">
+                  {r.producedQty} {r.unit}
+                </td>
+                <td className="text-right font-mono text-amber-600">
+                  {r.dispatchedQty} {r.unit}
+                </td>
+                <td className="text-right font-mono font-bold text-slate-800">
+                  {r.onHandQty} {r.unit}
+                </td>
+                <td className="text-slate-500">{r.fgStoreReceivedDate ? new Date(r.fgStoreReceivedDate).toLocaleDateString() : "—"}</td>
+                <td className="text-right">
+                  <button type="button" className="btn-icon" title="Download this entry" onClick={() => exportFgStockReport([r])}>
+                    <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  </button>
                 </td>
               </tr>
             ))}
@@ -1563,13 +1712,10 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
   const [expiryDate, setExpiryDate] = useState("");
   const [remark, setRemark] = useState("");
   // Store Before/After Report §4 — rate/invoice weren't captured on a
-  // direct (non-Vendor-PO) delivery before; §6 — a receipt can go
-  // straight to a Day Store instead of always passing through the
-  // Warehouse first.
+  // direct (non-Vendor-PO) delivery before.
   const [rate, setRate] = useState("");
   const [invoiceNo, setInvoiceNo] = useState("");
   const [invoiceDate, setInvoiceDate] = useState("");
-  const [receiveDirectToStore, setReceiveDirectToStore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1628,7 +1774,6 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
     if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
     // Rate is mandatory on a real delivery (Store Before/After Report §4.6).
     if (type === "RECEIVED" && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
-    if (type === "RECEIVED" && receiveDirectToStore && !dayStoreId) return setError("Pick which store this is being received at.");
 
     setSubmitting(true);
     try {
@@ -1640,7 +1785,7 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         quantity: Number(quantity),
         size: size.trim() || undefined,
         vendorName: vendorName.trim() || undefined,
-        dayStoreId: (type === "ISSUED_DAY_STORE" && dayStoreId) || (type === "RECEIVED" && receiveDirectToStore && dayStoreId) ? dayStoreId : undefined,
+        dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
         isTransitTracked: type === "ISSUED_DAY_STORE" && isTransitTracked ? true : undefined,
         batchNo: batchNo.trim() || undefined,
         grnNo: grnNo.trim() || undefined,
@@ -1685,27 +1830,9 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
       </div>
 
       {type === "RECEIVED" && (
-        <div className="space-y-2">
-          <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-            <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
-          </p>
-          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
-            <input type="checkbox" className="h-3.5 w-3.5" checked={receiveDirectToStore} onChange={(e) => setReceiveDirectToStore(e.target.checked)} />
-            Received directly at a Store — bypasses the Warehouse
-          </label>
-          {receiveDirectToStore && (
-            <div className="max-w-sm">
-              <PickerWithAdd
-                label="Which Store"
-                placeholder="— Which store received this —"
-                options={dayStores ?? []}
-                value={dayStoreId}
-                onChange={setDayStoreId}
-                onCreate={(name) => createDayStore.mutateAsync(name)}
-              />
-            </div>
-          )}
-        </div>
+        <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
+        </p>
       )}
 
       {type === "ISSUED_DAY_STORE" && (
@@ -1814,11 +1941,11 @@ function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryT
         </div>
         <div>
           <label className="label">Mfg Date (optional)</label>
-          <input type="date" className="field" value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
+          <input type="date" className="field" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
         </div>
         <div>
           <label className="label">Expiry Date (optional)</label>
-          <input type="date" className="field" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
+          <input type="date" className="field" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
         </div>
         <div className="sm:col-span-2 lg:col-span-3">
           <label className="label">Remark (optional)</label>
@@ -1999,6 +2126,112 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
 
 // --- Inward QC — a RECEIVED row starts PENDING_QC (see LogEntryForm),
 // QA/QC reviews it here, then Store accepts it before it's real stock. ---
+
+// Quarantine Store — everything physically present but not counted as
+// usable stock yet (see GET /inventory/quarantine's own comment). Splits
+// into the two reasons a row can be here: still awaiting its first QC
+// check (reuses ReceivedList/ReceivedCard directly — same rows, same
+// Approve/Reject/Hold actions, just filtered to this subset), or already
+// accepted but expired and not yet released by QA/QC (its own simpler
+// card — nothing to review except "does this still count").
+function QuarantinePanel({
+  loading,
+  rows,
+  empty,
+  canQc,
+  canWrite,
+  canDebitNote,
+}: {
+  loading: boolean;
+  rows: QuarantineRow[] | undefined;
+  empty: boolean;
+  canQc: boolean;
+  canWrite: boolean;
+  canDebitNote: boolean;
+}) {
+  if (loading) return <SkeletonRows rows={4} cols={1} />;
+  if (empty) return <EmptyState icon={ShieldAlert} title="Quarantine is empty" hint="Nothing is awaiting QC, and nothing accepted has expired." accent="brand" />;
+  if (!rows?.length) return <EmptyState icon={ShieldAlert} title="No matching entries" hint="Try a different search." accent="slate" />;
+
+  const awaitingQc = rows.filter((r) => r.quarantineReason !== "EXPIRED");
+  const expired = rows.filter((r) => r.quarantineReason === "EXPIRED");
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <ClipboardCheck className="h-3.5 w-3.5" /> Awaiting QC ({awaitingQc.length})
+        </h2>
+        {awaitingQc.length === 0 ? (
+          <p className="text-xs text-slate-400">Nothing waiting on inward QC right now.</p>
+        ) : (
+          <div className="space-y-3">
+            {awaitingQc.map((t) => (
+              <ReceivedCard key={t.id} txn={t} canQc={canQc} canWrite={canWrite} canDebitNote={canDebitNote} />
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <ShieldAlert className="h-3.5 w-3.5" /> Expired — Awaiting Release ({expired.length})
+        </h2>
+        {expired.length === 0 ? (
+          <p className="text-xs text-slate-400">Nothing accepted has expired.</p>
+        ) : (
+          <div className="space-y-3">
+            {expired.map((t) => (
+              <ExpiredQuarantineCard key={t.id} txn={t} canQc={canQc} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExpiredQuarantineCard({ txn, canQc }: { txn: QuarantineRow; canQc: boolean }) {
+  const toast = useToast();
+  const release = useReleaseExpiry();
+
+  async function handleRelease() {
+    try {
+      await release.mutateAsync(txn.id);
+      toast.success(`${txn.item.name} released back into stock.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not release this entry");
+    }
+  }
+
+  return (
+    <div className="card flex flex-wrap items-center justify-between gap-3 p-4">
+      <div className="min-w-0">
+        <p className="flex items-center gap-1.5 font-bold text-slate-800">
+          {txn.item.name}
+          <span className="pill border-rose-200 bg-rose-50 text-rose-700">Expired {txn.expiryDate ? new Date(txn.expiryDate).toLocaleDateString() : ""}</span>
+        </p>
+        <p className="text-xs text-slate-500">
+          {txn.quantity} {txn.unit} · {txn.vendorName ?? "No vendor"} · GRN {txn.grnNo ?? "—"} · Batch {txn.batchNo ?? "—"} · accepted {new Date(txn.date).toLocaleDateString()}
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="btn-icon"
+          title="Download this entry"
+          onClick={() => exportTransactionReport([txn], "Quarantine Store", `Expired_${txn.item.name.replace(/\s+/g, "_")}`)}
+        >
+          <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+        </button>
+        {canQc && (
+          <button type="button" className="btn-primary btn-sm" disabled={release.isPending} onClick={handleRelease}>
+            <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {release.isPending ? "Releasing…" : "Release to Stock"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function ReceivedList({
   loading,
@@ -2278,6 +2511,14 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
               <PackageCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> {accept.isPending ? "Accepting…" : "Accept into Stock"}
             </button>
           )}
+          <button
+            type="button"
+            className="btn-icon"
+            title="Download this entry"
+            onClick={() => exportTransactionReport([txn], "Material Received", `Material_Received_${txn.item.name.replace(/\s+/g, "_")}`)}
+          >
+            <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+          </button>
           {canWrite && !showNoteForm && !editing && (
             <button type="button" className="btn-icon" title="Edit GRN No. / Batch No. / dates / vendor / remark" onClick={startEdit}>
               <Pencil className="h-3.5 w-3.5" strokeWidth={2.25} />
@@ -2304,11 +2545,11 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
             </div>
             <div>
               <label className="label">Mfg Date</label>
-              <input type="date" className="field" value={editDraft.mfgDate} onChange={(e) => setEditDraft((d) => ({ ...d, mfgDate: e.target.value }))} />
+              <input type="date" className="field" max={TODAY} value={editDraft.mfgDate} onChange={(e) => setEditDraft((d) => ({ ...d, mfgDate: e.target.value }))} />
             </div>
             <div>
               <label className="label">Expiry Date</label>
-              <input type="date" className="field" value={editDraft.expiryDate} onChange={(e) => setEditDraft((d) => ({ ...d, expiryDate: e.target.value }))} />
+              <input type="date" className="field" min={editDraft.mfgDate || TODAY} value={editDraft.expiryDate} onChange={(e) => setEditDraft((d) => ({ ...d, expiryDate: e.target.value }))} />
             </div>
             <div>
               <label className="label">Vendor</label>
@@ -2394,6 +2635,8 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
               <label className="label">Quantity *</label>
               <input
                 type="number"
+                min="0"
+                step="any"
                 className="field"
                 value={debitNoteDraft.quantity}
                 onChange={(e) => setDebitNoteDraft((d) => ({ ...d, quantity: e.target.value }))}
@@ -2406,7 +2649,7 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
             </div>
             <div>
               <label className="label">Amount (₹)</label>
-              <input type="number" className="field" value={debitNoteDraft.amount} onChange={(e) => setDebitNoteDraft((d) => ({ ...d, amount: e.target.value }))} />
+              <input type="number" min="0" step="any" className="field" value={debitNoteDraft.amount} onChange={(e) => setDebitNoteDraft((d) => ({ ...d, amount: e.target.value }))} />
             </div>
             <div className="col-span-2 sm:col-span-4">
               <label className="label">Reason</label>

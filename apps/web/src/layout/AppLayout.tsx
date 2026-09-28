@@ -21,7 +21,6 @@ import {
   Microscope,
   Package,
   PackageMinus,
-  PauseCircle,
   Recycle,
   RotateCcw,
   ShieldCheck,
@@ -74,7 +73,16 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Order to Dispatch",
     items: [
-      { to: "/purchase-orders", label: "Order Tracking", icon: Truck },
+      // Purchase's own real workflow (Pre-Inventory shortfall ->
+      // "Notify Purchase" -> Vendor PO) already tells them exactly what's
+      // short, item by item — it never depends on browsing the customer
+      // order book. Store's own real workflow (Material Received /
+      // Dispensing) is the same story: a direct notification plus the
+      // Dashboard's own "Your Queue" already points them straight at the
+      // specific run, never the PO list. Both hidden from nav only (not
+      // the underlying page/API, which stays open to any authenticated
+      // user) so it's a one-line change to bring either back.
+      { to: "/purchase-orders", label: "Order Tracking", icon: Truck, roles: ["BD", "PPIC", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
       { to: "/customers", label: "Customers", icon: Building2, roles: ["BD"] },
     ],
   },
@@ -90,10 +98,12 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Warehouse & Quality",
     items: [
-      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS"] },
+      // PURCHASE added for Stock on Hand only (read-only, with cost
+      // visible) — see InventoryPage.tsx's own canPurchaseViewStock gate.
+      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS", "PURCHASE"] },
       { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE", "PRODUCTION", "PPIC"] },
       { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE", "PPIC"] },
-      { to: "/qc-dashboard", label: "QC Dashboard", icon: PauseCircle, roles: ["QA_QC"] },
+      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["PRODUCTION", "STORE", "PPIC", "QA_QC"] },
       { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC", "PPIC"] },
     ],
   },
@@ -112,8 +122,17 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // adds read access and nothing more. BD no longer gets a nav link
       // to either — Packaging BOM and Costing are being removed from
       // their interface, same reasoning as PPIC's own Costing removal.
-      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC", "PURCHASE"] },
-      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND", "PPIC", "STORE"] },
+      // PURCHASE had read-only access here (no PURCHASE-specific
+      // permission exists on this route — only PPIC can act on it), but
+      // their real workflow never depends on browsing BOM plans: Pre-
+      // Inventory's "Notify Purchase" already tells them exactly what's
+      // short, item by item. Hidden from Purchase's nav only (not the
+      // underlying page/API), same reasoning as Order Tracking above.
+      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC"] },
+      // STORE had read-only access here too (no STORE-specific permission
+      // on this route — only RND edits recipes, only PPIC sends to
+      // Pre-Inventory), same reasoning as PURCHASE's Packaging BOM above.
+      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND", "PPIC"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND", "PPIC"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
     ],

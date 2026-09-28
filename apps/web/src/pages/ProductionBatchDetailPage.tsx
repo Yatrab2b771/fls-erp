@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Check, ClipboardEdit, FlaskConical, Lock, Pencil, Undo2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, ClipboardEdit, Download, FlaskConical, Lock, Pencil, Undo2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useAssignProductionBatchNo, useProductionBatch, useTransitionProductionBatchStage } from "../lib/hooks";
 import { COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ORDER, COMBINED_LOT_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/combinedLotStage";
@@ -8,7 +8,7 @@ import { PRODUCTION_BATCH_STAGE_FIELDS } from "../lib/productionBatchStage";
 import { FieldGrid } from "../components/FieldGrid";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
-import { ApiError } from "../lib/api";
+import { ApiError, downloadFile } from "../lib/api";
 import type { ProductionBatch, CombinedLotStageId } from "../lib/types";
 
 // A ProductionBatch's OWN Tier-3 pipeline (IPQC through Dispatch Plan) —
@@ -64,7 +64,12 @@ export function ProductionBatchDetailPage() {
               </p>
             </div>
           </div>
-          <BatchNoBadge batch={batch} />
+          <div className="flex items-center gap-2">
+            <button className="btn-ghost btn-sm" onClick={() => downloadFile(`/api/production-batches/${batch.id}/bmr-report.pdf`, `BMR_${batch.batchNo ?? batch.id}.pdf`)}>
+              <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download BMR Report
+            </button>
+            <BatchNoBadge batch={batch} />
+          </div>
         </div>
       </div>
 

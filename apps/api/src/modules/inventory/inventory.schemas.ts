@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { validateMfgExpiryDates } from "../../common/lib/mfg-expiry-validation";
 
 const CATEGORIES = ["RM", "PM"] as const;
 const TXN_TYPES = ["RECEIVED", "ISSUED_DAY_STORE", "ISSUED_PRODUCTION"] as const;
@@ -88,11 +89,10 @@ export const createInventoryTransactionSchema = z.object({
   quantity: z.coerce.number().positive(),
   size: z.string().max(120).optional(), // Optional, per the tool — e.g. Inch / ft / Kg / Ltr sizing note
   vendorName: z.string().max(200).optional(),
-  // S6 — which Day Store received this (ISSUED_DAY_STORE rows), or which
-  // Day Store a RECEIVED row should land at directly, bypassing the
-  // Warehouse (see the route's own comment on the auto-issue leg this
-  // triggers once the receipt is accepted — Software Before/After
-  // Report §6, "material can be received directly at the day store").
+  // Which Day Store this was issued to (ISSUED_DAY_STORE rows only) — a
+  // RECEIVED row can no longer be tagged with one; direct-to-store
+  // receiving was removed, every delivery now goes through the
+  // Warehouse first (see the route's own check on POST /transactions).
   dayStoreId: z.string().uuid().optional(),
   // RECEIVED only — the vendor's rate for this specific delivery. A
   // Vendor-PO-linked receipt already has a rate on its
@@ -116,7 +116,7 @@ export const createInventoryTransactionSchema = z.object({
   mfgDate: z.coerce.date().optional(),
   expiryDate: z.coerce.date().optional(),
   remark: z.string().max(500).optional(),
-});
+}).superRefine(validateMfgExpiryDates);
 
 // Editing an existing transaction — deliberately narrow: only the
 // descriptive paperwork fields (a GRN number that wasn't available yet
@@ -139,7 +139,8 @@ export const updateInventoryTransactionSchema = z
     invoiceNo: z.string().max(120).optional(),
     invoiceDate: z.coerce.date().optional(),
   })
-  .refine((v) => Object.values(v).some((val) => val !== undefined), { message: "Provide at least one field to update" });
+  .refine((v) => Object.values(v).some((val) => val !== undefined), { message: "Provide at least one field to update" })
+  .superRefine(validateMfgExpiryDates);
 
 // One "FG transfer to Dispatch" / "Bill transfer to Dispatch from Accounts"
 // row — same field set for both, `type` picks the sheet it belongs to.
@@ -207,7 +208,7 @@ export const importInventoryTransactionsSchema = z.object({
         mfgDate: z.coerce.date().optional(),
         expiryDate: z.coerce.date().optional(),
         remark: z.string().max(500).optional(),
-      }),
+      }).superRefine(validateMfgExpiryDates),
     )
     .min(1)
     .max(2000),

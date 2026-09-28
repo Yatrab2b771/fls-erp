@@ -31,6 +31,7 @@ enum RoleName {
   QA_QC
   DISPATCH
   RND
+  REGULATORY
 }
 
 model User {
@@ -78,6 +79,7 @@ model User {
   inventoryReviewed                InventoryRequest[]         @relation("InventoryRequestReviewedBy")
   inventoryQcChecked               InventoryTransaction[]     @relation("InventoryTxnQcCheckedBy")
   inventoryAccepted                InventoryTransaction[]     @relation("InventoryTxnAcceptedBy")
+  inventoryExpiryReleased          InventoryTransaction[]     @relation("InventoryTxnExpiryReleasedBy")
   inventoryTxnDelivered            InventoryTransaction[]     @relation("InventoryTxnDeliveredBy")
   dispatchQcChecked                DispatchTransfer[]         @relation("DispatchTransferQcCheckedBy")
   notifications                    Notification[]
@@ -111,19 +113,20 @@ model User {
 
   // Recycle Bin — who soft-deleted what. See the model comments above
   // each of these ("Soft delete") and recycle-bin.routes.ts.
-  poMaterialRequirementsDeleted   PoMaterialRequirement[]   @relation("PoMaterialRequirementDeletedBy")
-  purchaseOrderDocumentsDeleted   PurchaseOrderDocument[]   @relation("PurchaseOrderDocumentDeletedBy")
-  purchaseOrderItemsDeleted       PurchaseOrderItem[]       @relation("PurchaseOrderItemDeletedBy")
-  bomPlanItemsDeleted             BomPlanItem[]             @relation("BomPlanItemDeletedBy")
-  rmPlanItemsDeleted              RmPlanItem[]              @relation("RmPlanItemDeletedBy")
-  preInventoryRequirementsDeleted PreInventoryRequirement[] @relation("PreInventoryRequirementDeletedBy")
-  inventoryRequestsDeleted        InventoryRequest[]        @relation("InventoryRequestDeletedBy")
-  inventoryTxnsDeleted            InventoryTransaction[]    @relation("InventoryTransactionDeletedBy")
-  dispatchTransfersDeleted        DispatchTransfer[]        @relation("DispatchTransferDeletedBy")
-  rndTransfersDeleted             RndTransfer[]             @relation("RndTransferDeletedBy")
-  rndStoreTransactionsDeleted     RndStoreTransaction[]     @relation("RndStoreTransactionDeletedBy")
-  qcSampleTransfersDeleted        QcSampleTransfer[]        @relation("QcSampleTransferDeletedBy")
-  qcSampleTransactionsDeleted     QcSampleTransaction[]     @relation("QcSampleTransactionDeletedBy")
+  poMaterialRequirementsDeleted        PoMaterialRequirement[]   @relation("PoMaterialRequirementDeletedBy")
+  purchaseOrderDocumentsDeleted        PurchaseOrderDocument[]   @relation("PurchaseOrderDocumentDeletedBy")
+  purchaseOrderItemsDeleted            PurchaseOrderItem[]       @relation("PurchaseOrderItemDeletedBy")
+  purchaseOrderItemsRegulatoryReviewed PurchaseOrderItem[]       @relation("PurchaseOrderItemRegulatoryReviewedBy")
+  bomPlanItemsDeleted                  BomPlanItem[]             @relation("BomPlanItemDeletedBy")
+  rmPlanItemsDeleted                   RmPlanItem[]              @relation("RmPlanItemDeletedBy")
+  preInventoryRequirementsDeleted      PreInventoryRequirement[] @relation("PreInventoryRequirementDeletedBy")
+  inventoryRequestsDeleted             InventoryRequest[]        @relation("InventoryRequestDeletedBy")
+  inventoryTxnsDeleted                 InventoryTransaction[]    @relation("InventoryTransactionDeletedBy")
+  dispatchTransfersDeleted             DispatchTransfer[]        @relation("DispatchTransferDeletedBy")
+  rndTransfersDeleted                  RndTransfer[]             @relation("RndTransferDeletedBy")
+  rndStoreTransactionsDeleted          RndStoreTransaction[]     @relation("RndStoreTransactionDeletedBy")
+  qcSampleTransfersDeleted             QcSampleTransfer[]        @relation("QcSampleTransferDeletedBy")
+  qcSampleTransactionsDeleted          QcSampleTransaction[]     @relation("QcSampleTransactionDeletedBy")
 
   @@map("users")
 }
@@ -523,15 +526,34 @@ model PurchaseOrderItem {
   // before that run exists (PATCH /:id/planned-plant, PPIC-only).
   plannedPlantId String?
 
-  purchaseOrder  PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  plannedPlant   Plant?          @relation(fields: [plannedPlantId], references: [id])
-  preProduction  PreProduction?
+  // Regulatory's own sign-off, per product line — separate from BD's own
+  // self-declared regulatoryBody/regulatoryStatus on the PurchaseOrder
+  // header (what BD says was filed with FSSAI/AYUSH, unverified). This is
+  // the internal department's real review: PPIC's "Send Plan to
+  // Production" call is hard-blocked until this reads Approved (see
+  // rm-plan.routes.ts / bom-plan.routes.ts), regardless of what BD's own
+  // field says.
+  regulatoryStatus       String? // Approved | Not Approved | Pending (default, unset)
+  regulatoryRemarks      String?
+  regulatoryReviewedById String?
+  regulatoryReviewedAt   DateTime?
+
+  // Set once PPIC's "Send Plan to Production" succeeds (plan CALCULATED +
+  // Plant assigned + Regulatory Approved) — the hard gate PreProduction
+  // creation checks (see pre-production.routes.ts POST /), same idea as
+  // the existing RecipeRequest gap-block just above it.
+  planSentToProductionAt DateTime?
+
+  purchaseOrder        PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  plannedPlant         Plant?          @relation(fields: [plannedPlantId], references: [id])
+  regulatoryReviewedBy User?           @relation("PurchaseOrderItemRegulatoryReviewedBy", fields: [regulatoryReviewedById], references: [id])
+  preProduction        PreProduction?
   // Optional read-only cross-links into the planning modules — see
   // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
-  bomPlans       BomPlan[]
-  rmPlans        RmPlan[]
-  recipeRequests RecipeRequest[]
-  deletedBy      User?           @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
+  bomPlans             BomPlan[]
+  rmPlans              RmPlan[]
+  recipeRequests       RecipeRequest[]
+  deletedBy            User?           @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
 
   @@map("purchase_order_items")
 }
@@ -575,10 +597,10 @@ model PurchaseOrderItem {
 //
 // Three models carry this, replacing the old single 13-stage Batch:
 //   PreProduction  — one per PO line item. Material Received -> Indent
-//                    Issue -> Line Clearance -> Dispensing -> Sample QC
-//                    Approval. Tracks plannedQty vs combinedQty (the
-//                    running total of every ProductionBatch that's
-//                    finished manufacturing so far).
+//                    Issue -> Dispensing -> Line Clearance (Bulk Mfg).
+//                    Tracks plannedQty vs combinedQty (the running total
+//                    of every ProductionBatch that's finished
+//                    manufacturing so far).
 //   ProductionBatch — many per PreProduction. Just the manufacturing run
 //                    itself (Production Execution's own fields) — no
 //                    stage pipeline of its own, just IN_PROGRESS ->
@@ -596,15 +618,18 @@ model PurchaseOrderItem {
 
 enum PreProductionStageId {
   MATERIAL_RECEIVED // Store — covers both material receipt and GRN, same department back-to-back
-  INDENT_ISSUE // PPIC — also carries former Production Plan fields (unit, dispatch plan date)
-  LINE_CLEARANCE // QA_QC — line clearance for the dispensing area, before Dispensing starts
+  INDENT_ISSUE // Production — also carries former Production Plan fields (unit, dispatch plan date)
   DISPENSING // Store — RM/PM dispensing & issue to Production
-  // Pre-production hard gate: a sample of what Dispensing just measured
-  // out goes to QC (see QcSampleTransfer/QcSampleTransaction below,
-  // same sent->confirm->consume shape as RndTransfer/RndStoreTransaction)
-  // and no ProductionBatch can be created until QC actually Approves it
-  // here — not just "not on Hold" like the two QA gates further down,
-  // a real Approved is required (see transition.ts).
+  // Pre-production hard gate — the field/enum value name (sampleQcStatus/
+  // SAMPLE_QC_APPROVAL) predates a rename: this is now "Line Clearance —
+  // Bulk Manufacturing" (BMR-1.docx 4.0), a checklist (Production's own
+  // column plus QA's — see LINE_CLEARANCE_BULK_MFG_ITEMS in
+  // batch-checklists.ts) gating whether the bulk manufacturing run can
+  // start, not a lab-tested physical sample. The earlier, separate
+  // pre-Dispensing Line Clearance stage (BMR 1.0) was removed — per the
+  // client, only this one check belongs in this tier. No ProductionBatch
+  // can be created until this reads a real "Approved" — not just "not on
+  // Hold" like the QA gates further down (see transition.ts).
   SAMPLE_QC_APPROVAL // QA_QC
 }
 
@@ -654,9 +679,10 @@ model PreProduction {
   unit               String? // manufacturing unit code, e.g. 22/41/48/59
   dispatchPlanDate   DateTime?
 
-  // Line Clearance — QA_QC. A hard gate: must literally read "Approved"
-  // to let FORWARD advance past it (see transition.ts) — Hold and Not
-  // Approved both keep this row here.
+  // LEGACY — the pre-Dispensing Line Clearance stage these belonged to
+  // was removed (see PreProductionStageId's own comment); kept only so
+  // any row that already has a value here keeps reading correctly. No
+  // longer settable by any caller.
   lineClearanceStatus  String? // Approved | Not Approved | Hold
   lineClearanceRemarks String?
 
@@ -666,11 +692,11 @@ model PreProduction {
   pmIssuedDate        DateTime?
   pmDispensingRemarks String?
 
-  // Sample QC Approval — QA_QC. The stage's own sign-off fields, same
-  // "status + remarks" shape every other gate uses — the actual sample
-  // handoff/testing detail lives in QcSampleTransfer/QcSampleTransaction
-  // below, this is just the gate itself. Same hard-gate shape as
-  // lineClearanceStatus above.
+  // Line Clearance — Bulk Manufacturing (BMR-1.docx 4.0) — Production's
+  // own sign-off fields, same "status + remarks" shape every other gate
+  // uses. Field names predate the stage's rename from "Sample QC
+  // Approval" — see PreProductionStageId's own comment for why they were
+  // kept as-is. Same hard-gate shape lineClearanceStatus above used to be.
   sampleQcStatus  String? // Approved | Not Approved | Hold
   sampleQcRemarks String?
 
@@ -757,15 +783,15 @@ model ProductionBatch {
   // too, not just per pooled lot. ---
   currentStageId CombinedLotStageId @default(IPQC)
 
-  ipqcStatus  String?
-  ipqcRemarks String?
+  ipqcStatus               String?
+  ipqcRemarks              String?
   // Bulk Reconciliation (BMR-1.docx 8.0 / Production Process Flow.docx's
   // "Bulk / Semi-Finished Product" step) — captured here since IPQC is
   // the first stage to weigh the batch's own bulk. yieldPct/processLoss
   // derived, never stored — see computeBulkReconciliation in batch.engine.ts.
-  bulkTheoreticalWeight   Float?
-  bulkActualWeight        Float?
-  bulkQcSampleWeight      Float?
+  bulkTheoreticalWeight    Float?
+  bulkActualWeight         Float?
+  bulkQcSampleWeight       Float?
   bulkTransferToPackingQty Float?
 
   mfgQaStatus    String?
@@ -819,10 +845,10 @@ model ProductionBatch {
   // captured as extra fields on Dispatch Plan rather than a separate
   // stage, since it's the same Dispatch department doing it immediately
   // before recording the dispatch itself.
-  pickedBy    String?
-  pickingDate DateTime?
-  loadedBy    String?
-  loadingDate DateTime?
+  pickedBy           String?
+  pickingDate        DateTime?
+  loadedBy           String?
+  loadingDate        DateTime?
 
   createdById String
   createdAt   DateTime @default(now())
@@ -1810,15 +1836,15 @@ model Plant {
   // admin one-off) simply isn't paired to anything.
   dayStoreId String? @unique
 
-  createdBy          User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
-  dayStore           DayStore?              @relation(fields: [dayStoreId], references: [id])
-  transactions       InventoryTransaction[]
-  requests           InventoryRequest[]
-  dispatchTransfers  DispatchTransfer[]
-  preProductions     PreProduction[]
-  plannedForPoItems  PurchaseOrderItem[]
-  stockTransfersIn   StockTransfer[]        @relation("StockTransferDestPlant")
-  stockTransfersOut  StockTransfer[]        @relation("StockTransferSourcePlant")
+  createdBy         User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
+  dayStore          DayStore?              @relation(fields: [dayStoreId], references: [id])
+  transactions      InventoryTransaction[]
+  requests          InventoryRequest[]
+  dispatchTransfers DispatchTransfer[]
+  preProductions    PreProduction[]
+  plannedForPoItems PurchaseOrderItem[]
+  stockTransfersIn  StockTransfer[]        @relation("StockTransferDestPlant")
+  stockTransfersOut StockTransfer[]        @relation("StockTransferSourcePlant")
 
   @@map("plants")
 }
@@ -2170,14 +2196,22 @@ model InventoryTransaction {
 
   // Traceability fields off Sanjay's physical stock sheets — batch/GRN
   // identify *which* delivery or lot this row is, mfg/expiry track shelf
-  // life. All optional and free-standing (no expiry-driven logic anywhere
-  // yet — just captured so it's on record and doesn't need re-entry
-  // later). remark is a free-text note distinct from qcNote (QC's own).
+  // life. remark is a free-text note distinct from qcNote (QC's own).
   batchNo    String?
   grnNo      String?
   mfgDate    DateTime?
   expiryDate DateTime?
   remark     String?
+
+  // Quarantine, expiry leg — an ACCEPTED row whose expiryDate has passed
+  // stops counting toward stock-on-hand automatically (see stock.ts's
+  // getOnHandByItemId), same as a fresh, not-yet-QC'd delivery — both
+  // show up together on GET /inventory/quarantine. Set only if QA/QC
+  // explicitly reviews the expired batch and says it still counts (PATCH
+  // /transactions/:id/release-expiry) — null forever otherwise, which is
+  // the expected default outcome for something actually expired.
+  expiryReleasedById String?
+  expiryReleasedAt   DateTime?
 
   // Store department's own GRN gaps (Software Before/After Report,
   // 16 Sept 2026, §4) — the vendor's rate for this specific delivery
@@ -2201,6 +2235,7 @@ model InventoryTransaction {
   createdBy                User                     @relation(fields: [createdById], references: [id])
   qcCheckedBy              User?                    @relation("InventoryTxnQcCheckedBy", fields: [qcCheckedById], references: [id])
   acceptedBy               User?                    @relation("InventoryTxnAcceptedBy", fields: [acceptedById], references: [id])
+  expiryReleasedBy         User?                    @relation("InventoryTxnExpiryReleasedBy", fields: [expiryReleasedById], references: [id])
   deliveredBy              User?                    @relation("InventoryTxnDeliveredBy", fields: [deliveredById], references: [id])
   dayStore                 DayStore?                @relation(fields: [dayStoreId], references: [id])
   plant                    Plant?                   @relation(fields: [plantId], references: [id])

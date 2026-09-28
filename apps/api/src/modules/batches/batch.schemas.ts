@@ -6,7 +6,6 @@ const dateField = z.coerce.date().optional();
 const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const PACK_APPROVAL_STATUSES = ["Approved", "Not approved", "Hold"] as const;
 const SAMPLE_QC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
-const LINE_CLEARANCE_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const IPQC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const BULK_QC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const COA_RESULTS = ["Complies", "Does Not Comply"] as const;
@@ -133,24 +132,23 @@ export const dispensingConsumptionSchema = z
 // block, same two-tier severity as the QA_GATE_* stages, but unlike
 // those this stage blocks on anything other than "Approved" (not just
 // "Hold") — the business rule confirmed by the client is that production
-// simply cannot start on an unapproved sample.
+// simply cannot start without it.
+//
+// Renamed from "Sample QC Approval" to "Line Clearance — Bulk
+// Manufacturing" (BMR-1.docx 4.0) — the itemized checklist behind this
+// sign-off is LINE_CLEARANCE_BULK_MFG_ITEMS (see batch-checklists.ts and
+// PATCH /:id/checklist), Production's own column plus QA's, same shape
+// as the dispensing-area Line Clearance earlier in this pipeline. Field
+// names (sampleQcStatus/sampleQcRemarks) kept as-is to avoid a wider
+// rename across every module that reads them.
 export const sampleQcApprovalFieldsSchema = z.object({
   sampleQcStatus: z.enum(SAMPLE_QC_STATUSES).optional(),
   sampleQcRemarks: z.string().max(1000).optional(),
 });
 
-// Same "must literally read Approved" shape as Sample QC Approval above
-// — see the client's Production Process Flow doc and pre-production-
-// stage.ts's own comment on why this was added.
-export const lineClearanceFieldsSchema = z.object({
-  lineClearanceStatus: z.enum(LINE_CLEARANCE_STATUSES).optional(),
-  lineClearanceRemarks: z.string().max(1000).optional(),
-});
-
 export const PRE_PRODUCTION_STAGE_FIELD_SCHEMA: Partial<Record<PreProductionStageId, z.AnyZodObject>> = {
   MATERIAL_RECEIVED: materialReceivedFieldsSchema,
   INDENT_ISSUE: indentIssueFieldsSchema,
-  LINE_CLEARANCE: lineClearanceFieldsSchema,
   DISPENSING: dispensingFieldsSchema,
   SAMPLE_QC_APPROVAL: sampleQcApprovalFieldsSchema,
 };

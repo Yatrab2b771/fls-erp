@@ -1,14 +1,17 @@
 import * as XLSX from "xlsx";
 import { formatEmployeeId } from "./format";
+import { COMBINED_LOT_STAGE_LABEL } from "./combinedLotStage";
 import type {
   CustomerReconciliationRow,
   DayStoreStockLine,
   DispatchTransfer,
+  FgStockRow,
   InventoryItem,
   InventoryRequest,
   InventoryStockLine,
   InventoryTransaction,
   ItemStockByLocation,
+  MaterialConsumptionRow,
   MaterialReconciliationRow,
   PersonRef,
   PlantStockLine,
@@ -66,6 +69,44 @@ export function exportStockReport(rows: InventoryStockLine[]) {
       "On Hand": r.onHand,
     })),
     `FLS_Inventory_Stock_${todayStamp()}.xlsx`,
+  );
+}
+
+export function exportFgStockReport(rows: FgStockRow[]) {
+  download(
+    "FG Stock on Hand",
+    rows.map((r) => ({
+      Customer: r.customerName,
+      Product: r.productName,
+      "PO Number": r.poNumber ?? "",
+      "Batch / Lot": r.label,
+      Stage: COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId,
+      Unit: r.unit,
+      Produced: r.producedQty,
+      Dispatched: r.dispatchedQty,
+      "On Hand": r.onHandQty,
+      "Reached FG Store": r.fgStoreReceivedDate ? new Date(r.fgStoreReceivedDate).toLocaleDateString() : "",
+    })),
+    `FLS_FG_Stock_${todayStamp()}.xlsx`,
+  );
+}
+
+export function exportMaterialConsumptionReport(rows: MaterialConsumptionRow[]) {
+  download(
+    "Material Consumption",
+    rows.map((r) => ({
+      "PO Number": r.poNumber ?? "",
+      Customer: r.customerName,
+      Product: r.productName,
+      "Batch No": r.batchNo ?? "",
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Unit: r.unit,
+      Consumed: r.consumedQty,
+      Wasted: r.wastedQty,
+      Rejected: r.rejectedQty,
+    })),
+    `FLS_Material_Consumption_${todayStamp()}.xlsx`,
   );
 }
 

@@ -37,7 +37,17 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
     // already included here with no special-casing needed. rejectedQty
     // is summed alongside quantity so a partially-rejected delivery
     // (see qcReviewSchema) only counts its actually-usable remainder.
-    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "RECEIVED", receiptStatus: "ACCEPTED" }, _sum: { quantity: true, rejectedQty: true } }),
+    // The OR clause is the expiry-quarantine gate — an ACCEPTED row
+    // whose expiryDate has already passed stops counting the instant it
+    // expires (live, on every read, no background job), same as a fresh
+    // delivery still awaiting its first QC check — unless QA/QC has
+    // explicitly released it (expiryReleasedAt set). Both buckets show
+    // up together on GET /inventory/quarantine.
+    db.inventoryTransaction.groupBy({
+      by: ["itemId"],
+      where: { ...itemFilter, type: "RECEIVED", receiptStatus: "ACCEPTED", OR: [{ expiryDate: null }, { expiryDate: { gte: new Date() } }, { expiryReleasedAt: { not: null } }] },
+      _sum: { quantity: true, rejectedQty: true },
+    }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_RND" }, _sum: { quantity: true } }),

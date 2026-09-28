@@ -5,8 +5,6 @@ import { useAuth } from "../lib/auth";
 import {
   useAssignPreProductionPlant,
   useCompleteProductionBatch,
-  useConfirmQcSampleTransfer,
-  useConsumeQcSample,
   useCreatePlant,
   useCreateProductionBatch,
   useDispensingRequirements,
@@ -15,8 +13,6 @@ import {
   usePlants,
   usePreProduction,
   useProductionBatches,
-  useQcSampleSummary,
-  useReturnQcSample,
   useTransitionPreProductionStage,
   useUpdatePreProductionChecklist,
   useUpdateProductionBatch,
@@ -31,7 +27,7 @@ import { DelayBadge } from "../components/Badges";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
-import type { ChecklistRow, DispensingRequirementItem, PreProduction, PreProductionStageId, ProductionBatch, QcSampleConsumeReason } from "../lib/types";
+import type { ChecklistRow, DispensingRequirementItem, PreProduction, PreProductionStageId, ProductionBatch } from "../lib/types";
 
 // --- Tier 1 of the three-tier production pipeline — see types.ts's own
 // comment block above PreProduction/ProductionBatch/CombinedLot. This
@@ -323,8 +319,6 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
       if (result.dispensingShortfall && result.dispensingShortfall.length > 0) {
         const list = result.dispensingShortfall.map((i) => `${i.itemName} (needs ${i.requiredQty} ${i.unit}, have ${i.consumedQty})`).join("; ");
         toast.error(`Saved — still short: ${list}`);
-      } else if (stage === "LINE_CLEARANCE" && result.currentStageId === "LINE_CLEARANCE" && result.lineClearanceStatus !== "Approved") {
-        toast.error(`Saved — can't move on to ${PRE_PRODUCTION_STAGE_LABEL[getForwardTarget(stage)]} until QC sets this to Approved.`);
       } else if (stage === "SAMPLE_QC_APPROVAL" && result.sampleQcStatus !== "Approved") {
         // This stage completes in place either way (its own terminal
         // stage — see pre-production-stage.ts), so currentStageId alone
@@ -383,11 +377,16 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
 
         {canAct && stage === "DISPENSING" && <DispensingConsumptionEditor preProductionId={run.id} hasPlant={!!run.plantId} lines={consumptionLines} onChange={setConsumptionLines} />}
 
-        {stage === "SAMPLE_QC_APPROVAL" && <QcSampleApprovalPanel preProductionId={run.id} />}
-
-        {stage === "LINE_CLEARANCE" && (
-          <ChecklistPanelForPreProduction preProductionId={run.id} title="Line Clearance Checklist — dispensing area (per BMR-1, 1.0)" deptLabel="Store" canEditDept={hasRole("STORE")} rows={run.lineClearanceChecklist} />
+        {stage === "SAMPLE_QC_APPROVAL" && (
+          <ChecklistPanelForPreProduction
+            preProductionId={run.id}
+            title="Line Clearance Checklist — bulk manufacturing area (per BMR-1, 4.0)"
+            deptLabel="Production"
+            canEditDept={hasRole("PRODUCTION")}
+            rows={run.bulkMfgLineClearanceChecklist}
+          />
         )}
+
 
         {canAct && stage === "INDENT_ISSUE" && <IndentRequestLinesEditor preProductionId={run.id} lines={indentLines} onChange={setIndentLines} />}
 
@@ -604,176 +603,6 @@ function DispensingConsumptionEditor({
   );
 }
 
-const QC_CONSUME_REASON_OPTIONS = [
-  { id: "TESTING", name: "Testing" },
-  { id: "WASTAGE", name: "Wastage" },
-  { id: "REJECTED", name: "Rejected" },
-];
-
-function QcSampleApprovalPanel({ preProductionId }: { preProductionId: string }) {
-  const { hasRole } = useAuth();
-  // RND alongside QA_QC — see qc-sample.routes.ts's own role gate on
-  // confirm/consume/return (inward QC access extends to this sample
-  // lifecycle too). Independent from the stage's own FORWARD/REJECT
-  // gate above (PRE_PRODUCTION_STAGE_ROLE.SAMPLE_QC_APPROVAL stays
-  // QA_QC-only — R&D can test the sample, only QA/QC signs off the gate).
-  const canAct = hasRole("QA_QC", "RND");
-  const { data: summary } = useQcSampleSummary(preProductionId);
-  const confirmTransfer = useConfirmQcSampleTransfer(preProductionId);
-  const consume = useConsumeQcSample(preProductionId);
-  const returnSample = useReturnQcSample(preProductionId);
-  const toast = useToast();
-
-  const [consumeItemId, setConsumeItemId] = useState("");
-  const [consumeQty, setConsumeQty] = useState("");
-  const [consumeUnit, setConsumeUnit] = useState("");
-  const [consumeReason, setConsumeReason] = useState<QcSampleConsumeReason>("TESTING");
-  const [consumeNote, setConsumeNote] = useState("");
-
-  const [returnItemId, setReturnItemId] = useState("");
-  const [returnQty, setReturnQty] = useState("");
-  const [returnUnit, setReturnUnit] = useState("");
-
-  if (!summary) return null;
-
-  async function handleConfirm(transferId: string) {
-    try {
-      await confirmTransfer.mutateAsync(transferId);
-      toast.success("Receipt confirmed.");
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not confirm");
-    }
-  }
-
-  const onHandRows = Object.entries(summary.onHand)
-    .map(([itemId, qty]) => {
-      const txn = summary.transactions.find((t) => t.itemId === itemId);
-      return { itemId, itemName: txn?.itemName ?? itemId.slice(0, 8), itemCode: txn?.itemCode ?? null, unit: txn?.unit ?? "", onHand: qty };
-    })
-    .filter((r) => r.onHand !== 0);
-  const itemOptions = onHandRows.map((r) => ({ id: r.itemId, name: `${r.itemName} (${r.onHand} ${r.unit} on hand)`, code: r.itemCode }));
-  const pendingToQc = summary.transfers.filter((t) => t.direction === "TO_QC" && t.status === "PENDING");
-
-  async function handleConsume() {
-    const item = onHandRows.find((r) => r.itemId === consumeItemId);
-    if (!item || !consumeQty || Number(consumeQty) <= 0) return;
-    try {
-      await consume.mutateAsync({ itemId: consumeItemId, quantity: Number(consumeQty), unit: consumeUnit || item.unit, consumeReason, note: consumeNote || undefined });
-      setConsumeItemId("");
-      setConsumeQty("");
-      setConsumeUnit("");
-      setConsumeNote("");
-      toast.success("Logged.");
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not log result");
-    }
-  }
-
-  async function handleReturn() {
-    const item = onHandRows.find((r) => r.itemId === returnItemId);
-    if (!item || !returnQty || Number(returnQty) <= 0) return;
-    try {
-      await returnSample.mutateAsync({ itemId: returnItemId, quantity: Number(returnQty), unit: returnUnit || item.unit });
-      setReturnItemId("");
-      setReturnQty("");
-      setReturnUnit("");
-      toast.success("Leftover returned to the Plant.");
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not return leftover");
-    }
-  }
-
-  return (
-    <div className="mt-4 overflow-hidden rounded-xl border border-sky-200">
-      <div className="flex items-center gap-1.5 bg-sky-100/70 px-3 py-2">
-        <FlaskConical className="h-3.5 w-3.5 text-sky-700" strokeWidth={2.25} />
-        <p className="text-xs font-bold text-sky-800">QC Sample — sent from Dispensing, confirm receipt then log the test result</p>
-      </div>
-
-      <div className="space-y-3 bg-sky-50/40 p-3">
-        {pendingToQc.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">Awaiting confirmation</p>
-            <div className="space-y-1.5">
-              {pendingToQc.map((t) => (
-                <div key={t.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-white px-3 py-2 text-xs shadow-soft">
-                  <span className="font-bold text-slate-700">
-                    {t.itemName}{" "}
-                    <span className="font-mono font-normal text-slate-500">
-                      {t.quantity} {t.unit}
-                    </span>
-                  </span>
-                  {canAct ? (
-                    <button type="button" className="btn-primary btn-sm" disabled={confirmTransfer.isPending} onClick={() => handleConfirm(t.id)}>
-                      <Check className="h-3 w-3" strokeWidth={2.5} /> Confirm receipt
-                    </button>
-                  ) : (
-                    <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">Awaiting QC</span>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {onHandRows.length > 0 && (
-          <div>
-            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-slate-400">On hand at QC — this run</p>
-            <div className="divide-y divide-slate-100 rounded-lg border border-slate-100 bg-white px-3 shadow-soft">
-              {onHandRows.map((r) => (
-                <div key={r.itemId} className="flex items-center justify-between py-2 text-xs">
-                  <span className="text-slate-600">{r.itemName}</span>
-                  <span className="font-mono font-bold text-slate-700">
-                    {r.onHand} {r.unit}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {canAct && onHandRows.length > 0 && (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div className="rounded-lg border border-slate-100 bg-white p-2.5 shadow-soft">
-              <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-slate-400">Log test result</p>
-              <div className="space-y-1.5">
-                <ItemPicker items={itemOptions} value={consumeItemId} onChange={setConsumeItemId} placeholder="— Item —" />
-                <div className="flex gap-1.5">
-                  <input className="field font-mono" type="number" min="0" step="any" placeholder="Qty" value={consumeQty} onChange={(e) => setConsumeQty(e.target.value)} />
-                  <input className="field" placeholder="Unit" value={consumeUnit} onChange={(e) => setConsumeUnit(e.target.value)} />
-                </div>
-                <ItemPicker items={QC_CONSUME_REASON_OPTIONS} value={consumeReason} onChange={(v) => setConsumeReason(v as QcSampleConsumeReason)} />
-                <input className="field" placeholder="Note (optional)" value={consumeNote} onChange={(e) => setConsumeNote(e.target.value)} />
-                <button type="button" className="btn-primary btn-sm w-full justify-center" disabled={consume.isPending} onClick={handleConsume}>
-                  {consume.isPending ? "Logging…" : "Log result"}
-                </button>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-slate-100 bg-white p-2.5 shadow-soft">
-              <p className="mb-2 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                <Undo2 className="h-3 w-3" strokeWidth={2.5} /> Return leftover to Plant
-              </p>
-              <div className="space-y-1.5">
-                <ItemPicker items={itemOptions} value={returnItemId} onChange={setReturnItemId} placeholder="— Item —" />
-                <div className="flex gap-1.5">
-                  <input className="field font-mono" type="number" min="0" step="any" placeholder="Qty" value={returnQty} onChange={(e) => setReturnQty(e.target.value)} />
-                  <input className="field" placeholder="Unit" value={returnUnit} onChange={(e) => setReturnUnit(e.target.value)} />
-                </div>
-                <button type="button" className="btn-ghost btn-sm w-full justify-center" disabled={returnSample.isPending} onClick={handleReturn}>
-                  {returnSample.isPending ? "Returning…" : "Return leftover"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {pendingToQc.length === 0 && onHandRows.length === 0 && <p className="text-xs text-slate-400">Nothing sent to QC yet for this run.</p>}
-      </div>
-    </div>
-  );
-}
-
 // A checklist panel — shared shape with CombinedLotDetailPage's own
 // bulk-mfg version, just this run's dispensing-area rows and Store's
 // column instead of Production's.
@@ -979,10 +808,13 @@ function ConsumptionHistory({ run }: { run: PreProduction }) {
 
   return (
     <div className="card overflow-hidden">
-      <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
+      <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-4 py-3">
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
           <Beaker className="h-3.5 w-3.5" /> RM/PM Consumption — Dispensing Sheet
         </h3>
+        <Link to={`/material-consumption?preProductionId=${run.id}`} className="text-[10px] font-bold text-brand-600 hover:underline">
+          Full report
+        </Link>
       </div>
       <div className="divide-y divide-slate-100">
         {run.consumptions.map((c) => (

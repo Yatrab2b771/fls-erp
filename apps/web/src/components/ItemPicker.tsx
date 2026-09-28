@@ -68,11 +68,14 @@ export function ItemPicker({
 
   const q = query.trim().toLowerCase();
   const matchesQuery = (i: ItemOption) => i.name.toLowerCase().includes(q) || !!i.code?.toLowerCase().includes(q);
-  // Capped at 50 rendered rows — with 1,000+ items, rendering every match
-  // as the user types their first character would just recreate the
-  // original problem in DOM form. A narrower query surfaces the real
-  // item within a couple of keystrokes.
-  const matches = (q ? items.filter(matchesQuery) : items).slice(0, 50);
+  // Capped at 200 rendered rows — with 1,000+ items (the RM/PM catalog),
+  // rendering every match as the user types their first character would
+  // just recreate the original problem in DOM form. A narrower query
+  // surfaces the real item within a couple of keystrokes. 200 comfortably
+  // covers small-to-medium lists (Customers, Vendors, ...) in full, so
+  // scrolling never appears to "get stuck" for those — only genuinely
+  // huge catalogs ever hit the cap and need a search term.
+  const matches = (q ? items.filter(matchesQuery) : items).slice(0, 200);
   const totalMatchCount = q ? items.filter(matchesQuery).length : items.length;
 
   function select(item: ItemOption) {

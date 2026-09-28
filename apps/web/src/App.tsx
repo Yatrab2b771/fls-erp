@@ -12,6 +12,12 @@ import { VendorPurchaseOrderDetailPage } from "./pages/VendorPurchaseOrderDetail
 import { StockTransfersPage } from "./pages/StockTransfersPage";
 import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
+import { PpicPlanningDetailPage } from "./pages/PpicPlanningDetailPage";
+import { BdPlanningDetailPage } from "./pages/BdPlanningDetailPage";
+import { PurchasePlanningDetailPage } from "./pages/PurchasePlanningDetailPage";
+import { RegulatoryPlanningDetailPage } from "./pages/RegulatoryPlanningDetailPage";
+import { StorePlanningDetailPage } from "./pages/StorePlanningDetailPage";
+import { MaterialConsumptionReportPage } from "./pages/MaterialConsumptionReportPage";
 import { PoFullReportPage } from "./pages/PoFullReportPage";
 import { PreProductionDetailPage } from "./pages/PreProductionDetailPage";
 import { CombinedLotDetailPage } from "./pages/CombinedLotDetailPage";
@@ -26,7 +32,6 @@ import { UsersPage } from "./pages/UsersPage";
 import { RecycleBinPage } from "./pages/RecycleBinPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
-import { QcDashboardPage } from "./pages/QcDashboardPage";
 import { RndPage } from "./pages/RndPage";
 import { RndStorePage } from "./pages/RndStorePage";
 import { RecycleStorePage } from "./pages/RecycleStorePage";
@@ -53,6 +58,12 @@ export default function App() {
       <AppLayout>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/ppic-planning/:metric" element={<PpicPlanningDetailPage />} />
+          <Route path="/bd-planning/:metric" element={<BdPlanningDetailPage />} />
+          <Route path="/purchase-planning/:metric" element={<PurchasePlanningDetailPage />} />
+          <Route path="/regulatory-planning/:metric" element={<RegulatoryPlanningDetailPage />} />
+          <Route path="/store-planning/:metric" element={<StorePlanningDetailPage />} />
+          <Route path="/material-consumption" element={<MaterialConsumptionReportPage />} />
           <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
           <Route path="/customers" element={<CustomersPage />} />
           <Route path="/vendors" element={<VendorsPage />} />
@@ -75,7 +86,10 @@ export default function App() {
           <Route path="/recycle-bin" element={<RecycleBinPage />} />
           <Route path="/system-health" element={<SystemHealthPage />} />
           <Route path="/audit-log" element={<AuditLogPage />} />
-          <Route path="/qc-dashboard" element={<QcDashboardPage />} />
+          {/* QC's checkpoint breakdown moved onto "/" itself — old
+              bookmarks/links to this path fall through to the catch-all
+              below. */}
+          <Route path="/qc-dashboard" element={<Navigate to="/" replace />} />
           <Route path="/rnd" element={<RndPage />} />
           <Route path="/rnd-store" element={<RndStorePage />} />
           <Route path="/recycle-store" element={<RecycleStorePage />} />

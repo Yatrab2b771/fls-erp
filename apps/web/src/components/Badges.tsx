@@ -12,7 +12,6 @@ const STAGE_LABEL: Record<AnyStageId, string> = { ...PRE_PRODUCTION_STAGE_LABEL,
 const STAGE_COLOR: Record<AnyStageId, string> = {
   MATERIAL_RECEIVED: "bg-amber-50 text-amber-700 border-amber-200",
   INDENT_ISSUE: "bg-slate-100 text-slate-600 border-slate-200",
-  LINE_CLEARANCE: "bg-sky-50 text-sky-700 border-sky-200",
   DISPENSING: "bg-amber-50 text-amber-700 border-amber-200",
   SAMPLE_QC_APPROVAL: "bg-sky-50 text-sky-700 border-sky-200",
   IPQC: "bg-sky-50 text-sky-700 border-sky-200",
@@ -29,7 +28,6 @@ const STAGE_COLOR: Record<AnyStageId, string> = {
 const STAGE_DOT: Record<AnyStageId, string> = {
   MATERIAL_RECEIVED: "bg-amber-500",
   INDENT_ISSUE: "bg-slate-400",
-  LINE_CLEARANCE: "bg-sky-500",
   DISPENSING: "bg-amber-500",
   SAMPLE_QC_APPROVAL: "bg-sky-500",
   IPQC: "bg-sky-500",

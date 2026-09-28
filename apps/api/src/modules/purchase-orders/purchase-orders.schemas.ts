@@ -39,12 +39,39 @@ export const createPurchaseOrderSchema = z.object({
 
 export const updatePurchaseOrderSchema = createPurchaseOrderSchema.omit({ customerId: true, items: true }).partial();
 
+// The regulatory body/status a product line was actually applied
+// against (FSSAI/AYUSH, Applied/Not Applied/Issued) — BD can set this at
+// intake, but Regulatory is the department that actually knows this
+// information day to day, so they can set/correct it too, right where
+// they're about to Approve/Not Approve. Separate, narrow-scope route
+// from PATCH /:id (BD-only, whole-PO edit) so Regulatory only ever
+// touches this one field pair, never anything else on the PO.
+export const setRegulatoryBodySchema = z.object({
+  regulatoryBody: regulatoryBodyField,
+  regulatoryStatus: z.enum(REGULATORY_STATUSES).optional(),
+});
+
 export const updatePurchaseOrderItemSchema = purchaseOrderItemSchema.partial();
 
 // PPIC's own planning call — which Plant (paired 1:1 with a real Store,
 // see Plant.dayStoreId) this product's production will happen at, set
 // before Production ever creates a PreProduction run. null clears it.
 export const assignPlannedPlantSchema = z.object({ plantId: z.string().uuid().nullable() });
+
+// Regulatory's own review of one product line — separate from BD's own
+// self-declared regulatoryBody/regulatoryStatus on the PurchaseOrder
+// header (see PurchaseOrderItem.regulatoryStatus's own schema comment).
+// A reason is required on "Not Approved", same "don't bounce it back
+// silently" rule reviewPurchaseOrderSchema's own REJECTED uses.
+export const regulatoryReviewSchema = z
+  .object({
+    status: z.enum(["Approved", "Not Approved"]),
+    remarks: z.string().max(1000).optional(),
+  })
+  .refine((data) => data.status !== "Not Approved" || !!data.remarks?.trim(), {
+    message: "A reason is required when marking a product Not Approved",
+    path: ["remarks"],
+  });
 
 // BD Approve/Reject — the one review action a Draft PO gets before it's
 // forwarded to PPIC/RM to release and plan against. A reason is required
@@ -109,3 +136,5 @@ export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>
 export type UpdatePurchaseOrderItemInput = z.infer<typeof updatePurchaseOrderItemSchema>;
 export type ReviewPurchaseOrderInput = z.infer<typeof reviewPurchaseOrderSchema>;
 export type AssignPlannedPlantInput = z.infer<typeof assignPlannedPlantSchema>;
+export type RegulatoryReviewInput = z.infer<typeof regulatoryReviewSchema>;
+export type SetRegulatoryBodyInput = z.infer<typeof setRegulatoryBodySchema>;

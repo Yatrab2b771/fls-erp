@@ -338,6 +338,7 @@ export function PackagingBomPage() {
                         {COST_RATE_LABEL[key]}
                         <input
                           type="number"
+                          min="0"
                           step="any"
                           className="field w-16 !py-1 font-mono text-xs"
                           value={costRates[key]}

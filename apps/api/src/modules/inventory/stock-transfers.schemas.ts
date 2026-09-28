@@ -6,6 +6,10 @@ import { z } from "zod";
 // same for destDayStoreId/destPlantId matching destinationType (both
 // null means WAREHOUSE). A Plant source can't target another Plant — a
 // return goes back to a store or the Warehouse, never plant-to-plant.
+// A Day Store source can't target another Day Store either (removed) —
+// a store only ever sends unused material back to the Warehouse or on
+// to a Plant now; DAY_STORE as a destinationType still exists for a
+// Plant's own return-to-store leg.
 export const createStockTransferSchema = z
   .object({
     itemId: z.string().uuid(),
@@ -43,9 +47,9 @@ export const createStockTransferSchema = z
     message: "A Warehouse destination doesn't take a Day Store or Plant",
     path: ["destinationType"],
   })
-  .refine((data) => !(data.sourceType === "DAY_STORE" && data.destinationType === "DAY_STORE" && data.destDayStoreId === data.sourceDayStoreId), {
-    message: "Source and destination can't be the same Day Store",
-    path: ["destDayStoreId"],
+  .refine((data) => !(data.sourceType === "DAY_STORE" && data.destinationType === "DAY_STORE"), {
+    message: "Day-Store-to-Day-Store transfers aren't supported — send back to the Warehouse or on to a Plant instead",
+    path: ["destinationType"],
   });
 
 export type CreateStockTransferInput = z.infer<typeof createStockTransferSchema>;

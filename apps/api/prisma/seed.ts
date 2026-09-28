@@ -13,6 +13,7 @@ const DEMO_USERS: { email: string; fullName: string; role: RoleName }[] = [
   { email: "qa_qc@fls.local", fullName: "QA/QC Dept. Demo", role: RoleName.QA_QC },
   { email: "dispatch@fls.local", fullName: "Dispatch Dept. Demo", role: RoleName.DISPATCH },
   { email: "rnd@fls.local", fullName: "R&D Dept. Demo", role: RoleName.RND },
+  { email: "regulatory@fls.local", fullName: "Regulatory Dept. Demo", role: RoleName.REGULATORY },
 ];
 
 async function seedRoles() {

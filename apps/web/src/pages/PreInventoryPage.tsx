@@ -14,6 +14,7 @@ import {
   useSetRequirementPurchase,
 } from "../lib/hooks";
 import type { InventoryCategory, PreInventoryRequirement } from "../lib/types";
+import { requirementStatus, REQUIREMENT_STATUS_LABEL, type RequirementStatus } from "../lib/purchasePlanning";
 import { parsePurchaseLogWorkbook, parseRequirementWorkbook } from "../lib/inventoryImport";
 import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportRequirementsReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
@@ -33,17 +34,6 @@ const CATEGORY_ITEMS = [
 const CATEGORY_FILTER_ITEMS = [{ id: "", name: "All Categories" }, ...CATEGORY_ITEMS];
 const CATEGORY_LABEL: Record<InventoryCategory, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
-// S2 ("what's already available") isn't a step any more — currentStock/
-// shortQty come live off the real stock ledger on every fetch (see
-// pre-inventory.routes.ts), so a requirement is always immediately one
-// of these three, never "waiting on someone."
-type RequirementStatus = "COVERED" | "SHORTFALL" | "ORDERED";
-
-function requirementStatus(r: PreInventoryRequirement): RequirementStatus {
-  if (r.shortQty <= 0) return "COVERED";
-  return r.poNumber ? "ORDERED" : "SHORTFALL";
-}
-
 // A starting point, not a real numbering scheme — Purchase's own PO
 // series lives outside this system, so this only needs to save typing
 // on the common case, not be authoritative. Freely editable in the form.
@@ -58,14 +48,8 @@ const STATUS_STYLE: Record<RequirementStatus, string> = {
   SHORTFALL: "bg-amber-50 text-amber-700 border-amber-200",
   ORDERED: "bg-brand-50 text-brand-700 border-brand-200",
 };
-const STATUS_LABEL: Record<RequirementStatus, string> = {
-  COVERED: "Fully Covered",
-  SHORTFALL: "Shortfall — Awaiting PO",
-  ORDERED: "PO Logged",
-};
-
 function StatusBadge({ status }: { status: RequirementStatus }) {
-  return <span className={`pill ${STATUS_STYLE[status]}`}>{STATUS_LABEL[status]}</span>;
+  return <span className={`pill ${STATUS_STYLE[status]}`}>{REQUIREMENT_STATUS_LABEL[status]}</span>;
 }
 
 export function PreInventoryPage() {

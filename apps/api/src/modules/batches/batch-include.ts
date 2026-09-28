@@ -132,6 +132,24 @@ function buildPreProductionChecklist(rows: PreProductionWithRelations["checklist
   }));
 }
 
+// The SAMPLE_QC_APPROVAL stage's real content (BMR-1.docx 4.0 — "Line
+// Clearance for Bulk Manufacturing"), Production's own column instead of
+// Store's — same PreProductionChecklistItem table as the dispensing-area
+// checklist above, distinguished only by itemKey (the two item sets
+// never overlap). The stage keeps its original field/enum name
+// (sampleQcStatus) to avoid a wider rename; only its label, checklist
+// and meaning changed — it gates the bulk manufacturing run starting,
+// not a lab-tested physical sample.
+function buildBulkMfgLineClearanceChecklist(rows: PreProductionWithRelations["checklistItems"]) {
+  const byKey = new Map(rows.map((r) => [r.itemKey, r]));
+  return LINE_CLEARANCE_BULK_MFG_ITEMS.map((item) => ({
+    itemKey: item.key,
+    label: item.label,
+    deptOk: byKey.get(item.key)?.deptOk ?? null,
+    qaOk: byKey.get(item.key)?.qaOk ?? null,
+  }));
+}
+
 export function serializePreProduction(run: PreProductionWithRelations) {
   const { checklistItems, ...rest } = run;
   const remainingQty = Math.max(0, Math.round((run.plannedQty - run.combinedQty) * 1000) / 1000);
@@ -177,6 +195,9 @@ export function serializePreProduction(run: PreProductionWithRelations) {
     // Always every fixed row, in the paper form's own order — items
     // nobody has checked yet still show up as unchecked, not missing.
     lineClearanceChecklist: buildPreProductionChecklist(checklistItems),
+    // The SAMPLE_QC_APPROVAL stage's real checklist (BMR-1.docx 4.0) —
+    // same shape, Production's column instead of Store's.
+    bulkMfgLineClearanceChecklist: buildBulkMfgLineClearanceChecklist(checklistItems),
   };
 }
 

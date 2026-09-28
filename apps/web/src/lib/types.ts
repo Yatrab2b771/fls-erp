@@ -1,4 +1,4 @@
-export type RoleName = "ADMIN" | "BD" | "PPIC" | "STORE" | "PURCHASE" | "ACCOUNTS" | "PRODUCTION" | "QA_QC" | "DISPATCH" | "RND";
+export type RoleName = "ADMIN" | "BD" | "PPIC" | "STORE" | "PURCHASE" | "ACCOUNTS" | "PRODUCTION" | "QA_QC" | "DISPATCH" | "RND" | "REGULATORY";
 
 export interface CurrentUser {
   id: string;
@@ -147,6 +147,26 @@ export interface PlantConsumptionBalance {
   items: PlantConsumptionBalanceItem[];
 }
 
+// Consolidated Material Consumption Report — one row per (PreProduction
+// run x Item) across the whole company, see GET /plant-consumption/report.
+// Answers Product/Batch (poId/preProductionId are the same run either
+// way today) and PO-level usage from one flat dataset.
+export interface MaterialConsumptionRow {
+  preProductionId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  batchNo: string | null;
+  itemId: string;
+  itemName: string;
+  category: string;
+  unit: string;
+  consumedQty: number;
+  wastedQty: number;
+  rejectedQty: number;
+}
+
 export interface PlanSummary {
   id: string;
   name: string;
@@ -181,6 +201,15 @@ export interface PurchaseOrderItem {
   // PATCH /:id/items/:itemId/planned-plant.
   plannedPlantId?: string | null;
   plannedPlant?: { id: string; name: string } | null;
+  // Regulatory's own review — separate from PurchaseOrder.regulatoryBody/
+  // regulatoryStatus (BD's own self-declared field). Set via PATCH
+  // /:id/items/:itemId/regulatory-review, REGULATORY-only.
+  regulatoryStatus?: "Approved" | "Not Approved" | null;
+  regulatoryRemarks?: string | null;
+  regulatoryReviewedAt?: string | null;
+  // Set once PPIC's "Send Plan to Production" succeeds — the hard gate
+  // Production's own Pre-Production creation checks.
+  planSentToProductionAt?: string | null;
 }
 
 export interface PurchaseOrderDocument {
@@ -520,7 +549,7 @@ export interface TransitItem {
 //   once every planned ProductionBatch has completed and combined (see
 //   combined-lot-stage.ts). ---
 
-export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "LINE_CLEARANCE" | "DISPENSING" | "SAMPLE_QC_APPROVAL";
+export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "DISPENSING" | "SAMPLE_QC_APPROVAL";
 
 export type CombinedLotStageId =
   | "IPQC"
@@ -760,6 +789,9 @@ export interface PreProduction {
   combinedLot: { id: string; currentStageId: CombinedLotStageId } | null;
   dispensingShortfall?: DispensingRequirementItem[];
   lineClearanceChecklist: ChecklistRow[];
+  // SAMPLE_QC_APPROVAL stage's real checklist (BMR-1.docx 4.0 — "Line
+  // Clearance for Bulk Manufacturing") — see batch-include.ts.
+  bulkMfgLineClearanceChecklist: ChecklistRow[];
 }
 
 // Tier 3 — the pooled lot every one of a PreProduction's
@@ -1347,11 +1379,24 @@ export interface InventoryTransaction {
   rate: number | null;
   invoiceNo: string | null;
   invoiceDate: string | null;
+  // Expiry quarantine — set only if QA/QC explicitly releases an
+  // already-ACCEPTED row after its expiryDate passed (see PATCH
+  // /transactions/:id/release-expiry). Null forever otherwise, which is
+  // the expected default for something actually expired.
+  expiryReleasedBy: PersonRef | null;
+  expiryReleasedAt: string | null;
   // ERP Diagram doc's incoming-QC reject branch — Accounts' own paper
   // trail against a RECEIVED row that came back QC_REJECTED (or carries
   // a partial rejectedQty). Always present as an array (possibly empty),
   // newest first — see txnInclude on the API side.
   debitNotes: DebitNote[];
+}
+
+// GET /inventory/quarantine — a RECEIVED row still awaiting its first QC
+// check, held (ON_HOLD), or already ACCEPTED but expired and not yet
+// released. quarantineReason is computed server-side, not stored.
+export interface QuarantineRow extends InventoryTransaction {
+  quarantineReason: "PENDING_QC" | "ON_HOLD" | "EXPIRED";
 }
 
 // Raised by Accounts against a rejected (full or partial) Material
@@ -1384,6 +1429,42 @@ export interface InventoryStockLine {
   issuedRndQty: number;
   issuedQty: number;
   onHand: number;
+}
+
+// Finished Goods on hand — the warehouse-facing counterpart to
+// InventoryStockLine above, one row per batch/legacy CombinedLot
+// instead of by InventoryItem. See GET /api/inventory/fg-stock's own
+// comment for how onHandQty is computed (a batch's own
+// outputQty/packApprovedQty minus its own dispatchedQty — never netted
+// against the free-text FG Transfer register). Customer/product
+// grouping and filtering happens client-side (FgStockPage), same
+// "load once, slice on screen" pattern as the rest of Inventory.
+export interface FgStockRow {
+  id: string;
+  kind: "BATCH" | "COMBINED_LOT";
+  label: string;
+  customerId: string;
+  customerName: string;
+  poNumber: string | null;
+  productName: string;
+  unit: string;
+  currentStageId: CombinedLotStageId;
+  producedQty: number;
+  dispatchedQty: number;
+  onHandQty: number;
+  fgStoreReceivedDate: string | null;
+}
+
+// GET /api/inventory/dashboard-summary — Store's own Dashboard tile
+// counts (item counts, not summed quantities across mismatched units —
+// see DashboardPage.tsx's own comment on why). Deliberately lightweight;
+// each tile's own drill-down page fetches the full list separately.
+export interface StoreDashboardSummary {
+  rmItemCount: number;
+  pmItemCount: number;
+  dayStores: { id: string; name: string; itemCount: number }[];
+  fgProductCount: number;
+  quarantineCount: number;
 }
 
 // Real-time balance for one Day Store — see stock.ts
@@ -1637,7 +1718,7 @@ export interface RecycleBinRow {
   deletedBy: PersonRef | null;
 }
 
-export const ALL_ROLES: RoleName[] = ["ADMIN", "BD", "PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND"];
+export const ALL_ROLES: RoleName[] = ["ADMIN", "BD", "PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"];
 
 // --- QC Dashboard — read-only aggregate over every QC checkpoint (inward
 // Material Received, outward FG Dispatch, and the two Batch QA gates),
@@ -1653,16 +1734,15 @@ export interface QcDashboard {
     onHoldDispatchQc: number;
     onHoldMfgBatches: number;
     onHoldPackBatches: number;
-    // Every batch sitting at one of the four hard-gate stages, not just
+    // Every batch sitting at one of the three hard-gate stages, not just
     // ones explicitly on Hold — see qc.routes.ts's own comment on why.
     pendingSampleQcBatches: number;
-    pendingLineClearanceBatches: number;
     pendingIpqcBatches: number;
     pendingBulkQcBatches: number;
   };
   receipts: { pending: InventoryTransaction[]; onHold: InventoryTransaction[] };
   dispatches: { pending: DispatchTransfer[]; onHold: DispatchTransfer[] };
-  batches: { onHoldMfg: CombinedLot[]; onHoldPack: CombinedLot[]; pendingSampleQc: PreProduction[]; pendingLineClearance: PreProduction[]; pendingIpqc: CombinedLot[]; pendingBulkQc: CombinedLot[] };
+  batches: { onHoldMfg: CombinedLot[]; onHoldPack: CombinedLot[]; pendingSampleQc: PreProduction[]; pendingIpqc: CombinedLot[]; pendingBulkQc: CombinedLot[] };
 }
 
 // --- System Health / Audit Log — Admin-only operational tooling, see

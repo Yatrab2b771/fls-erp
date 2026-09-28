@@ -175,3 +175,101 @@ plantConsumptionRouter.get("/:preProductionId/balance", requireRole(...READ_ROLE
     next(err);
   }
 });
+
+// Consolidated report across every run — the same PRODUCTION/WASTE/
+// REJECTED split as the per-run balance above, but flattened to one row
+// per (PreProduction run × Item) across the whole company instead of
+// scoped to a single run. This is what actually answers "how much RM/PM
+// went into this Product / Batch / PO" without opening each run's own
+// detail page one at a time. Optional filters let the PO detail page and
+// a PreProduction run's own detail page deep-link straight to their own
+// slice of this same dataset instead of duplicating the query.
+// Deliberately does NOT fold in returnedQty (StockTransfer) — that's a
+// Plant-level "sent back to Store" event, not a per-item usage number,
+// and the per-run balance route above already surfaces it separately.
+plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const { poId, preProductionId, itemId } = req.query as { poId?: string; preProductionId?: string; itemId?: string };
+
+    const consumptions = await prisma.batchMaterialConsumption.findMany({
+      where: {
+        itemId: itemId || undefined,
+        preProductionId: preProductionId || undefined,
+        preProduction: poId
+          ? {
+              purchaseOrderItem: { purchaseOrderId: poId },
+            }
+          : undefined,
+      },
+      select: {
+        preProductionId: true,
+        itemId: true,
+        quantity: true,
+        unit: true,
+        purpose: true,
+        item: { select: { name: true, category: true } },
+        preProduction: {
+          select: {
+            id: true,
+            productionBatches: { select: { batchNo: true }, take: 1 },
+            purchaseOrderItem: {
+              select: {
+                productName: true,
+                purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const byRow = new Map<
+      string,
+      {
+        preProductionId: string;
+        poId: string;
+        poNumber: string | null;
+        customerName: string;
+        productName: string;
+        batchNo: string | null;
+        itemId: string;
+        itemName: string;
+        category: string;
+        unit: string;
+        consumedQty: number;
+        wastedQty: number;
+        rejectedQty: number;
+      }
+    >();
+
+    for (const c of consumptions) {
+      const key = `${c.preProductionId}::${c.itemId}`;
+      let row = byRow.get(key);
+      if (!row) {
+        row = {
+          preProductionId: c.preProductionId,
+          poId: c.preProduction.purchaseOrderItem.purchaseOrder.id,
+          poNumber: c.preProduction.purchaseOrderItem.purchaseOrder.poNumber,
+          customerName: c.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName,
+          productName: c.preProduction.purchaseOrderItem.productName,
+          batchNo: c.preProduction.productionBatches[0]?.batchNo ?? null,
+          itemId: c.itemId,
+          itemName: c.item.name,
+          category: c.item.category,
+          unit: c.unit,
+          consumedQty: 0,
+          wastedQty: 0,
+          rejectedQty: 0,
+        };
+        byRow.set(key, row);
+      }
+      if (c.purpose === "PRODUCTION") row.consumedQty += c.quantity;
+      else if (c.purpose === "WASTE") row.wastedQty += c.quantity;
+      else if (c.purpose === "REJECTED") row.rejectedQty += c.quantity;
+    }
+
+    res.json([...byRow.values()]);
+  } catch (err) {
+    next(err);
+  }
+});

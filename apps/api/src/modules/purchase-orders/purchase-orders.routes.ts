@@ -18,6 +18,8 @@ import {
   reviewPurchaseOrderSchema,
   updatePurchaseOrderItemSchema,
   assignPlannedPlantSchema,
+  regulatoryReviewSchema,
+  setRegulatoryBodySchema,
   updatePurchaseOrderSchema,
   type CreatePurchaseOrderInput,
   type GeneratePoInvoiceInput,
@@ -26,6 +28,8 @@ import {
   type UpdatePurchaseOrderInput,
   type UpdatePurchaseOrderItemInput,
   type AssignPlannedPlantInput,
+  type RegulatoryReviewInput,
+  type SetRegulatoryBodyInput,
 } from "./purchase-orders.schemas";
 import type { Prisma } from "@prisma/client";
 
@@ -811,6 +815,28 @@ purchaseOrdersRouter.patch("/:id", requireRole("BD"), validateBody(updatePurchas
   }
 });
 
+// Which regulatory body (FSSAI/AYUSH/...) this PO was actually applied
+// against, and its status (Applied/Not Applied/Issued) — BD can set this
+// at intake via PATCH /:id above, but Regulatory is the department that
+// actually tracks this day to day, so they get their own narrow-scope
+// route to set/correct just this field pair (never the rest of the PO),
+// right where they're about to Approve/Not Approve a product line below.
+purchaseOrdersRouter.patch("/:id/regulatory-body", requireRole("BD", "REGULATORY"), validateBody(setRegulatoryBodySchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Purchase order not found" });
+
+    const data = req.body as SetRegulatoryBodyInput;
+    const updated = await prisma.purchaseOrder.update({ where: { id: req.params.id }, data, include: poInclude });
+
+    await recordAudit({ actorId: req.user!.id, action: "purchase_order.regulatory_body_set", entityType: "PurchaseOrder", entityId: updated.id, metadata: data });
+
+    res.json(serializePo(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Draft → BD Approve/Reject. Only from DRAFT — once reviewed, the
 // decision stands (matching "Forward to PPIC + RM" being a one-way gate,
 // not something that flips back and forth).
@@ -847,6 +873,15 @@ purchaseOrdersRouter.patch("/:id/review", requireRole("BD"), validateBody(review
         notifyRoles(["PPIC"], { title: `${poLabel} approved`, body: `${updated.customer.companyName} — ready to plan batches.`, link: `/purchase-orders/${updated.id}` }, req.user!.id).catch(
           notifyFailed("po.approved.ppic"),
         ),
+        // Regulatory otherwise has no way to know a product line needs
+        // their sign-off — no other event in the system tells them.
+        // Same "the moment it becomes relevant" timing as PPIC's own
+        // notice above.
+        notifyRoles(
+          ["REGULATORY"],
+          { title: `${poLabel} approved`, body: `${updated.customer.companyName} — needs regulatory review.`, link: `/purchase-orders/${updated.id}` },
+          req.user!.id,
+        ).catch(notifyFailed("po.approved.regulatory")),
       ]);
     } else {
       await notifyUser(updated.createdById, { title: `${poLabel} rejected`, body: rejectionReason, link: `/purchase-orders/${updated.id}` }).catch(notifyFailed("po.rejected.creator"));
@@ -943,6 +978,100 @@ purchaseOrdersRouter.patch(
 
       const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data: { plannedPlantId: plantId }, include: { plannedPlant: { select: { id: true, name: true } } } });
       await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_planned_plant_set", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: updated.id, plantId } });
+
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Regulatory's own sign-off on one product line — independent of BD's own
+// self-declared regulatoryBody/regulatoryStatus on the PO header. This is
+// the real hard gate POST /:id/items/:itemId/send-plan-to-production
+// below checks — nothing else in the app reads or enforces it.
+purchaseOrdersRouter.patch(
+  "/:id/items/:itemId/regulatory-review",
+  requireRole("REGULATORY"),
+  validateBody(regulatoryReviewSchema),
+  async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+    try {
+      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId } });
+      if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+
+      const { status, remarks } = req.body as RegulatoryReviewInput;
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id: req.params.itemId },
+        data: { regulatoryStatus: status, regulatoryRemarks: remarks, regulatoryReviewedById: req.user!.id, regulatoryReviewedAt: new Date() },
+      });
+
+      await recordAudit({
+        actorId: req.user!.id,
+        action: "purchase_order.item_regulatory_reviewed",
+        entityType: "PurchaseOrder",
+        entityId: req.params.id,
+        metadata: { itemId: updated.id, status, remarks },
+      });
+
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// PPIC's own hand-off — the calculated BOM/RM plan Generate produced only
+// reaches Production once PPIC explicitly sends it, and only once every
+// precondition for that is real: a Plant assigned, at least one plan
+// actually CALCULATED (not just Draft), and Regulatory's own Approved
+// sign-off on this exact product line. Sets planSentToProductionAt, the
+// hard gate POST /pre-productions checks — Production simply cannot open
+// a run against this item until this has happened.
+purchaseOrdersRouter.post(
+  "/:id/items/:itemId/send-plan-to-production",
+  requireRole("PPIC"),
+  async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+    try {
+      const item = await prisma.purchaseOrderItem.findUnique({
+        where: { id: req.params.itemId },
+        include: {
+          preProduction: { select: { id: true } },
+          plannedPlant: { select: { id: true, name: true } },
+          bomPlans: { select: { status: true } },
+          rmPlans: { select: { status: true } },
+        },
+      });
+      if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+      if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item." });
+      if (item.planSentToProductionAt) return res.status(409).json({ error: "The plan was already sent to Production for this line item." });
+
+      if (!item.plannedPlantId) {
+        return res.status(400).json({ error: "Assign a Plant to this product before sending the plan to Production." });
+      }
+
+      const hasCalculatedPlan = item.bomPlans.some((p) => p.status === "CALCULATED") || item.rmPlans.some((p) => p.status === "CALCULATED");
+      if (!hasCalculatedPlan) {
+        return res.status(400).json({ error: "Generate and calculate a Packaging BOM or RM Costing plan for this product first." });
+      }
+
+      if (item.regulatoryStatus !== "Approved") {
+        return res.status(400).json({
+          error:
+            item.regulatoryStatus === "Not Approved"
+              ? "Regulatory marked this product Not Approved — the plan can't be sent to Production."
+              : "Waiting on Regulatory's approval for this product before the plan can be sent to Production.",
+        });
+      }
+
+      const updated = await prisma.purchaseOrderItem.update({ where: { id: item.id }, data: { planSentToProductionAt: new Date() } });
+
+      await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_plan_sent_to_production", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: item.id, plantId: item.plannedPlantId } });
+
+      await notifyRoles(
+        ["PRODUCTION"],
+        { title: `${item.productName} planned for ${item.plannedPlant?.name ?? "production"}`, body: "PPIC's plan is ready — Indent Issue can start once material arrives.", link: `/purchase-orders/${req.params.id}` },
+        req.user!.id,
+      ).catch((err) => req.log?.error({ err }, "notify failed: purchase_order.item_plan_sent_to_production"));
 
       res.json(updated);
     } catch (err) {

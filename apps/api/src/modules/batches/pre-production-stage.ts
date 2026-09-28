@@ -12,9 +12,9 @@
 
 import type { RoleName } from "@prisma/client";
 
-export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "LINE_CLEARANCE" | "DISPENSING" | "SAMPLE_QC_APPROVAL";
+export type PreProductionStageId = "MATERIAL_RECEIVED" | "INDENT_ISSUE" | "DISPENSING" | "SAMPLE_QC_APPROVAL";
 
-export const PRE_PRODUCTION_STAGE_ORDER: PreProductionStageId[] = ["MATERIAL_RECEIVED", "INDENT_ISSUE", "LINE_CLEARANCE", "DISPENSING", "SAMPLE_QC_APPROVAL"];
+export const PRE_PRODUCTION_STAGE_ORDER: PreProductionStageId[] = ["MATERIAL_RECEIVED", "INDENT_ISSUE", "DISPENSING", "SAMPLE_QC_APPROVAL"];
 
 // INDENT_ISSUE is owned by PRODUCTION, per Production Process Flow.docx
 // ("Batch Indent/Requisition (By Production)") — it used to be PPIC's,
@@ -22,7 +22,6 @@ export const PRE_PRODUCTION_STAGE_ORDER: PreProductionStageId[] = ["MATERIAL_REC
 export const PRE_PRODUCTION_STAGE_ROLE: Record<PreProductionStageId, RoleName[]> = {
   MATERIAL_RECEIVED: ["STORE"],
   INDENT_ISSUE: ["PRODUCTION"],
-  LINE_CLEARANCE: ["QA_QC"],
   DISPENSING: ["STORE"],
   SAMPLE_QC_APPROVAL: ["QA_QC"],
 };
@@ -30,9 +29,14 @@ export const PRE_PRODUCTION_STAGE_ROLE: Record<PreProductionStageId, RoleName[]>
 export const PRE_PRODUCTION_STAGE_LABEL: Record<PreProductionStageId, string> = {
   MATERIAL_RECEIVED: "Material Received & GRN",
   INDENT_ISSUE: "Indent Issue",
-  LINE_CLEARANCE: "Line Clearance",
   DISPENSING: "Dispensing / RM-PM Issue",
-  SAMPLE_QC_APPROVAL: "Sample QC Approval",
+  // Renamed from "Sample QC Approval" — per BMR-1.docx 4.0 ("Line
+  // Clearance for Bulk Manufacturing"), this gate is a checklist
+  // (Production's own column plus QA's, see
+  // batch-checklists.ts/LINE_CLEARANCE_BULK_MFG_ITEMS), not a lab-tested
+  // physical sample. Field/enum name (sampleQcStatus) kept as-is to
+  // avoid a wider rename — only the label, checklist and meaning changed.
+  SAMPLE_QC_APPROVAL: "Line Clearance — Bulk Manufacturing",
 };
 
 // SAMPLE_QC_APPROVAL is this pipeline's own terminal stage — "forward"

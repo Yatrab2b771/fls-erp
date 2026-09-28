@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import type { Vendor } from "./types";
 
 // Column headers matched loosely (case/spacing variations), same porting
 // approach as every other bulk import in this app.
@@ -78,6 +79,24 @@ export function parseVendorWorkbook(buffer: ArrayBuffer): ParsedVendorImport {
   }
 
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
+
+// The actual vendor directory, not a blank template — whatever's
+// currently on screen (respects VendorsPage's own search filter).
+export function exportVendorsReport(vendors: Vendor[]) {
+  const rows = vendors.map((v) => ({
+    "Vendor Name": v.name,
+    "Vendor Code": v.code ?? "",
+    "Contact Person": v.contactPerson ?? "",
+    "Contact No.": v.contactNo ?? "",
+    "GST No.": v.gstNo ?? "",
+    Email: v.email ?? "",
+    Address: v.address ?? "",
+  }));
+  const sheet = XLSX.utils.json_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, "Vendors");
+  XLSX.writeFile(workbook, `FLS_Vendors_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 export function downloadVendorImportTemplate() {

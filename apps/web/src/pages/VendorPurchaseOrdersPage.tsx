@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Package, Plus, ShoppingBag, X } from "lucide-react";
+import { Download, Package, Plus, ShoppingBag, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
   useCreateVendorPurchaseOrder,
@@ -16,6 +16,7 @@ import { SkeletonRows } from "../components/Skeleton";
 import { StatTile } from "../components/StatTile";
 import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
+import { exportVendorPurchaseOrdersReport } from "../lib/vendorPurchaseOrdersReport";
 
 const fmtCurrency = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
@@ -41,6 +42,7 @@ export function VendorPurchaseOrdersPage() {
   const { data: orders, isLoading } = useVendorPurchaseOrders();
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
+  const toast = useToast();
 
   const q = search.trim().toLowerCase();
   const filtered = orders?.filter((po) => !q || po.poNumber.toLowerCase().includes(q) || po.vendor.name.toLowerCase().includes(q));
@@ -60,17 +62,31 @@ export function VendorPurchaseOrdersPage() {
             <p className="text-sm text-slate-500">RM/PM procurement orders raised with vendors — separate from customer Purchase Orders.</p>
           </div>
         </div>
-        {canCreate && (
-          <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
-            {showForm ? (
-              <X className="h-4 w-4" strokeWidth={2.5} />
-            ) : (
-              <>
-                <Plus className="h-4 w-4" strokeWidth={2.5} /> New Vendor PO
-              </>
-            )}
+        <div className="flex items-center gap-2">
+          <button
+            className="btn-ghost"
+            disabled={!filtered?.length}
+            onClick={() => {
+              if (!filtered?.length) return toast.error("Nothing to export — no vendor POs match.");
+              exportVendorPurchaseOrdersReport(filtered);
+              toast.success("Report downloaded.");
+            }}
+            title="Download the vendor PO list as an Excel report"
+          >
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
           </button>
-        )}
+          {canCreate && (
+            <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
+              {showForm ? (
+                <X className="h-4 w-4" strokeWidth={2.5} />
+              ) : (
+                <>
+                  <Plus className="h-4 w-4" strokeWidth={2.5} /> New Vendor PO
+                </>
+              )}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">

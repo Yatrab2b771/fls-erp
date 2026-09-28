@@ -26,6 +26,9 @@ import type {
   InventoryRequestPurpose,
   InventoryRequestStatus,
   InventoryStockLine,
+  FgStockRow,
+  QuarantineRow,
+  StoreDashboardSummary,
   InventoryTransaction,
   InventoryTxnType,
   ImportCustomerUpdatesResult,
@@ -67,6 +70,7 @@ import type {
   RndTransfer,
   RndTransferDirection,
   RoleName,
+  MaterialConsumptionRow,
   PlantConsumptionBalance,
   StockTransfer,
   StockTransferDestinationType,
@@ -427,6 +431,42 @@ export function useAssignPlannedPlant(poId: string) {
   return useMutation({
     mutationFn: ({ itemId, plantId }: { itemId: string; plantId: string | null }) =>
       api(`/api/purchase-orders/${poId}/items/${itemId}/planned-plant`, { method: "PATCH", body: { plantId } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+  });
+}
+
+// Regulatory's own per-item review — see PurchaseOrderItem.regulatoryStatus's own schema comment.
+// Regulatory's own narrow-scope edit of just regulatoryBody/
+// regulatoryStatus (BD can also set this, via useUpdatePurchaseOrder ->
+// PATCH /:id, but that route is BD-only — this hits the dedicated
+// REGULATORY-allowed route instead). See purchase-orders.routes.ts's
+// PATCH /:id/regulatory-body.
+export function useSetRegulatoryBody(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { regulatoryBody?: string; regulatoryStatus?: string }) => api<PurchaseOrder>(`/api/purchase-orders/${poId}/regulatory-body`, { method: "PATCH", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["purchase-orders"] });
+      qc.invalidateQueries({ queryKey: ["purchase-orders", poId] });
+    },
+  });
+}
+
+export function useRegulatoryReview(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, status, remarks }: { itemId: string; status: "Approved" | "Not Approved"; remarks?: string }) =>
+      api(`/api/purchase-orders/${poId}/items/${itemId}/regulatory-review`, { method: "PATCH", body: { status, remarks } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+  });
+}
+
+// PPIC's hand-off — see purchase-orders.routes.ts's POST
+// /:id/items/:itemId/send-plan-to-production for the preconditions.
+export function useSendPlanToProduction(poId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) => api(`/api/purchase-orders/${poId}/items/${itemId}/send-plan-to-production`, { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
   });
 }
@@ -1098,6 +1138,22 @@ export function useInventoryStock(category?: InventoryCategory, options?: { enab
   });
 }
 
+export function useFgStock(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "fg-stock"],
+    queryFn: () => api<FgStockRow[]>("/api/inventory/fg-stock"),
+    enabled: options?.enabled,
+  });
+}
+
+export function useStoreDashboardSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "dashboard-summary"],
+    queryFn: () => api<StoreDashboardSummary>("/api/inventory/dashboard-summary"),
+    enabled: options?.enabled,
+  });
+}
+
 export function useInventoryTransactions(
   filters?: { type?: InventoryTxnType; category?: InventoryCategory; itemId?: string; receiptStatus?: InventoryReceiptStatus },
   options?: { enabled?: boolean },
@@ -1243,6 +1299,7 @@ export function useInventoryVendors(options?: { enabled?: boolean; itemId?: stri
 function invalidateInventoryLedger(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
   qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "quarantine"] });
   // The QC Dashboard's counts/worklist are a live aggregate over this
   // same data — a review made from either place has to refresh both.
   qc.invalidateQueries({ queryKey: ["qc", "dashboard"] });
@@ -1261,6 +1318,26 @@ export function useAcceptTransaction() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => api<InventoryTransaction>(`/api/inventory/transactions/${id}/accept`, { method: "POST" }),
+    onSuccess: () => invalidateInventoryLedger(qc),
+  });
+}
+
+// Quarantine Store — GET /inventory/quarantine's combined list (awaiting
+// first QC + expired-and-not-yet-released), and QA/QC's plain-approve
+// release action for the expired half. See inventory.routes.ts's own
+// comment on both.
+export function useQuarantineStock(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "quarantine"],
+    queryFn: () => api<QuarantineRow[]>("/api/inventory/quarantine"),
+    enabled: options?.enabled,
+  });
+}
+
+export function useReleaseExpiry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<InventoryTransaction>(`/api/inventory/transactions/${id}/release-expiry`, { method: "PATCH" }),
     onSuccess: () => invalidateInventoryLedger(qc),
   });
 }
@@ -1445,8 +1522,8 @@ export function useQcReviewDispatchTransfer() {
 // batch's own stage PATCH), so this just needs to be re-fetched whenever
 // any of those succeed — invalidated alongside the ledger/dispatch/batch
 // query keys those hooks already touch. ---
-export function useQcDashboard() {
-  return useQuery({ queryKey: ["qc", "dashboard"], queryFn: () => api<QcDashboard>("/api/qc/dashboard") });
+export function useQcDashboard(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["qc", "dashboard"], queryFn: () => api<QcDashboard>("/api/qc/dashboard"), enabled: options?.enabled });
 }
 
 export interface CreateDispatchTransferPayload {
@@ -1635,7 +1712,7 @@ export function useRenameWarehouse() {
 // what's available, Purchase logs a PO for the shortfall, Finance reads
 // the resulting vendor list. See pre-inventory.routes.ts. ---
 
-export function usePreInventoryRequirements(filters?: { category?: InventoryCategory; short?: boolean }) {
+export function usePreInventoryRequirements(filters?: { category?: InventoryCategory; short?: boolean }, options?: { enabled?: boolean }) {
   const params = new URLSearchParams();
   if (filters?.category) params.set("category", filters.category);
   if (filters?.short) params.set("short", "true");
@@ -1648,6 +1725,7 @@ export function usePreInventoryRequirements(filters?: { category?: InventoryCate
   return useQuery({
     queryKey: ["pre-inventory", "requirements", filters],
     queryFn: () => api<PreInventoryRequirement[]>(`/api/inventory/requirements?${qs}`),
+    enabled: options?.enabled,
   });
 }
 
@@ -2063,6 +2141,19 @@ export function usePlantConsumptionBalance(preProductionId: string | undefined) 
     queryKey: ["plant-consumption", preProductionId, "balance"],
     queryFn: () => api<PlantConsumptionBalance>(`/api/plant-consumption/${preProductionId}/balance`),
     enabled: !!preProductionId,
+  });
+}
+
+export function useMaterialConsumptionReport(filters?: { poId?: string; preProductionId?: string; itemId?: string }, options?: { enabled?: boolean }) {
+  const params = new URLSearchParams();
+  if (filters?.poId) params.set("poId", filters.poId);
+  if (filters?.preProductionId) params.set("preProductionId", filters.preProductionId);
+  if (filters?.itemId) params.set("itemId", filters.itemId);
+  const qs = params.toString();
+  return useQuery({
+    queryKey: ["plant-consumption", "report", filters ?? {}],
+    queryFn: () => api<MaterialConsumptionRow[]>(`/api/plant-consumption/report${qs ? `?${qs}` : ""}`),
+    enabled: options?.enabled,
   });
 }
 

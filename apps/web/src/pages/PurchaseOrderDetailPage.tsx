@@ -42,9 +42,12 @@ import {
   usePoBilling,
   usePoReconciliation,
   usePurchaseOrder,
+  useRegulatoryReview,
+  useSetRegulatoryBody,
   useRemovePurchaseOrderItem,
   useReportCatalogMismatch,
   useReviewPurchaseOrder,
+  useSendPlanToProduction,
   useSkus,
   useUpdatePurchaseOrder,
   useUpdatePurchaseOrderItem,
@@ -132,6 +135,9 @@ export function PurchaseOrderDetailPage() {
             <Link to={`/purchase-orders/${po.id}/full-report`} className="btn-ghost btn-sm">
               <FileStack className="h-3 w-3" strokeWidth={2.5} /> Full Report
             </Link>
+            <Link to={`/material-consumption?poId=${po.id}`} className="btn-ghost btn-sm">
+              <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> Material Used
+            </Link>
             <button
               className="btn-ghost btn-sm"
               onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
@@ -186,7 +192,7 @@ export function PurchaseOrderDetailPage() {
         </h2>
         <div className="space-y-3">
           {po.items.map((item) => (
-            <ProductLineItem key={item.id} poId={po.id} item={item} poStatus={po.status} />
+            <ProductLineItem key={item.id} poId={po.id} item={item} poStatus={po.status} regulatoryBody={po.regulatoryBody} regulatoryStatus={po.regulatoryStatus} />
           ))}
         </div>
         {hasRole("BD") && <AddLineItemForm poId={po.id} customerId={po.customerId} customerName={po.customer.companyName} />}
@@ -933,8 +939,27 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
   );
 }
 
-function ProductLineItem({ poId, item, poStatus }: { poId: string; item: PurchaseOrderItem; poStatus: PurchaseOrder["status"] }) {
+function ProductLineItem({
+  poId,
+  item,
+  poStatus,
+  regulatoryBody,
+  regulatoryStatus: poRegulatoryStatus,
+}: {
+  poId: string;
+  item: PurchaseOrderItem;
+  poStatus: PurchaseOrder["status"];
+  regulatoryBody: string | null;
+  regulatoryStatus: string | null;
+}) {
   const { hasRole } = useAuth();
+  const setRegulatoryBody = useSetRegulatoryBody(poId);
+  const [regulatoryBodyOptions, setRegulatoryBodyOptions] = useState(() => {
+    const base = [{ id: "FSSAI", name: "FSSAI" }, { id: "AYUSH", name: "AYUSH" }];
+    return regulatoryBody && !base.some((o) => o.id.toLowerCase() === regulatoryBody.toLowerCase()) ? [...base, { id: regulatoryBody, name: regulatoryBody }] : base;
+  });
+  const [bodyDraft, setBodyDraft] = useState(regulatoryBody ?? "");
+  const [statusDraft, setStatusDraft] = useState(poRegulatoryStatus ?? "");
   const { data: preProductions } = usePreProductions(item.id);
   const run = preProductions?.[0];
   const { data: plants } = usePlants();
@@ -944,12 +969,38 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
   const updateItem = useUpdatePurchaseOrderItem(poId);
   const { data: dayStores } = useDayStores();
   const assignPlannedPlant = useAssignPlannedPlant(poId);
+  const regulatoryReview = useRegulatoryReview(poId);
+  const sendPlanToProduction = useSendPlanToProduction(poId);
   const toast = useToast();
   const [plantId, setPlantId] = useState("");
   const [showStart, setShowStart] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(item.productName);
+  const [regulatoryRemarks, setRegulatoryRemarks] = useState("");
   const isApproved = poStatus === "APPROVED";
+
+  async function handleRegulatoryReview(status: "Approved" | "Not Approved") {
+    if (status === "Not Approved" && !regulatoryRemarks.trim()) {
+      toast.error("A reason is required when marking a product Not Approved.");
+      return;
+    }
+    try {
+      await regulatoryReview.mutateAsync({ itemId: item.id, status, remarks: regulatoryRemarks.trim() || undefined });
+      toast.success(status === "Approved" ? "Product approved." : "Product marked Not Approved.");
+      setRegulatoryRemarks("");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save the review");
+    }
+  }
+
+  async function handleSaveRegulatoryBody() {
+    try {
+      await setRegulatoryBody.mutateAsync({ regulatoryBody: bodyDraft || undefined, regulatoryStatus: statusDraft || undefined });
+      toast.success("Regulatory body updated.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update the regulatory body");
+    }
+  }
 
   async function handleSaveName() {
     const trimmed = nameDraft.trim();
@@ -1110,6 +1161,119 @@ function ProductLineItem({ poId, item, poStatus }: { poId: string; item: Purchas
         </div>
       )}
 
+      {/* Regulatory's own sign-off on this product line — independent of
+          BD's own self-declared regulatoryBody/regulatoryStatus on the PO
+          header, though it's the exact same underlying field: Regulatory
+          can see (everyone can) and now set/correct it too, right above
+          the Approve/Not Approved decision — they're the department that
+          actually knows this day to day, no need to wait on BD. Read-only
+          status for everyone (PPIC needs to see this before "Send Plan to
+          Production" is even possible); the Approve/Not Approved form
+          itself is REGULATORY-only. */}
+      <div className="mt-4 overflow-hidden rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-white">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100/80 px-4 py-2.5">
+          <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-indigo-700">
+            <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> Regulatory Review
+          </p>
+          <span
+            className={`pill ${
+              item.regulatoryStatus === "Approved"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : item.regulatoryStatus === "Not Approved"
+                  ? "border-rose-200 bg-rose-50 text-rose-700"
+                  : "border-slate-200 bg-slate-50 text-slate-500"
+            }`}
+          >
+            {item.regulatoryStatus ?? "Pending Review"}
+          </span>
+        </div>
+
+        <div className="space-y-3 p-4">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+            <span>Regulatory Body</span>
+            <span className="pill border-slate-200 bg-white text-slate-600">{regulatoryBody ?? "Not set"}</span>
+            <span className="pill border-slate-200 bg-white text-slate-600">{poRegulatoryStatus ?? "No status"}</span>
+          </div>
+
+          {hasRole("REGULATORY") && (
+            <div className="grid grid-cols-1 items-end gap-2.5 rounded-xl border border-slate-100 bg-white/80 p-3 sm:grid-cols-[1fr_1fr_auto]">
+              <PickerWithAdd
+                label="Regulatory Body"
+                placeholder="FSSAI, AYUSH, …"
+                options={regulatoryBodyOptions}
+                value={bodyDraft}
+                onChange={setBodyDraft}
+                onCreate={async (name) => {
+                  setRegulatoryBodyOptions((prev) => (prev.some((o) => o.id.toLowerCase() === name.toLowerCase()) ? prev : [...prev, { id: name, name }]));
+                  return { id: name };
+                }}
+              />
+              <div>
+                <label className="label">Status</label>
+                <ItemPicker items={REGULATORY_STATUS_ITEMS} value={statusDraft} onChange={setStatusDraft} />
+              </div>
+              <button className="btn-primary btn-sm" disabled={setRegulatoryBody.isPending} onClick={handleSaveRegulatoryBody}>
+                {setRegulatoryBody.isPending ? "Saving…" : "Save"}
+              </button>
+            </div>
+          )}
+
+          {item.regulatoryRemarks && (
+            <p className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+              <span className="font-bold text-slate-600">Note:</span> {item.regulatoryRemarks}
+            </p>
+          )}
+
+          {hasRole("REGULATORY") && (
+            <div className="space-y-2 rounded-xl border border-slate-100 bg-white/80 p-3">
+              <label className="label">Approval Decision</label>
+              <textarea
+                className="field !h-16 !text-xs"
+                placeholder="Remarks (required if Not Approved)"
+                value={regulatoryRemarks}
+                onChange={(e) => setRegulatoryRemarks(e.target.value)}
+              />
+              <div className="flex gap-2">
+                <button className="btn-primary btn-sm" disabled={regulatoryReview.isPending} onClick={() => handleRegulatoryReview("Approved")}>
+                  <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Approve
+                </button>
+                <button className="btn-ghost btn-sm hover:!bg-rose-50 hover:!text-rose-600" disabled={regulatoryReview.isPending} onClick={() => handleRegulatoryReview("Not Approved")}>
+                  <X className="h-3.5 w-3.5" strokeWidth={2.25} /> Not Approved
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* PPIC's hand-off — sends the calculated plan (Plant + BOM/RM
+          costing) on to Production. Hard-gated server-side on all three
+          preconditions; the button here just surfaces whichever one
+          isn't met yet instead of letting the click 400 silently. */}
+      {hasRole("PPIC") && !run && !item.planSentToProductionAt && (
+        <div className="mt-3 border-t border-slate-100 pt-3">
+          <button
+            className="btn-primary btn-sm"
+            disabled={sendPlanToProduction.isPending}
+            onClick={async () => {
+              try {
+                await sendPlanToProduction.mutateAsync(item.id);
+                toast.success("Plan sent to Production.");
+              } catch (err) {
+                toast.error(err instanceof ApiError ? err.message : "Could not send the plan");
+              }
+            }}
+          >
+            {sendPlanToProduction.isPending ? "Sending…" : "Send Plan to Production"}
+          </button>
+        </div>
+      )}
+      {item.planSentToProductionAt && (
+        <p className="mt-3 flex items-center gap-1.5 border-t border-slate-100 pt-3 text-[11px] font-bold text-emerald-600">
+          <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Plan sent to Production
+        </p>
+      )}
+
       {showStart && !run && (
         <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
           <p className="text-[11px] text-slate-500">
@@ -1210,7 +1374,7 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
       </div>
       <div>
         <label className="label">Quantity</label>
-        <input className="field font-mono" type="number" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+        <input className="field font-mono" type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
       </div>
       <div>
         <label className="label">Unit</label>
@@ -1218,7 +1382,7 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
       </div>
       <div>
         <label className="label">Volume (opt.)</label>
-        <input className="field font-mono" type="number" value={volume} onChange={(e) => setVolume(e.target.value)} />
+        <input className="field font-mono" type="number" min="0" step="any" value={volume} onChange={(e) => setVolume(e.target.value)} />
       </div>
       <div className="sm:col-span-6">
         <label className="label">Pack Size (opt., e.g. 1kg)</label>

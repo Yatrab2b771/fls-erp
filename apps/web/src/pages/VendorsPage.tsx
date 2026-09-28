@@ -2,7 +2,7 @@ import { useRef, useState, type ChangeEvent } from "react";
 import { Download, Pencil, Truck, Upload, UserPlus } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useCreateVendor, useImportVendors, useUpdateVendor, useVendors } from "../lib/hooks";
-import { downloadVendorImportTemplate, parseVendorWorkbook } from "../lib/vendorsImport";
+import { downloadVendorImportTemplate, exportVendorsReport, parseVendorWorkbook } from "../lib/vendorsImport";
 import { FieldGrid, type FieldDef } from "../components/FieldGrid";
 import { SearchBar } from "../components/SearchBar";
 import { EmptyState } from "../components/EmptyState";
@@ -164,6 +164,18 @@ export function VendorsPage() {
         <div className="w-full sm:w-72">
           <SearchBar value={search} onChange={setSearch} placeholder="Search by name, code, contact, GST…" />
         </div>
+        <button
+          className="btn-ghost"
+          disabled={!filtered?.length}
+          onClick={() => {
+            if (!filtered?.length) return toast.error("Nothing to export — no vendors match.");
+            exportVendorsReport(filtered);
+            toast.success("Report downloaded.");
+          }}
+          title="Download the vendor directory as an Excel report"
+        >
+          <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Report
+        </button>
         {canWrite && (
           <button className="btn-ghost" onClick={downloadVendorImportTemplate} title="Download a blank template — one row per vendor">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample

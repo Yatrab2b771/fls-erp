@@ -21,7 +21,7 @@ import {
   type ChecklistUpdateInput,
   type UpdatePreProductionPlantInput,
 } from "./batch.schemas";
-import { preProductionChecklistKeys } from "./batch-checklists";
+import { preProductionChecklistKeys, combinedLotChecklistKeys } from "./batch-checklists";
 import type { Prisma } from "@prisma/client";
 
 // --- Tier 1 of the three-tier pipeline (see schema.prisma's own comment
@@ -111,6 +111,14 @@ preProductionRouter.post("/", requireRole("PRODUCTION"), async (req: AuthedReque
             ? `Waiting on R&D for "${openRequest.productName}" — ETA ${new Date(openRequest.etaDate).toLocaleDateString()}. Production can't start until the Recipe/BOM is ready.`
             : `Waiting on R&D for "${openRequest.productName}" — no ETA given yet. Production can't start until the Recipe/BOM is ready.`,
       });
+    }
+
+    // PPIC's own hand-off hard-block — no override, same as the R&D one
+    // above. PPIC's calculated plan (and Regulatory's Approved sign-off
+    // behind it) has to have actually been sent — see purchase-orders.
+    // routes.ts's POST /:id/items/:itemId/send-plan-to-production.
+    if (!item.planSentToProductionAt) {
+      return res.status(400).json({ error: "Waiting on PPIC to send this product's plan to Production before a run can be opened." });
     }
 
     // PO Readiness soft-block — only when PPIC has actually tracked
@@ -224,12 +232,16 @@ preProductionRouter.patch("/:id/plant", requireRole("PPIC"), async (req: AuthedR
   }
 });
 
-// The dispensing-area Line Clearance checklist — matches BMR-1.docx's
-// real paper form item for item (see batch-checklists.ts). Not itself
-// the gate (PreProduction.lineClearanceStatus, set via PATCH /:id/stage,
-// still is) — this is the itemized Store/QA detail behind that one
+// Two itemized checklists live on PreProduction now, distinguished only
+// by itemKey (the two sets never overlap): the dispensing-area one (BMR
+// 1.0, Store's own column) at LINE_CLEARANCE, and the bulk-manufacturing
+// one (BMR 4.0, Production's own column instead of Store's) at
+// SAMPLE_QC_APPROVAL — see batch-checklists.ts. Not itself the gate
+// (PreProduction.lineClearanceStatus / sampleQcStatus, set via PATCH
+// /:id/stage, still is) — this is the itemized detail behind that one
 // sign-off. Each call only ever writes the one column the caller's role
-// owns.
+// owns; DEPT means Store on the dispensing set, Production on the bulk
+// set.
 preProductionRouter.patch("/:id/checklist", async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const parsed = checklistUpdateSchema.safeParse(req.body);
@@ -237,15 +249,22 @@ preProductionRouter.patch("/:id/checklist", async (req: AuthedRequest<{ id: stri
     const { column, items } = parsed.data as ChecklistUpdateInput;
 
     const isAdmin = req.user!.roles.includes("ADMIN");
-    if (column === "DEPT" && !req.user!.roles.includes("STORE") && !isAdmin) return res.status(403).json({ error: "Only Store can fill in this column." });
     if (column === "QA" && !req.user!.roles.includes("QA_QC") && !isAdmin) return res.status(403).json({ error: "Only QA/QC can fill in the QA column." });
 
     const existing = await prisma.preProduction.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Pre-production run not found" });
 
-    const validKeys = preProductionChecklistKeys();
-    const unknownKeys = items.map((i) => i.itemKey).filter((k) => !validKeys.has(k));
+    const dispensingKeys = preProductionChecklistKeys();
+    const bulkMfgKeys = combinedLotChecklistKeys();
+    const unknownKeys = items.map((i) => i.itemKey).filter((k) => !dispensingKeys.has(k) && !bulkMfgKeys.has(k));
     if (unknownKeys.length > 0) return res.status(400).json({ error: `Unknown checklist item(s): ${unknownKeys.join(", ")}` });
+
+    if (column === "DEPT" && !isAdmin) {
+      const needsStore = items.some((i) => dispensingKeys.has(i.itemKey));
+      const needsProduction = items.some((i) => bulkMfgKeys.has(i.itemKey));
+      if (needsStore && !req.user!.roles.includes("STORE")) return res.status(403).json({ error: "Only Store can fill in this column." });
+      if (needsProduction && !req.user!.roles.includes("PRODUCTION")) return res.status(403).json({ error: "Only Production can fill in this column." });
+    }
 
     await prisma.$transaction(
       items.map((i) =>

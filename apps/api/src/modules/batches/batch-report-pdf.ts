@@ -38,13 +38,6 @@ const PRE_PRODUCTION_SECTIONS: { stage: PreProductionStageId; fields: PreProduct
     ],
   },
   {
-    stage: "LINE_CLEARANCE",
-    fields: [
-      { key: "lineClearanceStatus", label: "Line Clearance Status" },
-      { key: "lineClearanceRemarks", label: "Remarks" },
-    ],
-  },
-  {
     stage: "DISPENSING",
     fields: [
       { key: "rmDispensingDate", label: "RM Dispensing Date" },
@@ -56,7 +49,7 @@ const PRE_PRODUCTION_SECTIONS: { stage: PreProductionStageId; fields: PreProduct
   {
     stage: "SAMPLE_QC_APPROVAL",
     fields: [
-      { key: "sampleQcStatus", label: "Sample QC Status" },
+      { key: "sampleQcStatus", label: "Line Clearance Status" },
       { key: "sampleQcRemarks", label: "Remarks" },
     ],
   },

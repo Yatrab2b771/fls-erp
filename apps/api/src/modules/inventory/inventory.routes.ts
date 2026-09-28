@@ -94,49 +94,6 @@ async function notifyTransitDispatched(params: {
   }
 }
 
-// A RECEIVED row tagged with a Day Store goes there directly, bypassing
-// the Warehouse — Store Before/After Report §6: "material can be
-// received directly at the day store, without passing through the
-// warehouse." Rather than give RECEIVED its own separate stock-math
-// path, this mirrors the existing "one leg triggers another" pattern
-// (Dispensing's WASTE consumption -> ISSUED_RECYCLE, SAMPLE -> a
-// QcSampleTransfer): the moment the RECEIVED row actually becomes
-// ACCEPTED — via POST /transactions/:id/accept, once QC clears it (every
-// RECEIVED row goes through the QC gate now, no bypass) — a matching
-// ISSUED_DAY_STORE row is created for the same qty/unit/date, tagged to
-// that Day Store. Net effect on Warehouse on-hand is zero (the RECEIVED
-// inflow and the ISSUED_DAY_STORE outflow cancel out, since neither
-// side of getOnHandByItemId cares about dayStoreId) — the material never
-// sat at the Warehouse, exactly as intended — while the Day Store's own
-// ledger (getOnHandByDayStoreAndItem) picks up the ISSUED_DAY_STORE leg
-// like any other. Only called from a context where the RECEIVED row has
-// just, in this same request, transitioned into ACCEPTED for the first
-// time, so there's no separate idempotency guard needed here.
-async function routeDirectReceiptToStore(params: {
-  receivedTxn: { itemId: string; quantity: number; unit: string; dayStoreId: string | null; date: Date; batchNo: string | null; size: string | null };
-  actorId: string;
-}): Promise<void> {
-  const { receivedTxn, actorId } = params;
-  if (!receivedTxn.dayStoreId) return;
-  await prisma.inventoryTransaction.create({
-    data: {
-      itemId: receivedTxn.itemId,
-      type: "ISSUED_DAY_STORE",
-      date: receivedTxn.date,
-      unit: receivedTxn.unit,
-      quantity: receivedTxn.quantity,
-      size: receivedTxn.size,
-      dayStoreId: receivedTxn.dayStoreId,
-      batchNo: receivedTxn.batchNo,
-      remark: "Auto-created — received directly at this store",
-      createdById: actorId,
-      isTransitTracked: false,
-      deliveredAt: new Date(),
-      deliveredById: actorId,
-    },
-  });
-}
-
 // Unlike Order Tracking/BOM/RM Costing, this module is NOT open to every
 // authenticated user by default. Store owns the Warehouse tool this
 // ports, so the ledger (transactions, dispatch transfers) and item
@@ -283,7 +240,7 @@ inventoryRouter.post("/items/import-master", requireRole("STORE"), validateBody(
 // Cost/Purchase/MRP/Sales pricing (PATCH /items/:id/pricing below) and
 // need to browse the catalog to get there; same reasoning extends to
 // stock-by-location just below.
-inventoryRouter.get("/stock", requireRole("STORE", "PPIC", "ACCOUNTS"), async (req: AuthedRequest, res, next) => {
+inventoryRouter.get("/stock", requireRole("STORE", "PPIC", "ACCOUNTS", "PURCHASE"), async (req: AuthedRequest, res, next) => {
   try {
     const category = req.query.category as InventoryCategory | undefined;
 
@@ -293,7 +250,15 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC", "ACCOUNTS"), async (r
       // rejected, hasn't actually become usable stock yet. rejectedQty
       // is summed alongside quantity so a partially-rejected delivery
       // only counts its actually-usable remainder (see qcReviewSchema).
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null }, _sum: { quantity: true, rejectedQty: true } }),
+      // Same expiry-quarantine OR clause as getOnHandByItemId in
+      // stock.ts — this route runs its own separate query rather than
+      // calling that helper, so it needs the same exclusion repeated
+      // here (see GET /quarantine for where an excluded row shows up).
+      prisma.inventoryTransaction.groupBy({
+        by: ["itemId"],
+        where: { type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null, OR: [{ expiryDate: null }, { expiryDate: { gte: new Date() } }, { expiryReleasedAt: { not: null } }] },
+        _sum: { quantity: true, rejectedQty: true },
+      }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE", deletedAt: null }, _sum: { quantity: true } }),
       prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_PRODUCTION", deletedAt: null }, _sum: { quantity: true } }),
       // Sample sent to the R&D Store (see rnd-store.routes.ts) — an
@@ -326,6 +291,255 @@ inventoryRouter.get("/stock", requireRole("STORE", "PPIC", "ACCOUNTS"), async (r
     });
 
     res.json(stock);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Finished Goods on hand — the warehouse-facing counterpart to the RM/PM
+// Stock on Hand view above, for what a batch's own pipeline produces
+// instead of a generic InventoryItem. A batch counts as "arrived at the
+// warehouse" once it reaches FG Store or any later stage (see
+// combined-lot-stage.ts's own role map — FG_STORE is STORE's stage,
+// exactly the moment Store confirms physical receipt); its on-hand
+// quantity is outputQty (or packApprovedQty, for a batch whose
+// outputQty was never separately entered) minus whatever's already
+// shipped on that same batch's own Dispatch Plan (dispatchedQty) — there
+// is no reliable link from a batch to the free-text "FG Transfer to
+// Dispatch" register (DispatchTransfer.productName has no product
+// master behind it), so netting against that register would silently
+// double-count or drift; this only ever reads a batch's own fields.
+// One row per batch/lot (not pre-aggregated) — the customer/product
+// grouping and filtering happens client-side, same "load once, slice on
+// screen" pattern as every other Inventory tab.
+const FG_ARRIVED_STAGES = ["FG_STORE", "FG_QC_RELEASE", "BILLING_EWAY_BILL", "DISPATCH_PLAN"] as const;
+
+const fgItemSelect = {
+  productName: true,
+  unit: true,
+  purchaseOrder: { select: { poNumber: true, customerId: true, customer: { select: { companyName: true } } } },
+} satisfies Prisma.PurchaseOrderItemSelect;
+
+inventoryRouter.get("/fg-stock", requireRole("STORE", "PPIC", "ACCOUNTS", "PURCHASE", "DISPATCH"), async (_req: AuthedRequest, res, next) => {
+  try {
+    const [batches, lots] = await Promise.all([
+      prisma.productionBatch.findMany({
+        where: { currentStageId: { in: [...FG_ARRIVED_STAGES] } },
+        select: {
+          id: true,
+          batchNo: true,
+          currentStageId: true,
+          outputQty: true,
+          packApprovedQty: true,
+          dispatchedQty: true,
+          manufacturingEndDate: true,
+          fgStoreReceivedDate: true,
+          preProduction: { select: { purchaseOrderItem: { select: fgItemSelect } } },
+        },
+        orderBy: { fgStoreReceivedDate: "desc" },
+      }),
+      // Legacy pooled lots — same field shapes, still real stock if any
+      // old lot is still sitting at one of these stages.
+      // No fgStoreReceivedDate on this legacy model (it never had a
+      // distinct FG Store data field, only the currentStageId itself) —
+      // packagingEndDate is the closest real date this model actually
+      // has for "roughly when this became finished stock."
+      prisma.combinedLot.findMany({
+        where: { currentStageId: { in: [...FG_ARRIVED_STAGES] } },
+        select: {
+          id: true,
+          currentStageId: true,
+          packApprovedQty: true,
+          dispatchedQty: true,
+          packagingEndDate: true,
+          preProduction: { select: { purchaseOrderItem: { select: fgItemSelect } } },
+        },
+        orderBy: { packagingEndDate: "desc" },
+      }),
+    ]);
+
+    const round = (n: number) => Math.round(n * 1000) / 1000;
+
+    const batchRows = batches
+      .map((b) => {
+        const item = b.preProduction.purchaseOrderItem;
+        const producedQty = b.outputQty ?? b.packApprovedQty ?? 0;
+        const onHandQty = round(producedQty - (b.dispatchedQty ?? 0));
+        return {
+          id: b.id,
+          kind: "BATCH" as const,
+          label: b.batchNo ?? `Batch ${b.id.slice(0, 8)}`,
+          customerId: item.purchaseOrder.customerId,
+          customerName: item.purchaseOrder.customer.companyName,
+          poNumber: item.purchaseOrder.poNumber,
+          productName: item.productName,
+          unit: item.unit,
+          currentStageId: b.currentStageId,
+          producedQty: round(producedQty),
+          dispatchedQty: round(b.dispatchedQty ?? 0),
+          onHandQty,
+          fgStoreReceivedDate: b.fgStoreReceivedDate,
+        };
+      })
+      .filter((r) => r.onHandQty > 1e-6);
+
+    const lotRows = lots
+      .map((l) => {
+        const item = l.preProduction.purchaseOrderItem;
+        const producedQty = l.packApprovedQty ?? 0;
+        const onHandQty = round(producedQty - (l.dispatchedQty ?? 0));
+        return {
+          id: l.id,
+          kind: "COMBINED_LOT" as const,
+          label: `Lot ${l.id.slice(0, 8)}`,
+          customerId: item.purchaseOrder.customerId,
+          customerName: item.purchaseOrder.customer.companyName,
+          poNumber: item.purchaseOrder.poNumber,
+          productName: item.productName,
+          unit: item.unit,
+          currentStageId: l.currentStageId,
+          producedQty: round(producedQty),
+          dispatchedQty: round(l.dispatchedQty ?? 0),
+          onHandQty,
+          fgStoreReceivedDate: l.packagingEndDate,
+        };
+      })
+      .filter((r) => r.onHandQty > 1e-6);
+
+    const rows = [...batchRows, ...lotRows].sort((a, b) => a.customerName.localeCompare(b.customerName) || a.productName.localeCompare(b.productName));
+
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Quarantine Store — everything physically present but NOT currently
+// counted as usable stock (see getOnHandByItemId's own comment): a
+// fresh delivery still awaiting its first QC check (PENDING_QC/
+// ON_HOLD), and an already-ACCEPTED delivery whose expiryDate has since
+// passed and hasn't been explicitly released by QA/QC. Same audience as
+// GET /transactions (Store owns the physical stock, QA/QC acts on it,
+// Accounts/RND/PPIC just need visibility).
+inventoryRouter.get("/quarantine", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND", "PPIC"), async (_req: AuthedRequest, res, next) => {
+  try {
+    const [pendingQc, expired] = await Promise.all([
+      prisma.inventoryTransaction.findMany({
+        where: { deletedAt: null, type: "RECEIVED", receiptStatus: { in: [...QC_REVIEWABLE_STATUSES] } },
+        include: txnInclude,
+        orderBy: { date: "desc" },
+      }),
+      prisma.inventoryTransaction.findMany({
+        where: { deletedAt: null, type: "RECEIVED", receiptStatus: "ACCEPTED", expiryDate: { lt: new Date() }, expiryReleasedAt: null },
+        include: txnInclude,
+        orderBy: { expiryDate: "asc" },
+      }),
+    ]);
+
+    const rows = [
+      ...pendingQc.map((t) => ({ ...t, quarantineReason: t.receiptStatus === "ON_HOLD" ? ("ON_HOLD" as const) : ("PENDING_QC" as const) })),
+      ...expired.map((t) => ({ ...t, quarantineReason: "EXPIRED" as const })),
+    ];
+
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// QA/QC's own call on an expired-but-already-accepted delivery — plain
+// approve for now (no note/reject path yet, can extend later): sets
+// expiryReleasedById/At, which is the one thing getOnHandByItemId checks
+// to let an expired row count toward stock again.
+inventoryRouter.patch("/transactions/:id/release-expiry", requireRole("QA_QC", "RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
+    if (!existing) return res.status(404).json({ error: "Transaction not found" });
+    if (existing.type !== "RECEIVED" || existing.receiptStatus !== "ACCEPTED") {
+      return res.status(400).json({ error: "Only an already-accepted Material Received entry can be released from expiry quarantine." });
+    }
+    if (!existing.expiryDate || existing.expiryDate >= new Date()) {
+      return res.status(400).json({ error: "This entry isn't expired — nothing to release." });
+    }
+    if (existing.expiryReleasedAt) {
+      return res.status(409).json({ error: "This entry was already released." });
+    }
+
+    const result = await prisma.inventoryTransaction.updateMany({
+      where: { id: req.params.id, expiryReleasedAt: null },
+      data: { expiryReleasedById: req.user!.id, expiryReleasedAt: new Date() },
+    });
+    if (result.count === 0) {
+      return res.status(409).json({ error: "This entry was just released by someone else." });
+    }
+    const updated = await prisma.inventoryTransaction.findUniqueOrThrow({ where: { id: req.params.id }, include: txnInclude });
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory.receipt_expiry_released", entityType: "InventoryTransaction", entityId: updated.id });
+
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Store's own Dashboard tile counts — deliberately lightweight (counts
+// only, never the full item lists those tiles' own drill-down pages
+// fetch on demand) so the Dashboard itself stays fast. Counts an item
+// once it has real stock (onHand > 0) at that location — a location
+// with 50 items in its catalog but zero actually on hand isn't
+// meaningfully "50 items" to Store, it's 0.
+inventoryRouter.get("/dashboard-summary", requireRole("STORE"), async (_req: AuthedRequest, res, next) => {
+  try {
+    const [rmItems, pmItems, dayStores] = await Promise.all([
+      prisma.inventoryItem.findMany({ where: { category: "RM" }, select: { id: true } }),
+      prisma.inventoryItem.findMany({ where: { category: "PM" }, select: { id: true } }),
+      prisma.dayStore.findMany({ select: { id: true, name: true } }),
+    ]);
+
+    const [rmOnHand, pmOnHand] = await Promise.all([
+      getOnHandByItemId(rmItems.map((i) => i.id)),
+      getOnHandByItemId(pmItems.map((i) => i.id)),
+    ]);
+    const rmItemCount = [...rmOnHand.values()].filter((qty) => qty > 1e-6).length;
+    const pmItemCount = [...pmOnHand.values()].filter((qty) => qty > 1e-6).length;
+
+    const dayStoreCounts = await Promise.all(
+      dayStores.map(async (ds) => {
+        const balances = await getOnHandByDayStoreAndItem(ds.id);
+        const itemCount = [...balances.values()].filter((b) => b.onHand > 1e-6).length;
+        return { id: ds.id, name: ds.name, itemCount };
+      }),
+    );
+
+    const [fgBatches, fgLots, quarantinePendingQc, quarantineExpired] = await Promise.all([
+      prisma.productionBatch.findMany({
+        where: { currentStageId: { in: [...FG_ARRIVED_STAGES] } },
+        select: { outputQty: true, packApprovedQty: true, dispatchedQty: true, preProduction: { select: { purchaseOrderItem: { select: { productName: true, purchaseOrder: { select: { customerId: true } } } } } } },
+      }),
+      prisma.combinedLot.findMany({
+        where: { currentStageId: { in: [...FG_ARRIVED_STAGES] } },
+        select: { packApprovedQty: true, dispatchedQty: true, preProduction: { select: { purchaseOrderItem: { select: { productName: true, purchaseOrder: { select: { customerId: true } } } } } } },
+      }),
+      prisma.inventoryTransaction.count({ where: { deletedAt: null, type: "RECEIVED", receiptStatus: { in: [...QC_REVIEWABLE_STATUSES] } } }),
+      prisma.inventoryTransaction.count({ where: { deletedAt: null, type: "RECEIVED", receiptStatus: "ACCEPTED", expiryDate: { lt: new Date() }, expiryReleasedAt: null } }),
+    ]);
+    const fgKeys = new Set<string>();
+    for (const b of fgBatches) {
+      const onHand = (b.outputQty ?? b.packApprovedQty ?? 0) - (b.dispatchedQty ?? 0);
+      if (onHand > 1e-6) fgKeys.add(`${b.preProduction.purchaseOrderItem.purchaseOrder.customerId}::${b.preProduction.purchaseOrderItem.productName}`);
+    }
+    for (const l of fgLots) {
+      const onHand = (l.packApprovedQty ?? 0) - (l.dispatchedQty ?? 0);
+      if (onHand > 1e-6) fgKeys.add(`${l.preProduction.purchaseOrderItem.purchaseOrder.customerId}::${l.preProduction.purchaseOrderItem.productName}`);
+    }
+
+    res.json({
+      rmItemCount,
+      pmItemCount,
+      dayStores: dayStoreCounts,
+      fgProductCount: fgKeys.size,
+      quarantineCount: quarantinePendingQc + quarantineExpired,
+    });
   } catch (err) {
     next(err);
   }
@@ -549,6 +763,7 @@ export const txnInclude = {
   createdBy: { select: { id: true, employeeId: true, fullName: true } },
   qcCheckedBy: { select: { id: true, employeeId: true, fullName: true } },
   acceptedBy: { select: { id: true, employeeId: true, fullName: true } },
+  expiryReleasedBy: { select: { id: true, employeeId: true, fullName: true } },
   deliveredBy: { select: { id: true, employeeId: true, fullName: true } },
   dayStore: true,
   plant: true,
@@ -773,6 +988,11 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     if (rest.isTransitTracked && rest.type === "RECEIVED") {
       return res.status(400).json({ error: "Transit tracking only applies to Issued to Store / Issued to Production rows — a Material Received entry already has its own inward QC gate." });
     }
+    // Direct-to-store receiving was removed — a Material Received row
+    // always goes through the Warehouse now, same as every other item.
+    if (rest.dayStoreId && rest.type === "RECEIVED") {
+      return res.status(400).json({ error: "Material Received entries go through the Warehouse — Day Store only applies to Issued to Day Store rows." });
+    }
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
@@ -850,10 +1070,6 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
         notifyFailed(req, "inventory.material_received"),
       );
     }
-    // A direct-to-store RECEIVED row's companion ISSUED_DAY_STORE leg
-    // (see routeDirectReceiptToStore's own comment) only fires once this
-    // row actually reaches ACCEPTED — every RECEIVED row now goes through
-    // the QC gate first, so that happens in POST /:id/accept, never here.
     if (rest.isTransitTracked) {
       await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
@@ -1264,18 +1480,6 @@ inventoryRouter.post("/transactions/:id/accept", requireRole("STORE"), async (re
       actorId: req.user!.id,
       onFail: (label) => notifyFailed(req, label),
     });
-
-    // This row just became ACCEPTED for the first time (the atomic
-    // updateMany above only succeeds once) — if it was tagged for direct
-    // Day Store receipt, this is the moment to fire the companion leg.
-    // The rejected portion (if any) never counted as received at all, so
-    // only the net accepted quantity moves on.
-    if (updated.dayStoreId) {
-      await routeDirectReceiptToStore({
-        receivedTxn: { ...updated, quantity: updated.quantity - (updated.rejectedQty ?? 0) },
-        actorId: req.user!.id,
-      });
-    }
 
     res.json(updated);
   } catch (err) {
