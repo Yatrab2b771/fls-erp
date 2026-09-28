@@ -162,17 +162,17 @@ describe("Notification wiring — Pre-Production / Combined Lot", () => {
 });
 
 describe("Notification wiring — Inventory", () => {
-  it("a RECEIVED transaction notifies QA_QC; QC review notifies STORE", async () => {
+  it("a RECEIVED transaction notifies RND; QC review notifies STORE", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
-    const { token: qaToken } = await createUser(["QA_QC"]);
+    const { token: rndToken } = await createUser(["RND"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
     const txn = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
-    const qaInbox = await notifsFor(qaToken);
-    expect(qaInbox.notifications.some((n) => n.title.includes("inward QC"))).toBe(true);
+    const rndInbox = await notifsFor(rndToken);
+    expect(rndInbox.notifications.some((n) => n.title.includes("inward QC"))).toBe(true);
 
     await request(app).post("/api/notifications/read-all").set(authHeader(storeToken));
-    await request(app).patch(`/api/inventory/transactions/${txn.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${txn.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
     const storeInbox = await notifsFor(storeToken);
     expect(storeInbox.notifications.some((n) => n.title.includes("QC-approved"))).toBe(true);
   });

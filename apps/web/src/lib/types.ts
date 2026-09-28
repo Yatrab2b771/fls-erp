@@ -224,6 +224,32 @@ export interface PurchaseOrderDocument {
 // can't be created off any line item until the PO is APPROVED.
 export type PurchaseOrderStatus = "DRAFT" | "APPROVED" | "REJECTED";
 
+// GET /api/purchase-orders/reports/pending-materials — one row per
+// product on every pending PO, see apps/api's pending-materials.ts.
+export interface PendingMaterialLine {
+  name: string;
+  requiredQty: number;
+  unit: string;
+  onHand: number | null;
+  short: boolean;
+  shortfallQty: number;
+}
+
+export interface PendingPoMaterialRow {
+  purchaseOrderId: string;
+  purchaseOrderItemId: string;
+  poNumber: string | null;
+  customerName: string;
+  orderDate: string | null;
+  productName: string;
+  quantity: number;
+  unit: string;
+  rmPlanned: boolean;
+  bomPlanned: boolean;
+  rmMaterials: PendingMaterialLine[];
+  pmMaterials: PendingMaterialLine[];
+}
+
 export interface PurchaseOrder {
   id: string;
   customerId: string;
@@ -1602,10 +1628,44 @@ export interface PreInventoryRequirement {
   eta: string | null;
   purchaseById: string | null;
   purchaseAt: string | null;
+  // Set only when Purchase edits an already-logged PO — never on the
+  // first log. A visible "Updated" tag reads off this, so PPIC can
+  // notice a correction even if they missed the one-time notification.
+  purchaseCorrectedAt: string | null;
   purchaseBy: PersonRef | null;
   // PPIC's one-time "Send to Purchase" notify — set once, then the
   // button disables so repeat clicks don't spam Purchase.
   purchaseNotifiedAt: string | null;
+}
+
+// --- Add on Plan — PPIC's PO-independent material availability search
+// (GET /api/add-on-plan/*). See apps/api's add-on-plan.ts for how this
+// reads an existing catalog product's already-calculated plan instead
+// of recalculating anything. ---
+
+export interface AddOnPlanCandidate {
+  type: "SKU" | "RECIPE";
+  id: string;
+  name: string;
+  customerName: string | null;
+}
+
+export interface AddOnPlanMaterialLine {
+  name: string;
+  requiredQty: number;
+  unit: string;
+  onHand: number | null;
+  short: boolean;
+  shortfallQty: number;
+}
+
+export interface AddOnPlanDetail {
+  productName: string;
+  customerName: string | null;
+  category: "PM" | "RM";
+  planName: string;
+  planCalculatedAt: string;
+  materials: AddOnPlanMaterialLine[];
 }
 
 // --- PO Full Report — every product line's PreProduction (Tier 1) walk

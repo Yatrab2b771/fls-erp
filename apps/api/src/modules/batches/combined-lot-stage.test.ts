@@ -15,12 +15,10 @@ describe("combined lot stage order", () => {
   });
 
   // Production Process Flow.docx tags Bulk QC Sampling & Testing as R&D's
-  // own work, not generic QA — R&D gets access alongside QA_QC (not
-  // replacing it) here, the one stage with more than one owning role.
-  it("BULK_QC is owned by both QA_QC and RND; every other stage still has exactly one owner", () => {
-    expect(COMBINED_LOT_STAGE_ROLE.BULK_QC).toEqual(["QA_QC", "RND"]);
+  // own work, not generic QA — RND-only, not QA_QC.
+  it("BULK_QC is owned by RND; every stage has exactly one owner", () => {
+    expect(COMBINED_LOT_STAGE_ROLE.BULK_QC).toEqual(["RND"]);
     for (const stage of COMBINED_LOT_STAGE_ORDER) {
-      if (stage === "BULK_QC") continue;
       expect(COMBINED_LOT_STAGE_ROLE[stage]).toHaveLength(1);
     }
   });

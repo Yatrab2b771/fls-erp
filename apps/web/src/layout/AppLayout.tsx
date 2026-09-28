@@ -23,6 +23,7 @@ import {
   PackageMinus,
   Recycle,
   RotateCcw,
+  Search,
   ShieldCheck,
   ShoppingBag,
   Truck,
@@ -93,6 +94,13 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       { to: "/vendors", label: "Vendors", icon: Factory, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
       { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS"] },
       { to: "/po-readiness", label: "PO Readiness", icon: CheckCircle2, roles: ["PPIC"] },
+      // PO-independent — search an existing catalog product (Sku/Recipe)
+      // whose BOM/RM Plan is already calculated and check its RM/PM
+      // material availability, before BD has even raised the PO (the
+      // urgent-order case). See add-on-plan.ts's own comment for why
+      // this reads an existing plan's `sources` map instead of
+      // recalculating anything.
+      { to: "/add-on-plan", label: "Add on Plan", icon: Search, roles: ["PPIC"] },
     ],
   },
   {

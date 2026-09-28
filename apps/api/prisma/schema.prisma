@@ -1986,6 +1986,12 @@ model PreInventoryRequirement {
   eta          DateTime?
   purchaseById String?
   purchaseAt   DateTime?
+  // Set only when Purchase edits an already-logged PO Number/Vendor/ETA
+  // (not on the first log — see pre-inventory.routes.ts's isCorrection),
+  // so PPIC has a visible "Updated" tag to notice a correction even if
+  // they missed the one-time notification. Left null forever for a
+  // requirement whose PO was only ever logged once.
+  purchaseCorrectedAt DateTime?
 
   // PPIC's one-time "Send to Purchase" notify click — records so the
   // button can't be clicked repeatedly and spam Purchase with duplicate

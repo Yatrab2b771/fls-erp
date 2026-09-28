@@ -49,6 +49,7 @@ describe("GET /api/qc/dashboard", () => {
   it("counts pending and held rows across Material Received and FG Dispatch", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: qaToken } = await createUser(["QA_QC"]);
+    const { token: rndToken } = await createUser(["RND"]);
     const { token: bdToken } = await createUser(["BD"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
     const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
@@ -62,7 +63,7 @@ describe("GET /api/qc/dashboard", () => {
       .post("/api/inventory/transactions")
       .set(authHeader(storeToken))
       .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 20 });
-    await request(app).patch(`/api/inventory/transactions/${heldReceipt.body.id}/qc`).set(authHeader(qaToken)).send({ action: "HOLD", note: "Checking vendor COA" });
+    await request(app).patch(`/api/inventory/transactions/${heldReceipt.body.id}/qc`).set(authHeader(rndToken)).send({ action: "HOLD", note: "Checking vendor COA" });
 
     // One dispatch transfer left pending, one held.
     const pendingDispatch = await request(app)

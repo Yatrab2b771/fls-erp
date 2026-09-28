@@ -366,6 +366,8 @@ export function exportRequirementsReport(rows: PreInventoryRequirement[]) {
       ETA: r.eta ? new Date(r.eta).toLocaleDateString() : "",
       "Ordered By": formatPerson(r.purchaseBy),
       "Ordered At": formatTimestamp(r.purchaseAt),
+      "PO Updated": r.purchaseCorrectedAt ? "Yes" : "No",
+      "PO Updated At": formatTimestamp(r.purchaseCorrectedAt),
     })),
     `FLS_PreInventory_Vendor_List_${todayStamp()}.xlsx`,
   );

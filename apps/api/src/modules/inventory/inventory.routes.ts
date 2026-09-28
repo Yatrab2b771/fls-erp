@@ -10,6 +10,7 @@ import { RouteError } from "../../common/lib/route-error";
 import { assertDayStoreAccess } from "./day-store-access";
 import { getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem, notifyIfNewlyAvailable } from "./stock";
 import { notifyIfPoNewlyReady } from "../po-readiness/po-readiness.routes";
+import { buildMaterialReceivedPdf } from "./material-received-pdf";
 import {
   confirmDeliverySchema,
   createDebitNoteSchema,
@@ -813,6 +814,29 @@ inventoryRouter.get("/transactions", requireRole("STORE", "QA_QC", "ACCOUNTS", "
   }
 });
 
+// One Material Received log entry as a printable PDF — same field set as
+// the per-row Excel export (see exportTransactionReport on the
+// frontend), for Store/R&D to file alongside a physical delivery/GRN.
+// Same read audience as GET /transactions above; RECEIVED-only since
+// that's the only type with an inward QC trail worth printing.
+inventoryRouter.get("/transactions/:id/export.pdf", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const txn = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id }, include: txnInclude });
+    if (!txn) return res.status(404).json({ error: "Transaction not found" });
+    if (txn.type !== "RECEIVED") return res.status(400).json({ error: "Only a Material Received entry can be exported this way" });
+
+    const doc = buildMaterialReceivedPdf(txn);
+    await recordAudit({ actorId: req.user!.id, action: "inventory.receipt_exported_pdf", entityType: "InventoryTransaction", entityId: txn.id });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="FLS_Material_Received_${txn.item.name.replace(/\s+/g, "_")}_${txn.id.slice(0, 8)}.pdf"`);
+    doc.pipe(res);
+    doc.end();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // --- Bulk import — one Excel sheet's worth of Received/Issued rows at
 // once, parsed client-side (apps/web's inventoryImport.ts) into the same
 // shape as a single Log Entry. Items are resolved-or-created by
@@ -961,7 +985,7 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
 
     if (type === "RECEIVED" && result.count > 0) {
       await notifyRoles(
-        ["QA_QC"],
+        ["RND"],
         { title: `${result.count} material received row(s) awaiting inward QC`, body: "Bulk import — check the Material Received tab.", link: "/inventory" },
         req.user!.id,
       ).catch(notifyFailed(req, "inventory.transactions_imported"));
@@ -1066,7 +1090,7 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     });
 
     if (rest.type === "RECEIVED") {
-      await notifyRoles(["QA_QC"], { title: `${item.name} awaiting inward QC`, body: `${rest.quantity} ${rest.unit}`, link: "/inventory" }, req.user!.id).catch(
+      await notifyRoles(["RND"], { title: `${item.name} awaiting inward QC`, body: `${rest.quantity} ${rest.unit}`, link: "/inventory" }, req.user!.id).catch(
         notifyFailed(req, "inventory.material_received"),
       );
     }
@@ -1333,16 +1357,23 @@ inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: Au
   }
 });
 
-// --- Inward QC gate — a RECEIVED row starts PENDING_QC; QA/QC checks it
-// (this route), then Store accepts it (the next route) before it counts
-// toward stock. HOLD parks it (QA/QC can come back and re-review a held
+// --- Inward QC gate — a RECEIVED row starts PENDING_QC; R&D checks it
+// (this route). Approve now counts it into stock immediately — Store
+// already vouched for the physical delivery once, at the moment they
+// logged this Material Received entry in the first place, so a second
+// separate "Accept into stock" click added nothing but a delay (per the
+// client's 2026-09-28 call). QC_APPROVED as an intermediate state is
+// gone for new approvals; POST /transactions/:id/accept below stays only
+// to unstick any row that was already sitting at QC_APPROVED before this
+// change shipped. HOLD parks it (R&D can come back and re-review a held
 // or still-pending row into either final state, or hold it again);
-// QC_REJECTED is the only terminal outcome. RND has the same access —
+// QC_REJECTED is the only terminal outcome. RND-only, not QA_QC —
 // Production Process Flow.docx tags QC Sampling/Testing on incoming
-// material as R&D's own work, not generic QA, added alongside QA_QC
-// rather than replacing it. ---
+// material as R&D's own work, not generic QA's (per the client's own
+// 2026-09-28 call, this moved from "R&D alongside QA_QC" to "R&D
+// only"). ---
 
-inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC", "RND"), validateBody(inwardQcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+inventoryRouter.patch("/transactions/:id/qc", requireRole("RND"), validateBody(inwardQcReviewSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Transaction not found" });
@@ -1352,6 +1383,7 @@ inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC", "RND"), valid
     }
 
     const { action, note } = req.body as InwardQcReviewInput;
+    const now = new Date();
 
     // Guarding receiptStatus in the WHERE clause (not just the read
     // above) makes this one atomic conditional update instead of a
@@ -1363,10 +1395,14 @@ inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC", "RND"), valid
     const result = await prisma.inventoryTransaction.updateMany({
       where: { id: req.params.id, receiptStatus: { in: [...QC_REVIEWABLE_STATUSES] } },
       data: {
-        receiptStatus: nextQcStatus(action),
+        // APPROVE goes straight to ACCEPTED (see this route's own
+        // comment above) — REJECT/HOLD still use the shared
+        // nextQcStatus, same as outward QC.
+        receiptStatus: action === "APPROVE" ? "ACCEPTED" : nextQcStatus(action),
         qcCheckedById: req.user!.id,
-        qcCheckedAt: new Date(),
+        qcCheckedAt: now,
         qcNote: note,
+        ...(action === "APPROVE" ? { acceptedById: req.user!.id, acceptedAt: now } : {}),
       },
     });
     if (result.count === 0) {
@@ -1382,10 +1418,28 @@ inventoryRouter.patch("/transactions/:id/qc", requireRole("QA_QC", "RND"), valid
       metadata: { note },
     });
 
+    if (action === "APPROVE") {
+      // Same "0 -> positive crossing" notifications the old separate
+      // Accept step used to fire — now fired here since Approve is what
+      // actually adds it to stock.
+      await notifyIfNewlyAvailable({
+        itemId: updated.itemId,
+        addedQty: updated.quantity - (updated.rejectedQty ?? 0),
+        actorId: req.user!.id,
+        onFail: (label) => notifyFailed(req, label),
+      });
+      await notifyIfPoNewlyReady({
+        itemId: updated.itemId,
+        addedQty: updated.quantity - (updated.rejectedQty ?? 0),
+        actorId: req.user!.id,
+        onFail: (label) => notifyFailed(req, label),
+      });
+    }
+
     await notifyRoles(
       ["STORE"],
       action === "APPROVE"
-        ? { title: `${updated.item.name} QC-approved`, body: "Ready to accept into stock.", link: "/inventory" }
+        ? { title: `${updated.item.name} QC-approved`, body: "Now in stock.", link: "/inventory" }
         : action === "REJECT"
           ? { title: `${updated.item.name} QC-rejected`, body: note, link: "/inventory" }
           : { title: `${updated.item.name} on hold`, body: note, link: "/inventory" },

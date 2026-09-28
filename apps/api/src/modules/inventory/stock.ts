@@ -1,5 +1,6 @@
 import { prisma } from "../../common/lib/prisma";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
+import { getRndStoreOnHand } from "../rnd-store/rnd-stock";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 // A subset of the Prisma client's query surface, satisfied by both the
@@ -185,28 +186,40 @@ export async function getOnHandByPlantAndItem(plantId: string, itemIds?: string[
   return onHand;
 }
 
-// Company-wide availability for PO Readiness — per the 2026-08-26
-// PO-execution cascade call: RM/PM availability for deciding whether a
-// PO can run is "total of Warehouse + Day Store + any balance stock at
-// Plants," not Warehouse alone. getOnHandByItemId on its own only
-// answers "what's still sitting in the Warehouse" — material already
-// moved out to a Day Store or a Plant (but not yet consumed in
-// production) drops out of that number even though it's still real,
-// usable stock the company has. This sums all three so a PO doesn't
-// show short just because its material already staged forward.
+// Company-wide availability for PO Readiness, Pre-Inventory's shortfall
+// check, and the Pending PO Report — per the 2026-08-26 PO-execution
+// cascade call (Day Store/Plant) plus the follow-up request to also
+// count R&D Store: RM/PM availability for deciding whether something is
+// genuinely short is "total of Warehouse + every Day Store + any
+// balance stock at Plants + R&D Store," not Warehouse alone.
+// getOnHandByItemId on its own only answers "what's still sitting in
+// the Warehouse" — material already moved out to a Day Store, a Plant,
+// or R&D Store (but not yet consumed/dispatched/tested away) drops out
+// of that number even though it's still real, usable stock the company
+// has. This sums all four so nothing shows short just because its
+// material already staged forward to another location.
 //
 // No double-counting: Warehouse's own on-hand already subtracts every
-// ISSUED_DAY_STORE/ISSUED_PRODUCTION row regardless of destination, so
-// material that moved to a Day Store or Plant is removed from the
-// Warehouse side and only re-appears once here, in that location's own
-// balance. A transfer between locations (Warehouse -> Day Store,
-// Day Store -> Plant) nets to zero change in this total — only a new
-// RECEIVED delivery or a real BatchMaterialConsumption changes it,
-// which is exactly why the existing notifyIfPoNewlyReady/
-// notifyIfNewlyAvailable "0 -> positive crossing" hooks (fired only at
-// RECEIVED events) don't need to change to stay correct against this.
-export async function getTotalAvailableByItemId(itemIds: string[], db: Db & Pick<PrismaClient, "dayStore" | "plant"> = prisma): Promise<Map<string, number>> {
-  const [warehouse, dayStores, plants] = await Promise.all([getOnHandByItemId(itemIds, db), db.dayStore.findMany({ select: { id: true } }), db.plant.findMany({ select: { id: true } })]);
+// ISSUED_DAY_STORE/ISSUED_PRODUCTION/ISSUED_RND row regardless of
+// destination, so material that moved to a Day Store, Plant, or R&D
+// Store is removed from the Warehouse side and only re-appears once
+// here, in that location's own balance. A transfer between locations
+// (Warehouse -> Day Store, Day Store -> Plant, Warehouse -> R&D Store)
+// nets to zero change in this total — only a new RECEIVED delivery or a
+// real BatchMaterialConsumption/R&D consumption changes it, which is
+// exactly why the existing notifyIfPoNewlyReady/notifyIfNewlyAvailable
+// "0 -> positive crossing" hooks (fired only at RECEIVED events) don't
+// need to change to stay correct against this.
+export async function getTotalAvailableByItemId(
+  itemIds: string[],
+  db: Db & Pick<PrismaClient, "dayStore" | "plant" | "rndStoreTransaction"> = prisma,
+): Promise<Map<string, number>> {
+  const [warehouse, dayStores, plants, rndStore] = await Promise.all([
+    getOnHandByItemId(itemIds, db),
+    db.dayStore.findMany({ select: { id: true } }),
+    db.plant.findMany({ select: { id: true } }),
+    getRndStoreOnHand(itemIds, db),
+  ]);
 
   const total = new Map(warehouse);
   const [dayStoreBalances, plantBalances] = await Promise.all([
@@ -219,6 +232,9 @@ export async function getTotalAvailableByItemId(itemIds: string[], db: Db & Pick
   }
   for (const balances of plantBalances) {
     for (const [itemId, onHand] of balances) total.set(itemId, (total.get(itemId) ?? 0) + onHand);
+  }
+  for (const [itemId, onHand] of rndStore) {
+    total.set(itemId, (total.get(itemId) ?? 0) + onHand);
   }
 
   return total;

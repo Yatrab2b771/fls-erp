@@ -97,10 +97,11 @@ combinedLotRouter.patch("/:id/checklist", async (req: AuthedRequest<{ id: string
 });
 
 // Certificate of Analysis — matches "COA format.docx". A full replace
-// each save, not an upsert-by-key like the checklists. RND alongside
+// each save, not an upsert-by-key like the checklists. RND-only, not
 // QA_QC — Bulk QC Sampling & Testing, which COA is part of, is R&D's own
-// work per Production Process Flow.docx.
-combinedLotRouter.put("/:id/coa/results", requireRole("QA_QC", "RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+// work per Production Process Flow.docx (per the client's 2026-09-28
+// call, this moved from "R&D alongside QA_QC" to "R&D only").
+combinedLotRouter.put("/:id/coa/results", requireRole("RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const parsed = coaResultsReplaceSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
@@ -133,7 +134,7 @@ const COA_SIGN_FIELD: Record<CoaSignInput["step"], { byField: "coaAnalyzedById" 
   REVIEWED: { byField: "coaReviewedById", atField: "coaReviewedAt" },
   APPROVED: { byField: "coaApprovedById", atField: "coaApprovedAt" },
 };
-combinedLotRouter.post("/:id/coa/sign", requireRole("QA_QC", "RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+combinedLotRouter.post("/:id/coa/sign", requireRole("RND"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const parsed = coaSignSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });

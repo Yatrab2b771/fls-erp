@@ -370,7 +370,7 @@ const COA_SIGN_STEPS = [
 
 function CoaPanel({ lot }: { lot: CombinedLot }) {
   const { hasRole } = useAuth();
-  const canEdit = hasRole("QA_QC", "RND");
+  const canEdit = hasRole("RND");
   const replaceResults = useReplaceCoaResults(lot.id);
   const sign = useSignCoa(lot.id);
   const toast = useToast();

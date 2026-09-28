@@ -35,6 +35,7 @@ import { recipeRequestRouter } from "./modules/recipe-requests/recipe-request.ro
 import { rndStoreRouter } from "./modules/rnd-store/rnd-store.routes";
 import { qcSampleRouter } from "./modules/batches/qc-sample.routes";
 import { recycleStoreRouter } from "./modules/recycle-store/recycle-store.routes";
+import { addOnPlanRouter } from "./modules/planning/add-on-plan.routes";
 
 export function createApp() {
   const app = express();
@@ -109,6 +110,7 @@ export function createApp() {
   app.use("/api/rnd-store", rndStoreRouter);
   app.use("/api/qc-sample", qcSampleRouter);
   app.use("/api/recycle-store", recycleStoreRouter);
+  app.use("/api/add-on-plan", addOnPlanRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

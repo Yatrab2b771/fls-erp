@@ -28,6 +28,9 @@ import { InventoryPage } from "./pages/InventoryPage";
 import { InventoryItemDetailPage } from "./pages/InventoryItemDetailPage";
 import { PreInventoryPage } from "./pages/PreInventoryPage";
 import { PoReadinessPage } from "./pages/PoReadinessPage";
+import { AddOnPlanPage } from "./pages/AddOnPlanPage";
+import { InwardQcReportPage } from "./pages/InwardQcReportPage";
+import { BulkQcReportPage } from "./pages/BulkQcReportPage";
 import { UsersPage } from "./pages/UsersPage";
 import { RecycleBinPage } from "./pages/RecycleBinPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
@@ -82,6 +85,9 @@ export default function App() {
           <Route path="/inventory/items/:itemId" element={<InventoryItemDetailPage />} />
           <Route path="/pre-inventory" element={<PreInventoryPage />} />
           <Route path="/po-readiness" element={<PoReadinessPage />} />
+          <Route path="/add-on-plan" element={<AddOnPlanPage />} />
+          <Route path="/inward-qc" element={<InwardQcReportPage />} />
+          <Route path="/bulk-qc" element={<BulkQcReportPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/recycle-bin" element={<RecycleBinPage />} />
           <Route path="/system-health" element={<SystemHealthPage />} />

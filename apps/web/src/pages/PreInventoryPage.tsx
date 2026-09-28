@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, ClipboardList, Download, FileSpreadsheet, Package, Plus, Send, ShoppingCart, Trash2, Truck, Upload, UserPlus, Warehouse } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
@@ -70,6 +71,16 @@ export function PreInventoryPage() {
   const [category, setCategory] = useState<InventoryCategory | "">("");
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
+  // ?status=SHORTFALL / ?status=COVERED — arrives here from a dashboard
+  // tile (Purchase's "Shortfall"/"Complete" tiles, see DashboardPage.tsx)
+  // so the actionable Log PO / Edit PO list opens already narrowed down,
+  // not just an inert count. Read once on mount, then behaves as a
+  // normal in-page filter the person can change or clear.
+  const [searchParams] = useSearchParams();
+  const initialStatus = searchParams.get("status");
+  const [statusFilter, setStatusFilter] = useState<RequirementStatus | "">(
+    initialStatus === "SHORTFALL" || initialStatus === "COVERED" || initialStatus === "ORDERED" ? initialStatus : "",
+  );
 
   const { data: requirements, isLoading } = usePreInventoryRequirements(category ? { category } : undefined);
   const importRequirements = useImportRequirements();
@@ -82,9 +93,12 @@ export function PreInventoryPage() {
   const filtered = useMemo(() => {
     if (!requirements) return requirements;
     const q = search.trim().toLowerCase();
-    if (!q) return requirements;
-    return requirements.filter((r) => r.item.name.toLowerCase().includes(q) || r.vendorName?.toLowerCase().includes(q) || r.poNumber?.toLowerCase().includes(q));
-  }, [requirements, search]);
+    return requirements.filter((r) => {
+      if (statusFilter && requirementStatus(r) !== statusFilter) return false;
+      if (q && !r.item.name.toLowerCase().includes(q) && !r.vendorName?.toLowerCase().includes(q) && !r.poNumber?.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [requirements, search, statusFilter]);
 
   const stats = useMemo(() => {
     const rows = requirements ?? [];
@@ -192,10 +206,18 @@ export function PreInventoryPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <StatTile icon={ClipboardList} label="Total Requirements" value={stats.total} accent="brand" />
-        <StatTile icon={CheckCircle2} label="Fully Covered" value={stats.covered} accent="emerald" />
-        <StatTile icon={Package} label="Shortfalls" value={stats.shortfall} accent="amber" />
-        <StatTile icon={ShoppingCart} label="PO Logged" value={stats.ordered} accent="violet" />
+        <button type="button" className="block text-left" onClick={() => setStatusFilter("")}>
+          <StatTile icon={ClipboardList} label="Total Requirements" value={stats.total} accent="brand" />
+        </button>
+        <button type="button" className="block text-left" onClick={() => setStatusFilter("COVERED")}>
+          <StatTile icon={CheckCircle2} label="Complete" value={stats.covered} accent="emerald" />
+        </button>
+        <button type="button" className="block text-left" onClick={() => setStatusFilter("SHORTFALL")}>
+          <StatTile icon={Package} label="Shortfall" value={stats.shortfall} accent="amber" />
+        </button>
+        <button type="button" className="block text-left" onClick={() => setStatusFilter("ORDERED")}>
+          <StatTile icon={ShoppingCart} label="PO Logged" value={stats.ordered} accent="violet" />
+        </button>
       </div>
 
       {showNew && canRequest && <NewRequirementForm onDone={() => setShowNew(false)} />}
@@ -207,6 +229,14 @@ export function PreInventoryPage() {
         <div className="w-48">
           <ItemPicker items={CATEGORY_FILTER_ITEMS} value={category} onChange={(v) => setCategory(v as InventoryCategory | "")} clearable={false} />
         </div>
+        {statusFilter && (
+          <span className="pill border-slate-200 bg-slate-50 text-slate-600">
+            Filtered: {REQUIREMENT_STATUS_LABEL[statusFilter]}
+            <button type="button" className="ml-1.5 font-bold text-slate-400 hover:text-slate-700" onClick={() => setStatusFilter("")}>
+              ✕
+            </button>
+          </span>
+        )}
       </div>
 
       {isLoading ? (
@@ -382,15 +412,17 @@ function RequirementCard({
 
   const status = requirementStatus(requirement);
 
+  const isEditing = !!requirement.poNumber;
+
   async function handleSetPurchase() {
     setError(null);
     if (!poNumber.trim() || !vendorName.trim() || !eta) return setError("PO Number, Vendor Name, and ETA are all required.");
     try {
       await setPurchase.mutateAsync({ id: requirement.id, poNumber: poNumber.trim(), vendorName: vendorName.trim(), eta });
-      toast.success("PO logged — Finance has been notified.");
+      toast.success(isEditing ? "PO details updated — PPIC will see the new ETA." : "PO logged — Finance has been notified.");
       setShowPurchase(false);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not log the PO");
+      setError(err instanceof ApiError ? err.message : "Could not save the PO");
     }
   }
 
@@ -434,9 +466,14 @@ function RequirementCard({
           </p>
           {requirement.note && <p className="mt-1.5 text-xs text-slate-600">"{requirement.note}"</p>}
           {requirement.poNumber && (
-            <p className="mt-1.5 flex items-center gap-1 text-xs font-bold text-brand-700">
+            <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs font-bold text-brand-700">
               <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.5} /> {requirement.poNumber} · {requirement.vendorName} · ETA{" "}
               {requirement.eta && new Date(requirement.eta).toLocaleDateString()}
+              {requirement.purchaseCorrectedAt && (
+                <span className="pill border-blue-200 bg-blue-50 text-blue-700" title={`Corrected ${new Date(requirement.purchaseCorrectedAt).toLocaleString()}`}>
+                  Updated
+                </span>
+              )}
             </p>
           )}
         </div>
@@ -466,6 +503,21 @@ function RequirementCard({
               <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Log PO
             </button>
           )}
+          {canPurchase && isEditing && !showPurchase && (
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              title="Correct the PO Number, Vendor or ETA — PPIC sees the updated ETA immediately"
+              onClick={() => {
+                setPoNumber(requirement.poNumber ?? "");
+                setVendorName(requirement.vendorName ?? "");
+                setEta(requirement.eta ? requirement.eta.slice(0, 10) : "");
+                setShowPurchase(true);
+              }}
+            >
+              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Edit PO
+            </button>
+          )}
           {canDelete && (
             <button type="button" className="btn-icon hover:!bg-rose-50 hover:!text-rose-600" title="Remove requirement" onClick={handleDelete}>
               <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} />
@@ -479,7 +531,7 @@ function RequirementCard({
           <div>
             <label className="label">PO Number</label>
             <input className="field font-mono" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
-            <p className="mt-1 text-[11px] text-slate-400">Suggested — overwrite with your own PO number if you already have one.</p>
+            {!isEditing && <p className="mt-1 text-[11px] text-slate-400">Suggested — overwrite with your own PO number if you already have one.</p>}
           </div>
           <div>
             <label className="label">Vendor Name</label>
@@ -507,7 +559,7 @@ function RequirementCard({
               Cancel
             </button>
             <button type="button" className="btn-primary btn-sm" disabled={setPurchase.isPending} onClick={handleSetPurchase}>
-              {setPurchase.isPending ? "Saving…" : "Save PO"}
+              {setPurchase.isPending ? "Saving…" : isEditing ? "Update PO" : "Save PO"}
             </button>
           </div>
         </div>

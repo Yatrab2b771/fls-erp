@@ -126,7 +126,7 @@ import {
   exportTransactionReport,
   exportTransitReport,
 } from "../lib/inventoryExport";
-import { ApiError, api } from "../lib/api";
+import { ApiError, api, downloadFile } from "../lib/api";
 import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
 import type { CustomerReconciliationRow, ItemStockByLocation } from "../lib/types";
 import { StatTile } from "../components/StatTile";
@@ -564,11 +564,13 @@ export function InventoryPage() {
   const canWrite = hasRole("STORE"); // Store or Admin — owns the full ledger + dispatch log + request review/issue/accept
   const canRequest = hasRole("PPIC"); // PPIC or Admin — can raise a Material Request
   const canQc = hasRole("QA_QC"); // QA/QC or Admin — outward QC on FG transfers
-  // Inward QC (Material Received) is QA_QC or RND — Production Process
-  // Flow.docx tags QC Sampling/Testing on incoming material as R&D's own
-  // work, not generic QA. Outward FG QC above stays QA_QC-only — the doc
-  // doesn't tag that one R&D. See inventory.routes.ts's PATCH /transactions/:id/qc.
-  const canInwardQc = hasRole("QA_QC", "RND");
+  // Inward QC (Material Received) is RND-only, not QA_QC — Production
+  // Process Flow.docx tags QC Sampling/Testing on incoming material as
+  // R&D's own work, not generic QA's (per the client's 2026-09-28 call,
+  // this moved from "R&D alongside QA_QC" to "R&D only"). Outward FG QC
+  // above stays QA_QC-only — the doc doesn't tag that one R&D. See
+  // inventory.routes.ts's PATCH /transactions/:id/qc.
+  const canInwardQc = hasRole("RND");
   const canDispatch = hasRole("DISPATCH"); // S9 — confirms an FG transfer actually went out
   const canInvoice = hasRole("ACCOUNTS"); // S9 — Finance raises the invoice once Dispatch confirms
   // Transit is Production's own view too — GET /transit lists it
@@ -2514,10 +2516,22 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
           <button
             type="button"
             className="btn-icon"
-            title="Download this entry"
+            title="Download this entry (Excel)"
             onClick={() => exportTransactionReport([txn], "Material Received", `Material_Received_${txn.item.name.replace(/\s+/g, "_")}`)}
           >
             <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+          </button>
+          <button
+            type="button"
+            className="btn-icon"
+            title="Download this entry (PDF)"
+            onClick={() =>
+              downloadFile(`/api/inventory/transactions/${txn.id}/export.pdf`, `FLS_Material_Received_${txn.item.name.replace(/\s+/g, "_")}.pdf`).catch((err) =>
+                toast.error(err instanceof ApiError ? err.message : "Could not download PDF"),
+              )
+            }
+          >
+            <FileText className="h-3.5 w-3.5" strokeWidth={2.25} />
           </button>
           {canWrite && !showNoteForm && !editing && (
             <button type="button" className="btn-icon" title="Edit GRN No. / Batch No. / dates / vendor / remark" onClick={startEdit}>

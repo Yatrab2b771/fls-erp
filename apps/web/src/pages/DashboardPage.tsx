@@ -159,9 +159,16 @@ export function DashboardPage() {
   const { data: qcData, isLoading: qcLoading } = useQcDashboard({ enabled: isQcOnlyView });
   // Purchase gets its own Pre-Inventory tile set — same shape as PPIC's,
   // same shared-filter/drill-down/Excel-export pattern (see
-  // purchasePlanning.ts and PurchasePlanningDetailPage).
+  // purchasePlanning.ts and PurchasePlanningDetailPage). PPIC also reads
+  // this (just the "PO Logged" count, not the full tile set) so they can
+  // see the moment Purchase has logged a PO + ETA against their own
+  // requirement, without switching to the Purchase role — that's the
+  // signal PPIC needs before planning the next step. Store reads it too —
+  // they're the ones physically receiving the delivery, so the same ETA
+  // signal tells them when to expect it.
   const isPurchaseOnlyView = !orgWide && hasRole("PURCHASE");
-  const { data: purchaseRequirements } = usePreInventoryRequirements(undefined, { enabled: isPurchaseOnlyView });
+  const isStoreOnlyViewEarly = !orgWide && hasRole("STORE");
+  const { data: purchaseRequirements } = usePreInventoryRequirements(undefined, { enabled: isPurchaseOnlyView || isPpicOnlyView || isStoreOnlyViewEarly });
   const purchaseStats = {
     total: purchaseRequirements?.length ?? 0,
     covered: getPurchasePlanningRows("covered", purchaseRequirements ?? []).length,
@@ -190,7 +197,11 @@ export function DashboardPage() {
   const isStoreOnlyView = canReviewInventory;
   const { data: storeSummary } = useStoreDashboardSummary({ enabled: isStoreOnlyView });
   const canRnd = !orgWide && hasRole("RND");
-  const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canRnd });
+  // PPIC also reads this (just the count, same as RND) so they can see
+  // whether the RM/PM they asked Purchase for has actually arrived at
+  // Warehouse yet — same /inward-qc page both link to, RND with the
+  // Approve/Reject/Hold actions, PPIC read-only.
+  const { data: pendingReceiptQc } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "PENDING_QC" }, { enabled: canRnd || isPpicOnlyView });
   const { data: pendingMaterialRequests } = useInventoryRequests("PENDING", { enabled: canReviewInventory });
   const { data: approvedMaterialRequests } = useInventoryRequests("APPROVED", { enabled: canReviewInventory });
   const { data: qcApprovedReceipts } = useInventoryTransactions({ type: "RECEIVED", receiptStatus: "QC_APPROVED" }, { enabled: canReviewInventory });
@@ -437,6 +448,12 @@ export function DashboardPage() {
             <Link to="/material-consumption" className="block">
               <StatTile icon={PackageMinus} label="Products — Material Logged" value={materialUsageProductCount} accent="blue" />
             </Link>
+            <Link to="/purchase-planning/ordered" className="block" title="Requirements where Purchase has logged a PO Number, Vendor and ETA">
+              <StatTile icon={ShoppingCart} label="PO Logged by Purchase (with ETA)" value={purchaseStats.ordered} accent="violet" />
+            </Link>
+            <Link to="/inward-qc" className="block" title="Material received at Warehouse, awaiting R&D's Inward QC — track whether what you asked Purchase for has actually arrived">
+              <StatTile icon={ClipboardCheck} label="Material Received (Awaiting QC)" value={pendingReceiptQc?.length ?? 0} accent="emerald" />
+            </Link>
           </div>
         ) : orgWide ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -474,18 +491,12 @@ export function DashboardPage() {
             </>
           )
         ) : isPurchaseOnlyView ? (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Link to="/purchase-planning/total" className="block">
-              <StatTile icon={ClipboardList} label="Total Requirements" value={purchaseStats.total} accent="brand" />
+          <div className="grid grid-cols-2 gap-3">
+            <Link to="/purchase-planning/shortfall" className="block" title="Log or update a PO straight from this list">
+              <StatTile icon={Package} label="Shortfall" value={purchaseStats.shortfall} accent={purchaseStats.shortfall ? "amber" : "slate"} />
             </Link>
             <Link to="/purchase-planning/covered" className="block">
-              <StatTile icon={CheckCircle2} label="Fully Covered" value={purchaseStats.covered} accent="emerald" />
-            </Link>
-            <Link to="/purchase-planning/shortfall" className="block">
-              <StatTile icon={Package} label="Shortfalls" value={purchaseStats.shortfall} accent={purchaseStats.shortfall ? "amber" : "slate"} />
-            </Link>
-            <Link to="/purchase-planning/ordered" className="block">
-              <StatTile icon={ShoppingCart} label="PO Logged" value={purchaseStats.ordered} accent="violet" />
+              <StatTile icon={CheckCircle2} label="Complete" value={purchaseStats.covered} accent="emerald" />
             </Link>
           </div>
         ) : isRegulatoryOnlyView ? (
@@ -525,6 +536,9 @@ export function DashboardPage() {
             <Link to="/store-planning/quarantine" className="block">
               <StatTile icon={ShieldAlert} label="Quarantine Stock" value={storeSummary?.quarantineCount ?? 0} accent={storeSummary?.quarantineCount ? "amber" : "slate"} />
             </Link>
+            <Link to="/purchase-planning/ordered" className="block" title="Requirements where Purchase has logged a PO Number, Vendor and ETA">
+              <StatTile icon={ShoppingCart} label="PO Logged by Purchase (with ETA)" value={purchaseStats.ordered} accent="violet" />
+            </Link>
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -537,13 +551,27 @@ export function DashboardPage() {
             )}
             {canRnd && (
               <>
-                <StatTile icon={Beaker} label="R&D Requests" value={rndOpenCatalogGaps.length} accent="violet" />
-                <StatTile icon={AlarmClock} label="Requests Overdue" value={rndOverdueRequests.length} accent={rndOverdueRequests.length ? "rose" : "slate"} />
-                <StatTile icon={FlaskConical} label="Awaiting Confirmation" value={rndAwaitingConfirmation.length} accent="brand" />
-                <StatTile icon={ClipboardList} label="Sample Requests Pending" value={rndPendingSampleRequests?.length ?? 0} accent="amber" />
-                <StatTile icon={CheckCircle2} label="Inward QC (yours)" value={pendingReceiptQc?.length ?? 0} accent="emerald" />
-                <StatTile icon={Truck} label="Bulk QC / COA Pending" value={rndBulkQcCount} accent="blue" />
-                <StatTile icon={Package} label="Catalog Size" value={`${rndRecipes?.length ?? 0} recipes · ${rndSkuCount ?? 0} SKUs`} accent="slate" />
+                <Link to="/rnd" className="block">
+                  <StatTile icon={Beaker} label="R&D Requests" value={rndOpenCatalogGaps.length} accent="violet" />
+                </Link>
+                <Link to="/rnd" className="block">
+                  <StatTile icon={AlarmClock} label="Requests Overdue" value={rndOverdueRequests.length} accent={rndOverdueRequests.length ? "rose" : "slate"} />
+                </Link>
+                <Link to="/rnd-store" className="block">
+                  <StatTile icon={FlaskConical} label="Awaiting Confirmation" value={rndAwaitingConfirmation.length} accent="brand" />
+                </Link>
+                <Link to="/rnd-store" className="block">
+                  <StatTile icon={ClipboardList} label="Sample Requests Pending" value={rndPendingSampleRequests?.length ?? 0} accent="amber" />
+                </Link>
+                <Link to="/inward-qc" className="block">
+                  <StatTile icon={CheckCircle2} label="Inward QC (yours)" value={pendingReceiptQc?.length ?? 0} accent="emerald" />
+                </Link>
+                <Link to="/bulk-qc" className="block">
+                  <StatTile icon={Truck} label="Bulk QC / COA Pending" value={rndBulkQcCount} accent="blue" />
+                </Link>
+                <Link to="/rm-costing" className="block">
+                  <StatTile icon={Package} label="Catalog Size" value={`${rndRecipes?.length ?? 0} recipes · ${rndSkuCount ?? 0} SKUs`} accent="slate" />
+                </Link>
               </>
             )}
           </div>

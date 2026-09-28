@@ -19,14 +19,13 @@ export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = [
   "DISPATCH_PLAN",
 ];
 
-// One or more roles per stage — BULK_QC is the one stage with two:
 // Production Process Flow.docx tags "Bulk QC Sampling & Testing" as
-// R&D's own work, not generic QA — R&D gets access alongside QA_QC here,
-// not replacing it.
+// R&D's own work, not generic QA — per the client's 2026-09-28 call,
+// this is now RND-only (previously QA_QC + RND together).
 export const COMBINED_LOT_STAGE_ROLE: Record<CombinedLotStageId, RoleName[]> = {
   IPQC: ["QA_QC"],
   QA_GATE_MFG: ["QA_QC"],
-  BULK_QC: ["QA_QC", "RND"],
+  BULK_QC: ["RND"],
   PACKAGING: ["PRODUCTION"],
   QA_GATE_PACKAGING: ["QA_QC"],
   FG_STORE: ["STORE"],

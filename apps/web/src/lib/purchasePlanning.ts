@@ -28,6 +28,36 @@ export const PURCHASE_PLANNING_METRIC_LABEL: Record<PurchasePlanningMetric, stri
   ordered: "PO Logged",
 };
 
+export interface PurchasePlanningFilters {
+  search?: string;
+  category?: "RM" | "PM";
+  // Both inclusive, matched against the requirement's own ETA (blank ETA
+  // never matches a date range — there's nothing to compare).
+  etaFrom?: string;
+  etaTo?: string;
+}
+
+// One search box + category + ETA date range, shared by the drill-down
+// table AND its Excel export (see PurchasePlanningDetailPage.tsx /
+// inventoryExport.ts) — search matches Item name, PO Number or Vendor.
+// No filters set returns the rows untouched (same reference).
+export function filterPurchasePlanningRows(rows: PreInventoryRequirement[], filters: PurchasePlanningFilters): PreInventoryRequirement[] {
+  const q = filters.search?.trim().toLowerCase();
+  if (!q && !filters.category && !filters.etaFrom && !filters.etaTo) return rows;
+
+  return rows.filter((r) => {
+    if (filters.category && r.category !== filters.category) return false;
+    if (filters.etaFrom || filters.etaTo) {
+      if (!r.eta) return false;
+      const eta = r.eta.slice(0, 10);
+      if (filters.etaFrom && eta < filters.etaFrom) return false;
+      if (filters.etaTo && eta > filters.etaTo) return false;
+    }
+    if (q && !r.item.name.toLowerCase().includes(q) && !(r.poNumber ?? "").toLowerCase().includes(q) && !(r.vendorName ?? "").toLowerCase().includes(q)) return false;
+    return true;
+  });
+}
+
 export function getPurchasePlanningRows(metric: PurchasePlanningMetric, requirements: PreInventoryRequirement[]): PreInventoryRequirement[] {
   switch (metric) {
     case "total":

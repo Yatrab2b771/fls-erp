@@ -44,6 +44,9 @@ import type {
   PoFullReport,
   PoReconciliation,
   PoWastageRejectionRow,
+  PendingPoMaterialRow,
+  AddOnPlanCandidate,
+  AddOnPlanDetail,
   PreInventoryRequirement,
   ProductType,
   PurchaseOrder,
@@ -274,6 +277,36 @@ export function usePoWastageRejectionReport(options?: { enabled?: boolean }) {
     queryKey: ["purchase-orders", "reports", "wastage-rejection"],
     queryFn: () => api<PoWastageRejectionRow[]>("/api/purchase-orders/reports/wastage-rejection"),
     enabled: options?.enabled,
+  });
+}
+
+// Pending PO Report — per-product RM/PM material breakdown, only fetched
+// when the Pending POs drill-down is actually open (see
+// PpicPlanningDetailPage.tsx), not on every dashboard load.
+export function usePendingPoMaterials(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["purchase-orders", "reports", "pending-materials"],
+    queryFn: () => api<PendingPoMaterialRow[]>("/api/purchase-orders/reports/pending-materials"),
+    enabled: options?.enabled,
+  });
+}
+
+// Add on Plan — PPIC's PO-independent material search. Debounced by the
+// caller (AddOnPlanPage), not here — the query key changing on every
+// keystroke would otherwise fire a request per character.
+export function useAddOnPlanSearch(query: string) {
+  return useQuery({
+    queryKey: ["add-on-plan", "search", query],
+    queryFn: () => api<AddOnPlanCandidate[]>(`/api/add-on-plan/search?q=${encodeURIComponent(query)}`),
+    enabled: query.trim().length >= 2,
+  });
+}
+
+export function useAddOnPlanDetail(candidate: AddOnPlanCandidate | null) {
+  return useQuery({
+    queryKey: ["add-on-plan", "detail", candidate?.type, candidate?.id],
+    queryFn: () => api<AddOnPlanDetail>(`/api/add-on-plan/${candidate!.type === "SKU" ? "sku" : "recipe"}/${candidate!.id}`),
+    enabled: !!candidate,
   });
 }
 

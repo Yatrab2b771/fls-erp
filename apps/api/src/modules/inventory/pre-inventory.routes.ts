@@ -5,7 +5,7 @@ import { parsePagination, setPaginationHeaders } from "../../common/lib/paginati
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
-import { getOnHandByItemId } from "./stock";
+import { getTotalAvailableByItemId } from "./stock";
 import {
   createRequirementSchema,
   importPurchaseLogSchema,
@@ -42,9 +42,17 @@ const requirementInclude = {
 
 type RequirementRow = Prisma.PreInventoryRequirementGetPayload<{ include: typeof requirementInclude }>;
 
-/** Attaches live currentStock (and the derived shortQty) to each row — never persisted, always read fresh off the ledger. */
+/**
+ * Attaches live currentStock (and the derived shortQty) to each row —
+ * never persisted, always read fresh off the ledger. currentStock is
+ * the company-wide total (Warehouse + every Day Store + every Plant +
+ * R&D Store — see stock.ts's getTotalAvailableByItemId), not Warehouse
+ * alone: a requirement PPIC raised shouldn't show short just because
+ * its material already staged forward to a Day Store/Plant, or was
+ * sent to R&D Store, while it's still real, usable company stock.
+ */
 async function withLiveStock<T extends RequirementRow>(rows: T[]) {
-  const onHand = await getOnHandByItemId([...new Set(rows.map((r) => r.itemId))]);
+  const onHand = await getTotalAvailableByItemId([...new Set(rows.map((r) => r.itemId))]);
   return rows.map((r) => {
     const currentStock = onHand.get(r.itemId) ?? 0;
     return { ...r, currentStock, shortQty: Math.max(0, r.requiredQty - currentStock) };
@@ -223,7 +231,7 @@ preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBod
       include: { item: true },
       orderBy: { createdAt: "asc" },
     });
-    const onHand = await getOnHandByItemId([...new Set(openRequirements.map((r) => r.itemId))]);
+    const onHand = await getTotalAvailableByItemId([...new Set(openRequirements.map((r) => r.itemId))]);
 
     const claimed = new Set<string>();
     const matches: { requirement: (typeof openRequirements)[number]; poNumber: string; vendorName: string; eta: Date }[] = [];
@@ -290,7 +298,7 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
     const existing = await prisma.preInventoryRequirement.findUnique({ where: { id: req.params.id }, include: { item: true } });
     if (!existing) return res.status(404).json({ error: "Requirement not found" });
 
-    const onHand = await getOnHandByItemId([existing.itemId]);
+    const onHand = await getTotalAvailableByItemId([existing.itemId]);
     const currentStock = onHand.get(existing.itemId) ?? 0;
     if (currentStock >= existing.requiredQty) return res.status(409).json({ error: "This requirement is already fully covered by current stock — nothing to order" });
 
@@ -304,7 +312,12 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
     const isCorrection = !!existing.purchaseAt;
     const updated = await prisma.preInventoryRequirement.update({
       where: { id: req.params.id },
-      data: { poNumber, vendorName, eta, purchaseById: req.user!.id, purchaseAt: new Date() },
+      // purchaseCorrectedAt — only stamped on a correction, never on the
+      // first log, so PPIC has a visible "Updated" tag on the row itself
+      // (see purchasePlanning.ts's requirementStatus/PreInventoryPage) to
+      // notice a correction even if they missed the one-time notification
+      // below.
+      data: { poNumber, vendorName, eta, purchaseById: req.user!.id, purchaseAt: new Date(), ...(isCorrection ? { purchaseCorrectedAt: new Date() } : {}) },
       include: requirementInclude,
     });
 
@@ -320,7 +333,7 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
 
     await Promise.all([
       notifyUser(updated.requestedById, {
-        title: `PO logged for ${existing.item.name}`,
+        title: isCorrection ? `PO details updated for ${existing.item.name}` : `PO logged for ${existing.item.name}`,
         body: `${poNumber} — ${vendorName}, ETA ${new Date(eta).toLocaleDateString()}`,
         link: "/pre-inventory",
       }).catch(notifyFailed(req, "pre_inventory.purchase_logged.requester")),
