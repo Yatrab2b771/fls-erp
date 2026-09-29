@@ -7,6 +7,8 @@ import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
 import { getOnHandByPlantAndItem } from "../inventory/stock";
 import { recordPlantConsumptionSchema, type RecordPlantConsumptionInput } from "./plant-consumption.schemas";
+import type { RmMasterResult } from "../rm-costing/rm-costing-engine";
+import type { BomResult } from "../packaging-bom/bom-engine";
 
 export const plantConsumptionRouter = Router();
 
@@ -189,7 +191,13 @@ plantConsumptionRouter.get("/:preProductionId/balance", requireRole(...READ_ROLE
 // and the per-run balance route above already surfaces it separately.
 plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async (req: AuthedRequest, res, next) => {
   try {
-    const { poId, preProductionId, itemId } = req.query as { poId?: string; preProductionId?: string; itemId?: string };
+    const { poId, preProductionId, itemId, dateFrom, dateTo } = req.query as {
+      poId?: string;
+      preProductionId?: string;
+      itemId?: string;
+      dateFrom?: string;
+      dateTo?: string;
+    };
 
     const consumptions = await prisma.batchMaterialConsumption.findMany({
       where: {
@@ -200,6 +208,13 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
               purchaseOrderItem: { purchaseOrderId: poId },
             }
           : undefined,
+        // Both ends inclusive — dateTo covers the whole day, not just its
+        // midnight instant, same "calendar date, not timestamp" rule the
+        // rest of this app's date-range filters use.
+        createdAt: {
+          ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+          ...(dateTo ? { lt: new Date(new Date(dateTo).getTime() + 24 * 60 * 60 * 1000) } : {}),
+        },
       },
       select: {
         preProductionId: true,
@@ -207,10 +222,12 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
         quantity: true,
         unit: true,
         purpose: true,
+        createdAt: true,
         item: { select: { name: true, category: true } },
         preProduction: {
           select: {
             id: true,
+            purchaseOrderItemId: true,
             productionBatches: { select: { batchNo: true }, take: 1 },
             purchaseOrderItem: {
               select: {
@@ -223,24 +240,27 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
       },
     });
 
-    const byRow = new Map<
-      string,
-      {
-        preProductionId: string;
-        poId: string;
-        poNumber: string | null;
-        customerName: string;
-        productName: string;
-        batchNo: string | null;
-        itemId: string;
-        itemName: string;
-        category: string;
-        unit: string;
-        consumedQty: number;
-        wastedQty: number;
-        rejectedQty: number;
-      }
-    >();
+    interface Row {
+      preProductionId: string;
+      purchaseOrderItemId: string;
+      poId: string;
+      poNumber: string | null;
+      customerName: string;
+      productName: string;
+      batchNo: string | null;
+      itemId: string;
+      itemName: string;
+      category: string;
+      unit: string;
+      lastLoggedAt: string;
+      consumedQty: number;
+      sampleQty: number;
+      wastedQty: number;
+      rejectedQty: number;
+      requiredQty: number | null;
+    }
+
+    const byRow = new Map<string, Row>();
 
     for (const c of consumptions) {
       const key = `${c.preProductionId}::${c.itemId}`;
@@ -248,6 +268,7 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
       if (!row) {
         row = {
           preProductionId: c.preProductionId,
+          purchaseOrderItemId: c.preProduction.purchaseOrderItemId,
           poId: c.preProduction.purchaseOrderItem.purchaseOrder.id,
           poNumber: c.preProduction.purchaseOrderItem.purchaseOrder.poNumber,
           customerName: c.preProduction.purchaseOrderItem.purchaseOrder.customer.companyName,
@@ -257,18 +278,64 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
           itemName: c.item.name,
           category: c.item.category,
           unit: c.unit,
+          lastLoggedAt: c.createdAt.toISOString(),
           consumedQty: 0,
+          sampleQty: 0,
           wastedQty: 0,
           rejectedQty: 0,
+          requiredQty: null,
         };
         byRow.set(key, row);
       }
+      if (c.createdAt.toISOString() > row.lastLoggedAt) row.lastLoggedAt = c.createdAt.toISOString();
       if (c.purpose === "PRODUCTION") row.consumedQty += c.quantity;
+      else if (c.purpose === "SAMPLE") row.sampleQty += c.quantity;
       else if (c.purpose === "WASTE") row.wastedQty += c.quantity;
       else if (c.purpose === "REJECTED") row.rejectedQty += c.quantity;
     }
 
-    res.json([...byRow.values()]);
+    const rows = [...byRow.values()];
+
+    // "Required" — how much of this item that product's own RM/BOM Plan
+    // called for in total, read off whichever plan (RM for category RM,
+    // BOM for category PM) is linked to this specific product, so the
+    // report can show "X of Y consumed" per product instead of just a
+    // running total with nothing to compare it against. Same source
+    // pending-materials.ts's Pending PO Report reads, just matched
+    // directly by purchaseOrderItemId here (one plan per product) rather
+    // than via a pooled plan's `sources` map.
+    const purchaseOrderItemIds = [...new Set(rows.map((r) => r.purchaseOrderItemId))];
+    const [rmPlans, bomPlans] = await Promise.all([
+      prisma.rmPlan.findMany({
+        where: { purchaseOrderItemId: { in: purchaseOrderItemIds }, status: "CALCULATED" },
+        orderBy: { calculatedAt: "desc" },
+        select: { purchaseOrderItemId: true, resultSnapshot: true },
+      }),
+      prisma.bomPlan.findMany({
+        where: { purchaseOrderItemId: { in: purchaseOrderItemIds }, status: "CALCULATED" },
+        orderBy: { calculatedAt: "desc" },
+        select: { purchaseOrderItemId: true, resultSnapshot: true },
+      }),
+    ]);
+    // First (most recent, since ordered desc) plan per product wins.
+    const latestRmByPoItem = new Map<string, RmMasterResult>();
+    for (const p of rmPlans) if (p.purchaseOrderItemId && !latestRmByPoItem.has(p.purchaseOrderItemId)) latestRmByPoItem.set(p.purchaseOrderItemId, p.resultSnapshot as unknown as RmMasterResult);
+    const latestBomByPoItem = new Map<string, BomResult>();
+    for (const p of bomPlans) if (p.purchaseOrderItemId && !latestBomByPoItem.has(p.purchaseOrderItemId)) latestBomByPoItem.set(p.purchaseOrderItemId, p.resultSnapshot as unknown as BomResult);
+
+    for (const row of rows) {
+      if (row.category === "RM") {
+        const plan = latestRmByPoItem.get(row.purchaseOrderItemId);
+        const line = plan?.procurement.find((p) => p.name === row.itemName);
+        if (line) row.requiredQty = line.totalKg;
+      } else {
+        const plan = latestBomByPoItem.get(row.purchaseOrderItemId);
+        const line = plan?.lines.find((l) => l.component === row.itemName);
+        if (line) row.requiredQty = line.totalQty;
+      }
+    }
+
+    res.json(rows);
   } catch (err) {
     next(err);
   }

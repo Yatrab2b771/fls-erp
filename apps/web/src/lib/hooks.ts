@@ -2071,6 +2071,25 @@ export function useConfirmRndTransfer() {
   });
 }
 
+export function useRndDirectPurchase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      category: InventoryCategory;
+      itemName: string;
+      quantity: number;
+      unit: string;
+      vendorName: string;
+      date?: string;
+      invoiceNo?: string;
+      batchNo?: string;
+      expiryDate?: string;
+      note?: string;
+    }) => api<RndStoreTransaction>("/api/rnd-store/direct-purchase", { method: "POST", body }),
+    onSuccess: () => invalidateRndStore(qc),
+  });
+}
+
 export function useConsumeAtRnd() {
   const qc = useQueryClient();
   return useMutation({
@@ -2177,11 +2196,16 @@ export function usePlantConsumptionBalance(preProductionId: string | undefined) 
   });
 }
 
-export function useMaterialConsumptionReport(filters?: { poId?: string; preProductionId?: string; itemId?: string }, options?: { enabled?: boolean }) {
+export function useMaterialConsumptionReport(
+  filters?: { poId?: string; preProductionId?: string; itemId?: string; dateFrom?: string; dateTo?: string },
+  options?: { enabled?: boolean },
+) {
   const params = new URLSearchParams();
   if (filters?.poId) params.set("poId", filters.poId);
   if (filters?.preProductionId) params.set("preProductionId", filters.preProductionId);
   if (filters?.itemId) params.set("itemId", filters.itemId);
+  if (filters?.dateFrom) params.set("dateFrom", filters.dateFrom);
+  if (filters?.dateTo) params.set("dateTo", filters.dateTo);
   const qs = params.toString();
   return useQuery({
     queryKey: ["plant-consumption", "report", filters ?? {}],

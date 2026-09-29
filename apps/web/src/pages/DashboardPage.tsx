@@ -134,7 +134,15 @@ export function DashboardPage() {
   // so RND/Dispatch, who can't read this endpoint, never see the tile).
   const canSeeMaterialUsage = isPpicOnlyView || (!orgWide && hasRole("PRODUCTION"));
   const { data: materialConsumption } = useMaterialConsumptionReport(undefined, { enabled: canSeeMaterialUsage });
-  const materialUsageProductCount = new Set((materialConsumption ?? []).map((r) => r.preProductionId)).size;
+  // Split by BatchConsumptionPurpose (see MaterialConsumptionReportPage's
+  // own comment) — 4 distinctly-named tiles instead of one ambiguous
+  // "Material Logged" count, each counting the products that have at
+  // least some quantity logged under that one purpose, each linking to
+  // the same report pre-filtered to it (?purpose=...).
+  const materialUsedInProductionCount = new Set((materialConsumption ?? []).filter((r) => r.consumedQty > 0).map((r) => r.preProductionId)).size;
+  const materialSentForTestingCount = new Set((materialConsumption ?? []).filter((r) => r.sampleQty > 0).map((r) => r.preProductionId)).size;
+  const materialWastedCount = new Set((materialConsumption ?? []).filter((r) => r.wastedQty > 0).map((r) => r.preProductionId)).size;
+  const materialRejectedCount = new Set((materialConsumption ?? []).filter((r) => r.rejectedQty > 0).map((r) => r.preProductionId)).size;
 
   const allPreRuns = preRuns ?? [];
   const allLots = lots ?? [];
@@ -445,8 +453,17 @@ export function DashboardPage() {
             <Link to="/ppic-planning/plan-not-sent" className="block">
               <StatTile icon={ClipboardList} label="Not Sent to Production" value={itemsPlanNotSent} accent={itemsPlanNotSent ? "amber" : "slate"} />
             </Link>
-            <Link to="/material-consumption" className="block">
-              <StatTile icon={PackageMinus} label="Products — Material Logged" value={materialUsageProductCount} accent="blue" />
+            <Link to="/material-consumption?purpose=PRODUCTION" className="block">
+              <StatTile icon={PackageMinus} label="Material Used in Production" value={materialUsedInProductionCount} accent="blue" />
+            </Link>
+            <Link to="/material-consumption?purpose=SAMPLE" className="block">
+              <StatTile icon={FlaskConical} label="Material Sent for Testing" value={materialSentForTestingCount} accent="violet" />
+            </Link>
+            <Link to="/material-consumption?purpose=WASTE" className="block">
+              <StatTile icon={PackageMinus} label="Material Wasted (Handling Loss)" value={materialWastedCount} accent={materialWastedCount ? "amber" : "slate"} />
+            </Link>
+            <Link to="/material-consumption?purpose=REJECTED" className="block">
+              <StatTile icon={PackageMinus} label="Material Rejected at Plant" value={materialRejectedCount} accent={materialRejectedCount ? "rose" : "slate"} />
             </Link>
             <Link to="/purchase-planning/ordered" className="block" title="Requirements where Purchase has logged a PO Number, Vendor and ETA">
               <StatTile icon={ShoppingCart} label="PO Logged by Purchase (with ETA)" value={purchaseStats.ordered} accent="violet" />
@@ -545,9 +562,20 @@ export function DashboardPage() {
             <StatTile icon={ClipboardList} label="Awaiting You" value={myQueueRows.length} accent="blue" />
             <StatTile icon={AlarmClock} label="Delayed (Yours)" value={myDelayed.length} accent="rose" />
             {canSeeMaterialUsage && (
-              <Link to="/material-consumption" className="block">
-                <StatTile icon={PackageMinus} label="Products — Material Logged" value={materialUsageProductCount} accent="blue" />
-              </Link>
+              <>
+                <Link to="/material-consumption?purpose=PRODUCTION" className="block">
+                  <StatTile icon={PackageMinus} label="Material Used in Production" value={materialUsedInProductionCount} accent="blue" />
+                </Link>
+                <Link to="/material-consumption?purpose=SAMPLE" className="block">
+                  <StatTile icon={FlaskConical} label="Material Sent for Testing" value={materialSentForTestingCount} accent="violet" />
+                </Link>
+                <Link to="/material-consumption?purpose=WASTE" className="block">
+                  <StatTile icon={PackageMinus} label="Material Wasted (Handling Loss)" value={materialWastedCount} accent={materialWastedCount ? "amber" : "slate"} />
+                </Link>
+                <Link to="/material-consumption?purpose=REJECTED" className="block">
+                  <StatTile icon={PackageMinus} label="Material Rejected at Plant" value={materialRejectedCount} accent={materialRejectedCount ? "rose" : "slate"} />
+                </Link>
+              </>
             )}
             {canRnd && (
               <>

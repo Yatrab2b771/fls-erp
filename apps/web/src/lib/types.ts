@@ -153,6 +153,7 @@ export interface PlantConsumptionBalance {
 // way today) and PO-level usage from one flat dataset.
 export interface MaterialConsumptionRow {
   preProductionId: string;
+  purchaseOrderItemId: string;
   poId: string;
   poNumber: string | null;
   customerName: string;
@@ -162,9 +163,15 @@ export interface MaterialConsumptionRow {
   itemName: string;
   category: string;
   unit: string;
+  lastLoggedAt: string;
   consumedQty: number;
+  sampleQty: number;
   wastedQty: number;
   rejectedQty: number;
+  // From the product's own RM/BOM Plan (see plant-consumption.routes.ts's
+  // /report) — null when no calculated plan exists yet for this item, so
+  // "0 required" and "not planned" stay visibly distinct.
+  requiredQty: number | null;
 }
 
 export interface PlanSummary {
@@ -1872,6 +1879,13 @@ export interface RndStoreTransaction {
   projectName: string | null;
   formulationRef: string | null;
   batchNo: string | null;
+  // Direct Purchase only — an INBOUND row R&D raised itself, never
+  // through the Warehouse/Store ledger. isDirectPurchase distinguishes
+  // this from a transfer-confirmed INBOUND (vendorName null there).
+  vendorName: string | null;
+  invoiceNo: string | null;
+  expiryDate: string | null;
+  isDirectPurchase: boolean;
   note: string | null;
   createdAt: string;
   createdByName: string;

@@ -15,12 +15,14 @@ import {
   createRndSampleRequestSchema,
   rejectRndSampleRequestSchema,
   importRndSampleRequestsSchema,
+  rndDirectPurchaseSchema,
   type CreateRndTransferInput,
   type ConsumeAtRndInput,
   type DispatchToCustomerInput,
   type CreateRndSampleRequestInput,
   type RejectRndSampleRequestInput,
   type ImportRndSampleRequestsInput,
+  type RndDirectPurchaseInput,
 } from "./rnd-store.schemas";
 
 // R&D Store — a second stock ledger for R&D's own sample lifecycle, per
@@ -447,6 +449,47 @@ rndStoreRouter.post("/consume", requireRole("RND"), validateBody(consumeAtRndSch
   }
 });
 
+// Direct Purchase — R&D buying and receiving material entirely on its
+// own, no Warehouse/Store transfer involved at all (this never creates
+// an InventoryTransaction or touches Warehouse stock — see the
+// vendorName field's own schema.prisma comment). Resolve-or-create the
+// item by (category, itemName), same convention as the bulk request
+// import above — R&D naming something the catalog has never seen is the
+// normal case here, not an edge case. No approval gate: R&D logs it and
+// it's immediately on hand at the R&D Store. Store is only notified for
+// awareness, matching the "so Store/inventory knows about it" ask —
+// nothing for Store to act on or approve.
+rndStoreRouter.post("/direct-purchase", requireRole("RND"), validateBody(rndDirectPurchaseSchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { category, itemName, quantity, unit, vendorName, date, invoiceNo, batchNo, expiryDate, note } = req.body as RndDirectPurchaseInput;
+
+    let item = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name: itemName } } });
+    if (!item) item = await prisma.inventoryItem.create({ data: { category, name: itemName } });
+
+    const txn = await prisma.rndStoreTransaction.create({
+      data: { itemId: item.id, type: "INBOUND", quantity, unit, vendorName, date: date ?? new Date(), invoiceNo, batchNo, expiryDate, note, createdById: req.user!.id },
+      include: { item: { select: { id: true, category: true, name: true } } },
+    });
+
+    await recordAudit({
+      actorId: req.user!.id,
+      action: "rnd_store.direct_purchase",
+      entityType: "RndStoreTransaction",
+      entityId: txn.id,
+      metadata: { itemId: item.id, quantity, unit, vendorName },
+    });
+    await notifyRoles(
+      ["STORE"],
+      { title: `R&D directly purchased ${item.name}`, body: `${quantity} ${unit} from ${vendorName} — for your inventory records.`, link: "/rnd-store" },
+      req.user!.id,
+    ).catch((err) => req.log?.error({ err }, "notify failed: rnd_store.direct_purchase"));
+
+    res.status(201).json(txn);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Step 4 — a sample goes straight to a customer, not back through the
 // Warehouse.
 rndStoreRouter.post("/dispatch", requireRole("RND"), validateBody(dispatchToCustomerSchema), async (req: AuthedRequest, res, next) => {
@@ -507,6 +550,14 @@ rndStoreRouter.get("/transactions", requireRole("STORE", "RND"), async (_req, re
         projectName: r.projectName,
         formulationRef: r.formulationRef,
         batchNo: r.batchNo,
+        // Direct Purchase — set only on an INBOUND row R&D raised itself
+        // (see POST /direct-purchase); isDirectPurchase distinguishes it
+        // from a transfer-confirmed INBOUND for the frontend without it
+        // having to know transferId is the tell.
+        vendorName: r.vendorName,
+        invoiceNo: r.invoiceNo,
+        expiryDate: r.expiryDate,
+        isDirectPurchase: r.type === "INBOUND" && !r.transferId,
         note: r.note,
         createdAt: r.createdAt,
         createdByName: r.createdBy.fullName || r.createdBy.email,

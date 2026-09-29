@@ -2405,10 +2405,23 @@ model RndStoreTransaction {
   // When this actually happened, as R&D records it — separate from
   // createdAt (when the row was logged in the system, which can lag the
   // real event by a day or more). Defaults to "now" at creation but is
-  // user-editable going forward. CONSUMED/DISPATCHED only; INBOUND/
-  // RETURNED already have a real date via their linked RndTransfer's own
-  // sentAt/confirmedAt.
+  // user-editable going forward. CONSUMED/DISPATCHED only, plus a direct-
+  // purchase INBOUND (see vendorName below) — a transfer-confirmed
+  // INBOUND/RETURNED already has a real date via its linked RndTransfer's
+  // own sentAt/confirmedAt.
   date DateTime?
+
+  // Direct Purchase — an INBOUND row R&D raises itself (vendorName set,
+  // transferId null), for material R&D buys and receives on its own
+  // without it ever passing through the Warehouse/Store ledger at all.
+  // Store is only notified for awareness (see rnd-store.routes.ts's
+  // POST /direct-purchase), not asked to act — this never touches
+  // InventoryTransaction. invoiceNo/expiryDate are optional traceability,
+  // same fields' own meaning as Warehouse's Material Received. Null on
+  // every other row type/source.
+  vendorName String?
+  invoiceNo  String?
+  expiryDate DateTime?
 
   // DISPATCHED only — the sample-to-customer paperwork the client asked
   // for: which brand it's under, and how it physically went out.
@@ -2417,12 +2430,14 @@ model RndStoreTransaction {
 
   // CONSUMED only — which R&D effort this consumption belongs to, so a
   // report can answer "how much of item X went into formulating product
-  // Y" instead of just "how much of X was used, in general". batchNo is
-  // R&D's own lot/batch reference, unrelated to the Warehouse ledger's
-  // own batchNo field on InventoryTransaction.
+  // Y" instead of just "how much of X was used, in general".
   projectName    String?
   formulationRef String?
-  batchNo        String?
+  // R&D's own lot/batch reference on a CONSUMED row, OR the vendor's own
+  // batch number on a direct-purchase INBOUND row (vendorName set) —
+  // either way just a free-text batch identifier, unrelated to the
+  // Warehouse ledger's own batchNo field on InventoryTransaction.
+  batchNo String?
 
   // Set only on INBOUND/RETURNED rows created by confirming an
   // RndTransfer — links this leg back to the Warehouse-side leg of the

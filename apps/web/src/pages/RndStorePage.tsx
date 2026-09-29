@@ -18,6 +18,7 @@ import {
   useImportRndSampleRequests,
   useInventoryItems,
   useRejectRndSampleRequest,
+  useRndDirectPurchase,
   useRndSampleRequests,
   useRndStoreReport,
   useRndStoreStock,
@@ -235,6 +236,7 @@ export function RndStorePage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {isRnd && <RequestSampleForm />}
+        {isRnd && <DirectPurchaseForm />}
         {isRnd && <ReturnToWarehouseForm />}
         {isRnd && <ConsumeForm />}
         {isRnd && <DispatchToCustomerForm />}
@@ -362,27 +364,41 @@ export function RndStorePage() {
                   <p className="text-[10px] text-slate-400">
                     {t.customerName && <>to {t.customerName}{t.brandName && <> ({t.brandName})</>} · </>}
                     {t.courierDetails && <>via {t.courierDetails} · </>}
+                    {t.vendorName && <>from {t.vendorName}{t.invoiceNo && <> (Inv. {t.invoiceNo})</>} · </>}
                     {t.projectName && <>{t.projectName} · </>}
                     {t.formulationRef && <>Ref {t.formulationRef} · </>}
                     {t.batchNo && <>Batch {t.batchNo} · </>}
+                    {t.expiryDate && <>Exp {new Date(t.expiryDate).toLocaleDateString()} · </>}
                     {t.note && <>{t.note} · </>}
                     {t.createdByName} · {new Date(t.date ?? t.createdAt).toLocaleString()}
                   </p>
                 </div>
                 <span
                   className={`pill shrink-0 ${
-                    t.type === "INBOUND"
-                      ? "border-brand-200 bg-brand-50 text-brand-700"
-                      : t.type === "DISPATCHED"
-                        ? "border-violet-200 bg-violet-50 text-violet-700"
-                        : t.type === "RETURNED"
-                          ? "border-slate-200 bg-slate-100 text-slate-600"
-                          : t.consumeReason
-                            ? REASON_STYLE[t.consumeReason]
-                            : "border-slate-200 bg-slate-100 text-slate-600"
+                    t.isDirectPurchase
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                      : t.type === "INBOUND"
+                        ? "border-brand-200 bg-brand-50 text-brand-700"
+                        : t.type === "DISPATCHED"
+                          ? "border-violet-200 bg-violet-50 text-violet-700"
+                          : t.type === "RETURNED"
+                            ? "border-slate-200 bg-slate-100 text-slate-600"
+                            : t.consumeReason
+                              ? REASON_STYLE[t.consumeReason]
+                              : "border-slate-200 bg-slate-100 text-slate-600"
                   }`}
                 >
-                  {t.type === "INBOUND" ? "Received" : t.type === "DISPATCHED" ? "To Customer" : t.type === "RETURNED" ? "Returned" : t.consumeReason ? REASON_LABEL[t.consumeReason] : "Consumed"}
+                  {t.isDirectPurchase
+                    ? "Direct Purchase"
+                    : t.type === "INBOUND"
+                      ? "Received (Transfer)"
+                      : t.type === "DISPATCHED"
+                        ? "To Customer"
+                        : t.type === "RETURNED"
+                          ? "Returned"
+                          : t.consumeReason
+                            ? REASON_LABEL[t.consumeReason]
+                            : "Consumed"}
                 </span>
               </div>
             ))}
@@ -583,6 +599,95 @@ function ReturnToWarehouseForm() {
       {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
       <button type="button" className="btn-primary w-full" disabled={createTransfer.isPending} onClick={handleSubmit}>
         {createTransfer.isPending ? "Sending…" : "Send Back to Warehouse"}
+      </button>
+    </div>
+  );
+}
+
+// R&D buying and receiving material entirely on its own — never through
+// the Warehouse/Store ledger. Resolve-or-create by name (typing an
+// existing item's exact name matches it; anything else creates a new
+// catalog entry), same as the bulk sample-request import elsewhere on
+// this page — R&D naming something the catalog hasn't seen yet is the
+// normal case here.
+function DirectPurchaseForm() {
+  const toast = useToast();
+  const directPurchase = useRndDirectPurchase();
+  const [category, setCategory] = useState<InventoryCategory>("RM");
+  const [itemName, setItemName] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [unit, setUnit] = useState("Kg");
+  const [vendorName, setVendorName] = useState("");
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [invoiceNo, setInvoiceNo] = useState("");
+  const [batchNo, setBatchNo] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit() {
+    setError(null);
+    if (!itemName.trim()) return setError("Enter an item name.");
+    if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
+    if (!vendorName.trim()) return setError("Enter the vendor name.");
+    try {
+      await directPurchase.mutateAsync({
+        category,
+        itemName: itemName.trim(),
+        quantity: Number(quantity),
+        unit,
+        vendorName: vendorName.trim(),
+        date: date || undefined,
+        invoiceNo: invoiceNo.trim() || undefined,
+        batchNo: batchNo.trim() || undefined,
+        expiryDate: expiryDate || undefined,
+        note: note.trim() || undefined,
+      });
+      toast.success(`Received — Store has been notified.`);
+      setItemName("");
+      setQuantity("");
+      setVendorName("");
+      setInvoiceNo("");
+      setBatchNo("");
+      setExpiryDate("");
+      setNote("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not log this purchase");
+    }
+  }
+
+  return (
+    <div className="card space-y-3 p-4">
+      <p className="label flex items-center gap-1.5">
+        <PackageCheck className="h-3.5 w-3.5" /> Direct Purchase — Buy &amp; Receive
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <select className="field" value={category} onChange={(e) => setCategory(e.target.value as InventoryCategory)}>
+          <option value="RM">Raw Material</option>
+          <option value="PM">Packaging Material</option>
+        </select>
+        <input className="field" placeholder="Item name (existing or new)" value={itemName} onChange={(e) => setItemName(e.target.value)} />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <input className="field font-mono" type="number" min="0" step="any" placeholder="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+        <input className="field" placeholder="Unit (Kg, Ltr, Count…)" value={unit} onChange={(e) => setUnit(e.target.value)} />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <input className="field" placeholder="Vendor Name" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
+        <input type="date" className="field" value={date} onChange={(e) => setDate(e.target.value)} />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <input className="field" placeholder="Invoice / Bill No. (optional)" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
+        <input className="field" placeholder="Batch No. (optional)" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
+      </div>
+      <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+        Expiry Date (optional)
+        <input type="date" className="field" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
+      </label>
+      <input className="field" placeholder="Note — which project/formulation (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+      {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
+      <button type="button" className="btn-primary w-full" disabled={directPurchase.isPending} onClick={handleSubmit}>
+        {directPurchase.isPending ? "Saving…" : "Receive into R&D Store"}
       </button>
     </div>
   );
