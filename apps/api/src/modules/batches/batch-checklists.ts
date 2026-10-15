@@ -38,6 +38,9 @@ export const LINE_CLEARANCE_BULK_MFG_ITEMS: ChecklistItem[] = [
   { key: "temp_rh_within_limits", label: "Check and ensure that the temperature & RH are within limits." },
 ];
 
+// The checklist QA ticks for each batch's Line Clearance in the per-batch flow (the same BMR 4.0 items the old bulk-manufacturing clearance used).
+export const BATCH_LINE_CLEARANCE_ITEMS: ChecklistItem[] = LINE_CLEARANCE_BULK_MFG_ITEMS;
+
 export function preProductionChecklistKeys(): Set<string> {
   return new Set(LINE_CLEARANCE_DISPENSING_ITEMS.map((i) => i.key));
 }

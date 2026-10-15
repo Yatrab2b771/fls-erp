@@ -81,8 +81,8 @@ describe("Recycle Bin", () => {
         customerId: customer.body.id,
         poNumber: "PO-BIN-1001",
         items: [
-          { productName: "Product A", quantity: 10, unit: "KG" },
-          { productName: "Product B", quantity: 20, unit: "KG" },
+          { productName: "Product A", productCategory: "Powder", quantity: 10, unit: "KG" },
+          { productName: "Product B", productCategory: "Powder", quantity: 20, unit: "KG" },
         ],
       });
     expect(po.body.items).toHaveLength(2);

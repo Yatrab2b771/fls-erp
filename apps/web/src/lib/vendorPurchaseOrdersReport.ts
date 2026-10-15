@@ -8,10 +8,10 @@ export function exportVendorPurchaseOrdersReport(orders: VendorPurchaseOrder[]) 
   const rows = orders.flatMap((po) =>
     po.items.map((item) => ({
       "PO Number": po.poNumber,
+      Status: po.status,
       Vendor: po.vendor.name,
       "Order Date": po.orderDate?.slice(0, 10) ?? "",
       ETA: po.eta?.slice(0, 10) ?? "",
-      Status: po.status,
       Item: item.item.name,
       Category: item.item.category,
       Quantity: item.quantity,

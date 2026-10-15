@@ -10,6 +10,8 @@ import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import { exportItemHistoryReport } from "../lib/inventoryExport";
 import type { InventoryItem, InventoryTransaction } from "../lib/types";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
 
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
@@ -117,7 +119,7 @@ export function InventoryItemDetailPage() {
             <div key={ds.id} className="rounded-xl border border-slate-200 bg-slate-50/60 p-4">
               <p className="text-xs font-bold uppercase tracking-wide text-slate-400">{ds.name}</p>
               <p className={`mt-1 font-mono text-2xl font-black ${ds.onHand < 0 ? "text-rose-600" : "text-slate-800"}`}>{ds.onHand}</p>
-              <p className="mt-1 text-[11px] text-slate-400">
+              <p className="mt-1 text-tiny text-slate-400">
                 +{ds.receivedFromWarehouse} from warehouse · −{ds.issuedToProduction} to production
               </p>
             </div>
@@ -147,6 +149,7 @@ export function InventoryItemDetailPage() {
 }
 
 function ItemHistoryTable({ rows, empty }: { rows: InventoryTransaction[] | undefined; empty: boolean }) {
+  const pg = useClientPaging(rows);
   if (empty) return <EmptyState icon={Package} title="No history yet" hint="Nothing has been received or issued for this item." accent="slate" />;
   if (!rows?.length) return <EmptyState icon={Package} title="No matching rows" hint="Try a different search." accent="slate" />;
 
@@ -157,32 +160,19 @@ function ItemHistoryTable({ rows, empty }: { rows: InventoryTransaction[] | unde
           <thead>
             <tr>
               <th>Date</th>
+              <th>Status</th>
               <th>Type</th>
               <th className="text-right">Quantity</th>
               <th>Location</th>
               <th>Vendor</th>
               <th>Batch / GRN</th>
               <th>Logged By</th>
-              <th>Status</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((t) => (
+            {pg.rows.map((t) => (
               <tr key={t.id}>
                 <td className="text-slate-500">{new Date(t.date).toLocaleDateString()}</td>
-                <td>
-                  <span className={`pill ${TYPE_COLOR[t.type]}`}>{TYPE_LABEL[t.type]}</span>
-                </td>
-                <td className="text-right font-mono font-bold text-slate-700">
-                  {t.quantity} {t.unit}
-                </td>
-                <td className="text-slate-600">{t.dayStore?.name ?? t.plant?.name ?? "—"}</td>
-                <td className="text-slate-600">{t.vendorName ?? "—"}</td>
-                <td className="text-slate-500">
-                  {t.batchNo ?? "—"}
-                  {t.grnNo ? ` / ${t.grnNo}` : ""}
-                </td>
-                <td className="text-slate-600">{t.createdBy.fullName}</td>
                 <td>
                   {t.type === "RECEIVED" ? (
                     <span
@@ -201,11 +191,25 @@ function ItemHistoryTable({ rows, empty }: { rows: InventoryTransaction[] | unde
                     "—"
                   )}
                 </td>
+                <td>
+                  <span className={`pill ${TYPE_COLOR[t.type]}`}>{TYPE_LABEL[t.type]}</span>
+                </td>
+                <td className="text-right font-mono font-bold text-slate-700">
+                  {t.quantity} {t.unit}
+                </td>
+                <td className="text-slate-600">{t.dayStore?.name ?? t.plant?.name ?? "—"}</td>
+                <td className="text-slate-600">{t.vendorName ?? "—"}</td>
+                <td className="text-slate-500">
+                  {t.batchNo ?? "—"}
+                  {t.grnNo ? ` / ${t.grnNo}` : ""}
+                </td>
+                <td className="text-slate-600">{t.createdBy.fullName}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      <ClientPager pg={pg} />
     </div>
   );
 }

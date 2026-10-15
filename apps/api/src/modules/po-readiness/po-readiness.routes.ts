@@ -32,6 +32,7 @@ poReadinessRouter.post("/", requireRole("PPIC"), validateBody(createPoRequiremen
 
     const purchaseOrder = await prisma.purchaseOrder.findUnique({ where: { id: data.purchaseOrderId } });
     if (!purchaseOrder) return res.status(400).json({ error: "Unknown purchase order" });
+    if (purchaseOrder.status !== "APPROVED") return res.status(400).json({ error: "This purchase order hasn't been approved by BD yet." });
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: data.itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
@@ -77,7 +78,7 @@ poReadinessRouter.post("/import", requireRole("PPIC"), validateBody(importPoRequ
     const { rows } = req.body as ImportPoRequirementsInput;
 
     const uniquePoNumbers = [...new Set(rows.map((r) => r.poNumber))];
-    const purchaseOrders = await prisma.purchaseOrder.findMany({ where: { poNumber: { in: uniquePoNumbers } }, select: { id: true, poNumber: true } });
+    const purchaseOrders = await prisma.purchaseOrder.findMany({ where: { poNumber: { in: uniquePoNumbers }, status: "APPROVED" }, select: { id: true, poNumber: true } });
     const poIdByNumber = new Map(purchaseOrders.map((po) => [po.poNumber!, po.id]));
 
     const unmatchedPoNumbers = uniquePoNumbers.filter((n) => !poIdByNumber.has(n));

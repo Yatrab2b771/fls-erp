@@ -3,7 +3,8 @@ import { recordAudit } from "../../common/lib/audit";
 import { notifyRoles } from "../../common/lib/notify";
 import { prisma } from "../../common/lib/prisma";
 import { productionBatchInclude, type ProductionBatchWithRelations } from "./batch-include";
-import { actorCanActOnStage, COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ROLE, getForwardTarget, getRejectTarget, type CombinedLotStageId } from "./combined-lot-stage";
+import { actorCanActOnStage, COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ROLE, getBatchForwardTarget, getBatchRejectTarget, type CombinedLotStageId } from "./combined-lot-stage";
+import { notifyPlantDayStore } from "../inventory/plan-requests";
 import { PRODUCTION_BATCH_STAGE_FIELD_SCHEMA } from "./batch.schemas";
 import type { Prisma, ProductionBatch, RoleName } from "@prisma/client";
 
@@ -42,7 +43,7 @@ export async function transitionProductionBatchStage(params: {
     return { ok: false, status: 403, error: `This stage requires sign-off from the ${currentStage} department's role` };
   }
 
-  const target = action === "FORWARD" ? getForwardTarget(currentStage) : getRejectTarget(currentStage);
+  const target = action === "FORWARD" ? getBatchForwardTarget(currentStage) : getBatchRejectTarget(currentStage);
   if (!target) {
     return {
       ok: false,
@@ -71,13 +72,34 @@ export async function transitionProductionBatchStage(params: {
       (currentStage === "QA_GATE_PACKAGING" && [fieldData.packQaStatus ?? batch.packQaStatus, fieldData.packQcStatus ?? batch.packQcStatus].includes("Hold")) ||
       (currentStage === "FG_QC_RELEASE" && [fieldData.fgQaStatus ?? batch.fgQaStatus, fieldData.fgQcStatus ?? batch.fgQcStatus].includes("Hold")));
 
+  // QA approves the finished goods (held by the Day Store): only a real Approved releases them to be handed over to Dispatch.
+  const isFgNotApproved = action === "FORWARD" && currentStage === "FG_QC_RELEASE" && (fieldData.fgQaStatus ?? batch.fgQaStatus) !== "Approved";
+
   const isIpqcBlocked = action === "FORWARD" && currentStage === "IPQC" && (fieldData.ipqcStatus ?? batch.ipqcStatus) !== "Approved";
   const isBulkQcBlocked = action === "FORWARD" && currentStage === "BULK_QC" && (fieldData.bulkQcStatus ?? batch.bulkQcStatus) !== "Approved";
 
   const resolvesToCompleted = (value: unknown) => String(value ?? "").trim().toLowerCase() === "completed";
   const isPackagingIncomplete = action === "FORWARD" && currentStage === "PACKAGING" && !resolvesToCompleted(fieldData.packagingStatus ?? batch.packagingStatus);
 
-  const effectiveTarget = isQaGateHeld || isIpqcBlocked || isBulkQcBlocked || isPackagingIncomplete ? currentStage : target;
+  // The end of the pipeline: the Day Store hands the approved finished goods to Dispatch (the batch stays at this stage; the
+  // hand-over is recorded and Dispatch takes over with shipments).
+  if (action === "FORWARD" && currentStage === "FG_HANDOVER") {
+    if (batch.handedOverToDispatchAt) return { ok: false, status: 409, error: "These finished goods have already been handed over to Dispatch." };
+    const handedOver = await prisma.productionBatch.update({ where: { id: batch.id }, data: { handedOverToDispatchAt: new Date(), handedOverById: actorId }, include: productionBatchInclude });
+    await recordAudit({ actorId, action: "production_batch.fg_handed_over_to_dispatch", entityType: "ProductionBatch", entityId: batch.id });
+    await notifyRoles(
+      ["DISPATCH"],
+      {
+        title: `${handedOver.preProduction.purchaseOrderItem.productName} (batch${handedOver.batchNo ? ` ${handedOver.batchNo}` : ""}) finished goods handed over`,
+        body: "Approved finished goods are with you: send them to the customer or to the Warehouse.",
+        link: "/finished-goods-dispatch",
+      },
+      actorId,
+    ).catch((err) => logger.error({ err }, "notify failed: production_batch.fg_handover"));
+    return { ok: true, updated: handedOver, effectiveTarget: "FG_HANDOVER" };
+  }
+
+  const effectiveTarget = isQaGateHeld || isFgNotApproved || isIpqcBlocked || isBulkQcBlocked || isPackagingIncomplete ? currentStage : target;
 
   const updated = await prisma.productionBatch.update({
     where: { id: batch.id },
@@ -95,15 +117,18 @@ export async function transitionProductionBatchStage(params: {
 
   if (effectiveTarget !== currentStage) {
     const productName = updated.preProduction.purchaseOrderItem.productName;
-    await notifyRoles(
-      COMBINED_LOT_STAGE_ROLE[effectiveTarget],
-      {
-        title: `${productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}) is now at ${COMBINED_LOT_STAGE_LABEL[effectiveTarget]}`,
-        body: action === "REJECT" ? `Sent back: ${note}` : "Production batch in progress.",
-        link: `/production-batches/${updated.id}`,
-      },
-      actorId,
-    ).catch((err) => logger.error({ err }, "notify failed: production_batch.transition"));
+    const content = {
+      title: `${productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}) is now at ${COMBINED_LOT_STAGE_LABEL[effectiveTarget]}`,
+      body: action === "REJECT" ? `Sent back: ${note}` : "Production batch in progress.",
+      link: effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER" ? "/my-store/finished-goods" : `/production-batches/${updated.id}`,
+    };
+    // The finished goods sit with the Day Store of the batch's Plant, so it (not every Store seat) is told.
+    if (effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER") {
+      const plant = updated.preProduction.plantId ? await prisma.plant.findUnique({ where: { id: updated.preProduction.plantId }, select: { dayStoreId: true } }) : null;
+      await notifyPlantDayStore(plant?.dayStoreId, content, actorId).catch((err) => logger.error({ err }, "notify failed: production_batch.transition.day_store"));
+    } else {
+      await notifyRoles(COMBINED_LOT_STAGE_ROLE[effectiveTarget], content, actorId).catch((err) => logger.error({ err }, "notify failed: production_batch.transition"));
+    }
   }
 
   return { ok: true, updated, effectiveTarget };

@@ -192,5 +192,31 @@ describe("calculateMasterBOM", () => {
       expect(jarLines.find((l) => l.spec === "PM001")?.baseQty).toBe(150);
       expect(jarLines.find((l) => l.spec === "PM002")?.baseQty).toBe(20);
     });
+
+    it("uses each row's own overage (OV %) instead of the fixed 2%, and a Nil (0) overage adds nothing", () => {
+      const result = calculateMasterBOM([
+        {
+          brandName: "A",
+          productName: "P",
+          targetYield: 1000,
+          spec: {},
+          packagingComponents: [
+            { type: "Jar", quantity: 1, unit: "Nos", pmCode: "PM1", overagePct: 0 },
+            { type: "Cap sticker", quantity: 1, unit: "Nos", pmCode: "PM2", overagePct: 0.05 },
+            { type: "Label", quantity: 1, unit: "Nos", pmCode: "PM3" },
+          ],
+        },
+      ]);
+      expect(result.lines.find((l) => l.component === "Jar")).toMatchObject({ bufferQty: 0, totalQty: 1000 });
+      expect(result.lines.find((l) => l.component === "Cap sticker")).toMatchObject({ bufferQty: 50, totalQty: 1050 });
+      expect(result.lines.find((l) => l.component === "Label")).toMatchObject({ wastageRate: 0.02, bufferQty: 20 });
+    });
+
+    it("a stated packing level decides the category, whatever the component is called", () => {
+      const result = calculateMasterBOM([
+        { brandName: "A", productName: "P", targetYield: 100, spec: {}, packagingComponents: [{ type: "BOPP Tape", quantity: 0.0035, unit: "Nos", pmCode: "T", packingLevel: "Tertiary" }] },
+      ]);
+      expect(result.lines[0]).toMatchObject({ category: "3-Tertiary", wastageRate: 0 });
+    });
   });
 });

@@ -31,6 +31,7 @@ export interface MaterialReceivedForPdf {
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 const STATUS_LABEL: Record<string, string> = {
   PENDING_QC: "Pending QC",
+  TESTING: "Testing",
   ON_HOLD: "On Hold",
   QC_APPROVED: "QC Approved",
   QC_REJECTED: "QC Rejected",

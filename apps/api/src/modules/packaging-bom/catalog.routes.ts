@@ -8,21 +8,28 @@ import { validateBody } from "../../common/middleware/validate";
 import { importCatalogSchema, createSkuSchema, updateSkuSchema, reportCatalogMismatchSchema, updatePackagingComponentsSchema } from "./catalog.schemas";
 import { resolveBomRequests } from "../recipe-requests/recipe-request.routes";
 import { notifyRoles } from "../../common/lib/notify";
-import type { Prisma, Sku, SkuPackagingComponent } from "@prisma/client";
+import { savePmBom } from "./bom-versions";
+import type { Prisma, Sku, SkuPackagingComponent, InventoryItem } from "@prisma/client";
 
 export const catalogRouter = Router();
+
+const PM_ITEM_INCLUDE = { pmItem: { select: { id: true, name: true, code: true, unit: true } } } as const;
 
 catalogRouter.use(requireAuth);
 
 // Full spec, not just the id/name every dropdown wants — this is what
 // lets the Catalog Browser show (and edit) the actual packaging spec,
 // `extra` included, instead of just a name to pick from.
-function serializeSku(s: Sku & { packagingComponents?: SkuPackagingComponent[] }, customerName: string) {
+function serializeSku(s: Sku & { packagingComponents?: (SkuPackagingComponent & { pmItem?: Pick<InventoryItem, "id" | "name" | "code" | "unit"> | null })[] }, customerName: string) {
   return {
     id: s.id,
     customerId: s.customerId,
     customerName,
     productName: s.productName,
+    productCode: s.productCode,
+    packSize: s.packSize,
+    packingConfig: s.packingConfig,
+    batchPacks: s.batchPacks,
     jar: s.jar,
     wadMm: s.wadMm,
     scoopMl: s.scoopMl,
@@ -38,7 +45,7 @@ function serializeSku(s: Sku & { packagingComponents?: SkuPackagingComponent[] }
     corrugatedBoxMm: s.corrugatedBoxMm,
     packagingSizeNos: s.packagingSizeNos,
     extra: (s.extra as Record<string, unknown> | null) ?? undefined,
-    packagingComponents: (s.packagingComponents ?? []).map((c) => ({ id: c.id, type: c.type, quantity: c.quantity, unit: c.unit, pmCode: c.pmCode })),
+    packagingComponents: (s.packagingComponents ?? []).map((c) => ({ id: c.id, type: c.type, quantity: c.quantity, unit: c.unit, pmCode: c.pmCode, pmItemId: c.pmItemId, overagePct: c.overagePct, spec: c.spec, make: c.make, packingLevel: c.packingLevel, itemName: c.pmItem?.name ?? null, itemCode: c.pmItem?.code ?? null })),
   };
 }
 
@@ -62,6 +69,27 @@ catalogRouter.get("/product-names", async (_req, res, next) => {
   }
 });
 
+// The product names BD has put on purchase orders, per customer - so R&D can see which products still need
+// a BOM before PPIC asks. Names only: no PO number, quantity, rate or date leaves this route.
+catalogRouter.get("/po-products", requireRole("RND", "PPIC"), async (_req, res, next) => {
+  try {
+    const rows = await prisma.purchaseOrderItem.findMany({
+      where: { deletedAt: null, cancelledAt: null },
+      select: { productName: true, purchaseOrder: { select: { customerId: true, customer: { select: { companyName: true } } } } },
+    });
+    const seen = new Map<string, { customerId: string; customerName: string; productName: string }>();
+    for (const r of rows) {
+      const name = r.productName.trim();
+      if (!name) continue;
+      const key = `${r.purchaseOrder.customerId}|${name.toLowerCase()}`;
+      if (!seen.has(key)) seen.set(key, { customerId: r.purchaseOrder.customerId, customerName: r.purchaseOrder.customer.companyName, productName: name });
+    }
+    res.json([...seen.values()]);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Any authenticated user can read the catalog — it's reference data, not
 // sensitive. Scoped to one Customer at a time, same as Brand used to be —
 // see the Sku model's own comment on why Customer replaced Brand here.
@@ -74,7 +102,7 @@ catalogRouter.get("/skus", async (req, res, next) => {
       prisma.sku.count({ where }),
       prisma.sku.findMany({
         where,
-        include: { customer: true, packagingComponents: { orderBy: { type: "asc" } } },
+        include: { customer: true, packagingComponents: { orderBy: { type: "asc" }, include: PM_ITEM_INCLUDE } },
         orderBy: [{ customer: { companyName: "asc" } }, { productName: "asc" }],
         skip: pagination.skip,
         take: pagination.take,
@@ -109,7 +137,7 @@ catalogRouter.post("/skus", validateBody(createSkuSchema), async (req: AuthedReq
     // own manual "+ Add a product") needs the exact same call, or a
     // request raised before this Sku existed sits stuck forever even
     // though the gate it's waiting on has already closed.
-    await resolveBomRequests(customerId, sku.productName).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
+    await resolveBomRequests(customerId, sku.productName, req.user!.id).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
     res.status(201).json(serializeSku(sku, customer.companyName));
   } catch (err) {
     next(err);
@@ -136,12 +164,12 @@ catalogRouter.patch("/skus/:id", requireRole("RND"), validateBody(updateSkuSchem
     const sku = await prisma.sku.update({
       where: { id: req.params.id },
       data: { ...specFields, ...(extra !== undefined ? { extra: extra as Prisma.InputJsonValue } : {}) },
-      include: { packagingComponents: { orderBy: { type: "asc" } } },
+      include: { packagingComponents: { orderBy: { type: "asc" }, include: PM_ITEM_INCLUDE } },
     });
     await recordAudit({ actorId: req.user!.id, action: "catalog.sku_updated", entityType: "Sku", entityId: sku.id });
     // See the same call on POST /skus above — a rename (or any spec
     // edit) is still R&D authoring this Sku, same as an Import row would.
-    await resolveBomRequests(existing.customerId, sku.productName).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
+    await resolveBomRequests(existing.customerId, sku.productName, req.user!.id).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
     res.json(serializeSku(sku, existing.customer.companyName));
   } catch (err) {
     next(err);
@@ -157,25 +185,28 @@ catalogRouter.put(
   validateBody(updatePackagingComponentsSchema),
   async (req: AuthedRequest<{ id: string }>, res, next) => {
     try {
-      const { components } = req.body as z.infer<typeof updatePackagingComponentsSchema>;
+      const { components, header, note } = req.body as z.infer<typeof updatePackagingComponentsSchema>;
       const skuId = req.params.id;
       const existing = await prisma.sku.findUnique({ where: { id: skuId }, include: { customer: true } });
       if (!existing) return res.status(404).json({ error: "SKU not found" });
 
-      await prisma.$transaction([
-        prisma.skuPackagingComponent.deleteMany({ where: { skuId } }),
-        ...(components.length ? [prisma.skuPackagingComponent.createMany({ data: components.map((c) => ({ ...c, skuId })) })] : []),
-      ]);
+      const itemIds = [...new Set(components.map((c) => c.pmItemId).filter((id): id is string => !!id))];
+      if (itemIds.length) {
+        const found = await prisma.inventoryItem.count({ where: { id: { in: itemIds }, category: "PM" } });
+        if (found !== itemIds.length) return res.status(400).json({ error: "One of the linked items is not a Packaging Material in the Store list." });
+      }
 
-      await recordAudit({ actorId: req.user!.id, action: "catalog.sku_packaging_updated", entityType: "Sku", entityId: existing.id, metadata: { componentCount: components.length } });
+      const version = await savePmBom(skuId, { header: header ?? {}, components }, note, req.user!.id);
+
+      await recordAudit({ actorId: req.user!.id, action: "catalog.sku_packaging_updated", entityType: "Sku", entityId: existing.id, metadata: { version, componentCount: components.length, components: components.map((c) => ({ type: c.type, quantity: c.quantity ?? null, unit: c.unit, pmItemId: c.pmItemId ?? null })) } });
 
       // See the same call on POST /skus above — this is the real
       // packaging-authoring step for a Sku that already existed (e.g.
       // created bare off the PO form), so it's the most likely place a
       // waiting request actually gets resolved from.
-      await resolveBomRequests(existing.customerId, existing.productName).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
+      await resolveBomRequests(existing.customerId, existing.productName, req.user!.id).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
 
-      const sku = await prisma.sku.findUniqueOrThrow({ where: { id: skuId }, include: { packagingComponents: { orderBy: { type: "asc" } } } });
+      const sku = await prisma.sku.findUniqueOrThrow({ where: { id: skuId }, include: { packagingComponents: { orderBy: { type: "asc" }, include: PM_ITEM_INCLUDE } } });
       res.json(serializeSku(sku, existing.customer.companyName));
     } catch (err) {
       next(err);
@@ -257,7 +288,7 @@ catalogRouter.post(
 
           // Fulfils any PPIC request that was waiting on exactly this
           // Customer + product name — see recipe-request.routes.ts.
-          await resolveBomRequests(customer.id, sku.productName).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
+          await resolveBomRequests(customer.id, sku.productName, req.user!.id).catch((err) => req.log?.error({ err }, "resolveBomRequests failed"));
         }
       }
 

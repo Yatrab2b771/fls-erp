@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, BATCH_START } from "./helpers";
 
 const app = createApp();
 
@@ -11,7 +11,7 @@ async function createApprovedPo(bdToken: string, poNumber: string, quantity: num
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Recon Product", quantity, unit }] });
+    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Recon Product", productCategory: "Powder", quantity, unit }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return { poId: po.body.id as string, itemId: po.body.items[0].id as string };
 }
@@ -90,7 +90,7 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
     // Tier 2 — one ProductionBatch covering the whole planned 100 Kg,
     // completed with no self-reported wastage so combinedQty reaches
     // plannedQty and the CombinedLot is created automatically.
-    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ plannedQty: 100 })).body;
+    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app)
       .patch(`/api/production-batches/${pb.id}`)
       .set(authHeader(productionToken))

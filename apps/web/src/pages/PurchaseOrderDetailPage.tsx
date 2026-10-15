@@ -1,5 +1,5 @@
-import { useMemo, useState, type ChangeEvent } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useMemo, useState, type ChangeEvent, type ReactNode } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
@@ -17,13 +17,13 @@ import {
   Package,
   Pencil,
   Plus,
-  Receipt,
   Scale,
   ShieldCheck,
   Sparkles,
   Truck,
   Upload,
   X,
+  Factory,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
@@ -32,15 +32,14 @@ import {
   useAssignPlannedPlant,
   usePreProductions,
   useCreatePreProduction,
+  usePoItemPlan,
   useCreateBomPlan,
-  useCreatePlant,
   useCreateRmPlan,
   useCreateSku,
   useDayStores,
-  useGeneratePoInvoice,
   usePlants,
-  usePoBilling,
   usePoReconciliation,
+  usePoItemConversion,
   usePurchaseOrder,
   useRegulatoryReview,
   useSetRegulatoryBody,
@@ -48,29 +47,41 @@ import {
   useReportCatalogMismatch,
   useReviewPurchaseOrder,
   useSendPlanToProduction,
+  useSetPoMaterialHold,
   useSkus,
   useUpdatePurchaseOrder,
   useUpdatePurchaseOrderItem,
   useUploadPoDocument,
 } from "../lib/hooks";
+import { AssignPlantDialog } from "../components/AssignPlantDialog";
 import { StageBadge, DelayBadge, PoStatusBadge } from "../components/Badges";
 import { EmptyState } from "../components/EmptyState";
 import { ItemPicker } from "../components/ItemPicker";
 import { PickerWithAdd } from "../components/PickerWithAdd";
+import { ProductCategoryPicker } from "../components/ProductCategoryPicker";
 import { downloadFile, ApiError } from "../lib/api";
 import { findSimilarName } from "../lib/similarName";
+import { isFullyPlanned } from "../lib/ppicPlanning";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PartialReleaseDialog } from "../components/PartialReleaseDialog";
+import { useCreateItemChangeRequest, type ItemChangeKind } from "../lib/itemChangeHooks";
 import { useToast } from "../components/Toast";
 import type { BomPlan, PoReadinessItem, ProductType, PurchaseOrder, PurchaseOrderItem, RmPlan } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
 
 const UNIT_ITEMS = [
   { id: "KG", name: "KG" },
   { id: "SKU", name: "SKU" },
-  { id: "Litres", name: "Litres" },
   { id: "Other", name: "Other" },
 ];
 
 export function PurchaseOrderDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const setPoMaterialHold = useSetPoMaterialHold();
+  // Yes / No before a PO-wide hold or release (null = no question open).
+  const [holdAllAsk, setHoldAllAsk] = useState<boolean | null>(null);
   const { data: po, isLoading } = usePurchaseOrder(id);
   const { hasRole } = useAuth();
   const toast = useToast();
@@ -105,8 +116,20 @@ export function PurchaseOrderDetailPage() {
 
   return (
     <div className="space-y-6">
-      <Link to="/purchase-orders" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
-        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> All Purchase Orders
+      {/* Back goes to wherever the user came from (Dashboard tile list, a
+          notification, PO Readiness, ...) — not always Order Tracking. Only a
+          direct open (bookmark/new tab, no in-app history) falls back to it. */}
+      <Link
+        to="/purchase-orders"
+        onClick={(e) => {
+          if (location.key !== "default") {
+            e.preventDefault();
+            navigate(-1);
+          }
+        }}
+        className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Back
       </Link>
 
       <div className="card p-5 sm:p-6">
@@ -128,16 +151,18 @@ export function PurchaseOrderDetailPage() {
                   </span>
                 )}
               </div>
-              <p className="text-sm text-slate-500">{po.customer.companyName}</p>
+              <p className="text-sm text-slate-500"><CustomerName name={po.customer.companyName} /></p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <Link to={`/purchase-orders/${po.id}/full-report`} className="btn-ghost btn-sm">
               <FileStack className="h-3 w-3" strokeWidth={2.5} /> Full Report
             </Link>
-            <Link to={`/material-consumption?poId=${po.id}`} className="btn-ghost btn-sm">
-              <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> Material Used
-            </Link>
+            {hasRole("PRODUCTION", "STORE", "QA_QC") && (
+              <Link to={`/material-consumption?poId=${po.id}`} className="btn-ghost btn-sm">
+                <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> Material Used
+              </Link>
+            )}
             <button
               className="btn-ghost btn-sm"
               onClick={() => downloadFile(`/api/purchase-orders/${po.id}/export.pdf`, `FLS_PO_${po.poNumber ?? po.id}.pdf`)}
@@ -187,9 +212,55 @@ export function PurchaseOrderDetailPage() {
       </div>
 
       <div>
-        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-          <Boxes className="h-3.5 w-3.5" /> Products on this PO
-        </h2>
+        <ConfirmDialog
+          open={holdAllAsk !== null}
+          title={holdAllAsk ? "Hold every product on this PO?" : "Release every product on this PO?"}
+          message={
+            holdAllAsk ? (
+              <>Every product not yet sent to Production stops claiming stock, and its plan can't be generated or sent to Production until released.</>
+            ) : (
+              <>Every held product on this PO goes back into the FIFO queue.</>
+            )
+          }
+          busy={setPoMaterialHold.isPending}
+          onConfirm={async () => {
+            const held = holdAllAsk === true;
+            try {
+              const res = await setPoMaterialHold.mutateAsync({ poId: po.id, held });
+              toast.success(held ? `Held ${res.updated} product(s) — they no longer claim stock.` : `Released ${res.updated} product(s).`);
+            } catch (err) {
+              toast.error(err instanceof ApiError ? err.message : "Could not update the hold");
+            } finally {
+              setHoldAllAsk(null);
+            }
+          }}
+          onCancel={() => setHoldAllAsk(null)}
+        />
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
+            <Boxes className="h-3.5 w-3.5" /> Products on this PO
+          </h2>
+          {/* PPIC's Hold on the whole PO's materials — every product not yet sent
+              to Production stops claiming stock in Material Planning (or
+              claims it again on Release). Per-product Hold is on the Material
+              Planning list. */}
+          {hasRole("PPIC") && (() => {
+            const holdable = po.items.filter((i) => !i.planSentToProductionAt);
+            if (holdable.length === 0) return null;
+            const allHeld = holdable.every((i) => !!i.materialHeldAt);
+            return (
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                disabled={setPoMaterialHold.isPending}
+                title={allHeld ? "Put every product's materials back in the FIFO queue" : "Stop this PO's products claiming stock so other POs can use the material"}
+                onClick={() => setHoldAllAsk(!allHeld)}
+              >
+                {allHeld ? "Release all materials" : "Hold all materials"}
+              </button>
+            );
+          })()}
+        </div>
         <div className="space-y-3">
           {po.items.map((item) => (
             <ProductLineItem key={item.id} poId={po.id} item={item} poStatus={po.status} regulatoryBody={po.regulatoryBody} regulatoryStatus={po.regulatoryStatus} />
@@ -199,7 +270,6 @@ export function PurchaseOrderDetailPage() {
       </div>
 
       <PoReconciliationPanel poId={po.id} />
-      {hasRole("PURCHASE", "ACCOUNTS") && <PoBillingPanel poId={po.id} canGenerate={hasRole("ACCOUNTS")} />}
     </div>
   );
 }
@@ -220,10 +290,10 @@ function MiniStat({ label, value, unit, accent = "slate" }: { label: string; val
   };
   return (
     <div className="rounded-lg bg-slate-50/70 px-2.5 py-2">
-      <p className="truncate text-[9.5px] font-bold uppercase tracking-wide text-slate-400">{label}</p>
+      <p className="truncate text-micro font-bold uppercase tracking-wide text-slate-400">{label}</p>
       <p className={`mt-0.5 font-mono text-sm font-bold ${color[accent]}`}>
         {value}
-        {unit ? <span className="ml-1 text-[10px] font-normal text-slate-400">{unit}</span> : null}
+        {unit ? <span className="ml-1 text-micro font-normal text-slate-400">{unit}</span> : null}
       </p>
     </div>
   );
@@ -248,7 +318,7 @@ function PoReconciliationPanel({ poId }: { poId: string }) {
   return (
     <div className="card overflow-hidden">
       <button type="button" className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left" onClick={() => setOpen((o) => !o)}>
-        <h2 className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <Scale className="h-3.5 w-3.5" /> Material Reconciliation — this PO
         </h2>
         <ArrowRight className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} />
@@ -303,7 +373,7 @@ function ReconciliationRowCard({
     <div className={`rounded-xl border p-3 ${highlight ? "border-brand-200 bg-brand-50/40" : "border-slate-200 bg-white"}`}>
       <div className="mb-2.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
         <p className="font-bold text-slate-800">{title}</p>
-        <p className="text-[11px] text-slate-500">{subtitle}</p>
+        <p className="text-tiny text-slate-500">{subtitle}</p>
       </div>
 
       <div className="space-y-2.5">
@@ -337,125 +407,13 @@ function ReconciliationRowCard({
   );
 }
 
-// PO-level consolidated Billing — one commercial invoice for the whole
-// PO, separate from each Batch's own per-shipment Billing & E-Way Bill
-// stage. See purchase-orders.routes.ts GET/POST /:id/billing and its own
-// comment on the Price-per-Pouch x estimated-pouches-shipped formula.
-// Purchase can see the live preview; only Accounts can commit it as a
-// saved invoice.
-function PoBillingPanel({ poId, canGenerate }: { poId: string; canGenerate: boolean }) {
-  const { data, isLoading } = usePoBilling(poId);
-  const generate = useGeneratePoInvoice(poId);
-  const toast = useToast();
-  const [open, setOpen] = useState(false);
-  const [invoiceNo, setInvoiceNo] = useState("");
-  const [invoiceDate, setInvoiceDate] = useState("");
-
-  if (isLoading) return null;
-  if (!data || data.lines.every((l) => l.dispatchedQtyKg === 0)) return null; // nothing dispatched yet — nothing to bill
-
-  async function handleGenerate() {
-    try {
-      await generate.mutateAsync({ invoiceNo: invoiceNo.trim() || undefined, invoiceDate: invoiceDate || undefined });
-      toast.success("Invoice generated.");
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not generate the invoice");
-    }
-  }
-
-  const fmt = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
-
-  return (
-    <div className="card overflow-hidden">
-      <button type="button" className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left" onClick={() => setOpen((o) => !o)}>
-        <h2 className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-          <Receipt className="h-3.5 w-3.5" /> Billing — this PO
-        </h2>
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-sm font-bold text-brand-700">{fmt(data.totalAmount)}</span>
-          <ArrowRight className={`h-3.5 w-3.5 shrink-0 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} />
-        </div>
-      </button>
-      {open && (
-        <div className="space-y-3 border-t border-slate-100 p-3.5 sm:p-4">
-          {data.invoice && (
-            <p className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">
-              <Receipt className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} />
-              Saved — {data.invoice.invoiceNo || "no invoice no. yet"}
-              {data.invoice.invoiceDate && <> · {new Date(data.invoice.invoiceDate).toLocaleDateString()}</>} · by {data.invoice.generatedBy.fullName}
-            </p>
-          )}
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                  <th className="pb-1.5 pr-2">Product</th>
-                  <th className="pb-1.5 pr-2">Dispatched</th>
-                  <th className="pb-1.5 pr-2">Price/Pouch</th>
-                  <th className="pb-1.5 pr-2">Est. Pouches</th>
-                  <th className="pb-1.5 text-right">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.lines.map((l) => (
-                  <tr key={l.purchaseOrderItemId} className="border-t border-slate-100">
-                    <td className="py-1.5 pr-2 font-bold text-slate-700">{l.productName}</td>
-                    <td className="py-1.5 pr-2 font-mono text-slate-600">
-                      {l.dispatchedQtyKg} {l.unit}
-                    </td>
-                    {l.priced ? (
-                      <>
-                        <td className="py-1.5 pr-2 font-mono text-slate-600">{fmt(l.pricePerPouch!)}</td>
-                        <td className="py-1.5 pr-2 font-mono text-slate-600">{l.estimatedPouches}</td>
-                        <td className="py-1.5 text-right font-mono font-bold text-slate-700">{fmt(l.amount!)}</td>
-                      </>
-                    ) : (
-                      <td className="py-1.5 text-right text-slate-400" colSpan={3}>
-                        No RM BOM plan yet — can't be priced this way
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="border-t border-slate-200">
-                  <td colSpan={4} className="pt-1.5 text-right text-[10px] font-bold uppercase tracking-wide text-slate-400">
-                    Total
-                  </td>
-                  <td className="pt-1.5 text-right font-mono text-sm font-bold text-brand-700">{fmt(data.totalAmount)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-
-          {canGenerate && (
-            <div className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-              <div>
-                <label className="label">Invoice No.</label>
-                <input className="field font-mono" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} placeholder={data.invoice?.invoiceNo ?? "INV-…"} />
-              </div>
-              <div>
-                <label className="label">Invoice Date</label>
-                <input type="date" className="field" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
-              </div>
-              <button type="button" className="btn-primary btn-sm" disabled={generate.isPending} onClick={handleGenerate}>
-                {generate.isPending ? "Generating…" : data.invoice ? "Regenerate Invoice" : "Generate Invoice"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // One labeled cluster of MiniStats — the grid itself wraps at
 // grid-cols-2 on phones up to grid-cols-4/5 on wider screens, so a
 // cluster never needs its own horizontal scroll at any width.
 function MetricGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className="mb-1 text-micro font-bold uppercase tracking-wider text-slate-400">{label}</p>
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4 lg:grid-cols-5">{children}</div>
     </div>
   );
@@ -691,6 +649,7 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
   // already exists (bomPlan/rmPlan below, from the PO's own data) its
   // pill takes over as the source of truth across reloads.
   const [justGenerated, setJustGenerated] = useState<{ bom?: BomPlan; rm?: RmPlan }>({});
+  const [assigningPlant, setAssigningPlant] = useState(false);
   const bomResult = justGenerated.bom?.result;
   const batch = justGenerated.rm?.result?.batches[0];
 
@@ -710,12 +669,17 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
   // Recipes), not this button.
   const canSeeBom = hasRole("PPIC", "PURCHASE", "RND", "STORE");
   const canSeeRm = hasRole("PPIC", "RND", "STORE");
+  // Only R&D opens the Packaging BOM / RM BOM screens: for everyone else the chip just states where the plan stands
+  const canOpenPlan = hasRole("RND");
   const canGenerateBom = hasRole("PPIC", "PURCHASE");
   const canGenerateRm = hasRole("PPIC");
 
   const needsBom = canGenerateBom && !bomPlan;
   const needsRm = canGenerateRm && !rmPlan;
   const generating = createBomPlan.isPending || createRmPlan.isPending;
+  // PPIC's Hold on a product that isn't fully planned yet stops its plan being
+  // generated (the server refuses too) until it's released.
+  const planningHeld = (!!item.materialHeldAt && !isFullyPlanned(item)) || !!item.cancelledAt;
 
   // One click, both engines: creates whichever of the two links doesn't
   // exist yet for this product. Each one auto-matches the PO product's
@@ -733,7 +697,9 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
       ]);
       setJustGenerated({ bom, rm });
       const calculated = [bom?.status === "CALCULATED" && "BOM", rm?.status === "CALCULATED" && "RM BOM"].filter(Boolean);
-      toast.success(calculated.length ? `Generated — ${calculated.join(" + ")} calculated instantly.` : "Plan(s) created — no catalog match yet, add the SKU/Recipe by hand.");
+      const problem = bom?.conversionProblem ?? rm?.conversionProblem;
+      if (problem) toast.error(problem);
+      else toast.success(calculated.length ? `Generated — ${calculated.join(" + ")} calculated instantly.` : "Plan(s) created — no catalog match yet, add the SKU/Recipe by hand.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate");
     }
@@ -741,17 +707,18 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
 
   return (
     <div className="mt-3 border-t border-slate-100 pt-3">
+      <AssignPlantDialog open={assigningPlant} poId={item.purchaseOrderId} itemId={item.id} productName={item.productName} currentPlantId={item.plannedPlantId} onClose={() => setAssigningPlant(false)} />
       <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
         {canSeeBom && (
           <>
             {bomPlan ? (
-              <Link to={`/packaging-bom?plan=${bomPlan.id}`} className="pill shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
+              <PlanChip to={`/packaging-bom?plan=${bomPlan.id}`} open={canOpenPlan} className="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
                 <Package className="h-3 w-3" strokeWidth={2.5} /> BOM · {bomPlan.status === "CALCULATED" ? "Calculated" : "Draft"}
-              </Link>
+              </PlanChip>
             ) : justGenerated.bom ? (
-              <Link to={`/packaging-bom?plan=${justGenerated.bom.id}`} className="pill shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
+              <PlanChip to={`/packaging-bom?plan=${justGenerated.bom.id}`} open={canOpenPlan} className="border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
                 <Package className="h-3 w-3" strokeWidth={2.5} /> BOM · {justGenerated.bom.status === "CALCULATED" ? "Calculated" : "Draft"}
-              </Link>
+              </PlanChip>
             ) : null}
             {(bomPlan || justGenerated.bom) && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" strokeWidth={2.5} />}
           </>
@@ -760,22 +727,33 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
         {canSeeRm && (
           <>
             {rmPlan ? (
-              <Link to={`/rm-costing?plan=${rmPlan.id}`} className="pill shrink-0 border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
+              <PlanChip to={`/rm-costing?plan=${rmPlan.id}`} open={canOpenPlan} className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
                 <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM BOM · {rmPlan.status === "CALCULATED" ? "Calculated" : "Draft"}
-              </Link>
+              </PlanChip>
             ) : justGenerated.rm ? (
-              <Link to={`/rm-costing?plan=${justGenerated.rm.id}`} className="pill shrink-0 border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
+              <PlanChip to={`/rm-costing?plan=${justGenerated.rm.id}`} open={canOpenPlan} className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100">
                 <FlaskConical className="h-3 w-3" strokeWidth={2.5} /> RM BOM · {justGenerated.rm.status === "CALCULATED" ? "Calculated" : "Draft"}
-              </Link>
+              </PlanChip>
             ) : null}
             {(rmPlan || justGenerated.rm) && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" strokeWidth={2.5} />}
           </>
         )}
 
-        {(needsBom && !justGenerated.bom) || (needsRm && !justGenerated.rm) ? (
+        {((needsBom && !justGenerated.bom) || (needsRm && !justGenerated.rm)) && !item.plannedPlantId ? (
+          // The plan's material goes to the Plant's Day Store, so the Plant comes first.
           <button
-            className="pill shrink-0 border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100"
-            disabled={generating}
+            className={`pill shrink-0 border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 ${planningHeld ? "cursor-not-allowed opacity-50" : ""}`}
+            disabled={planningHeld}
+            title="Assign the Plant that will make this product, then Generate."
+            onClick={() => setAssigningPlant(true)}
+          >
+            <Factory className="h-3 w-3" strokeWidth={2.5} /> Assign Plant to Generate
+          </button>
+        ) : (needsBom && !justGenerated.bom) || (needsRm && !justGenerated.rm) ? (
+          <button
+            className={`pill shrink-0 border-brand-300 bg-brand-50 text-brand-700 hover:bg-brand-100 ${planningHeld ? "cursor-not-allowed opacity-50" : ""}`}
+            disabled={generating || planningHeld}
+            title={planningHeld ? "On hold — release this product before generating its plan." : undefined}
             onClick={handleGenerate}
           >
             <Sparkles className="h-3 w-3" strokeWidth={2.5} /> {generating ? "Generating…" : "Generate"}
@@ -806,25 +784,25 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
           implied to be the same number. */}
       {(bomResult || batch) && (
         <div className="mt-3 space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-          <p className="flex items-center gap-1.5 text-[11px] font-black uppercase tracking-wide text-slate-500">
+          <p className="flex items-center gap-1.5 text-tiny font-black uppercase tracking-wide text-slate-500">
             <Sparkles className="h-3.5 w-3.5 text-brand-500" strokeWidth={2.5} /> Generated — Materials &amp; Cost Breakdown
           </p>
 
           {batch && justGenerated.rm && (
             <div>
               <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[11px] font-bold text-amber-700">
+                <p className="text-tiny font-bold text-amber-700">
                   Raw Material (RM) used — {batch.batchSizeKg} Kg batch, {batch.servingsPerBatch.toFixed(0)} pouches
                 </p>
                 <div className="flex gap-1.5">
                   <button
-                    className="btn-ghost btn-sm !py-1 !text-[10px]"
+                    className="btn-ghost btn-sm !py-1 !text-micro"
                     onClick={() => downloadFile(`/api/rm-costing/plans/${justGenerated.rm!.id}/export.xlsx`, `FLS_RM_Costing_${justGenerated.rm!.id}.xlsx`)}
                   >
                     <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Excel
                   </button>
                   <button
-                    className="btn-ghost btn-sm !py-1 !text-[10px]"
+                    className="btn-ghost btn-sm !py-1 !text-micro"
                     onClick={() => downloadFile(`/api/rm-costing/plans/${justGenerated.rm!.id}/export.pdf`, `FLS_RM_Master_${justGenerated.rm!.id}.pdf`)}
                   >
                     <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> PDF
@@ -832,13 +810,12 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
                 </div>
               </div>
               <div className="overflow-x-auto rounded-lg border border-amber-100 bg-white">
-                <table className="w-full text-[11px]">
+                <table className="w-full text-tiny">
                   <thead className="bg-amber-50 text-amber-800">
                     <tr>
                       <th className="px-2 py-1 text-left font-bold">Ingredient</th>
                       <th className="px-2 py-1 text-left font-bold">Brand</th>
                       <th className="px-2 py-1 text-right font-bold">Qty (Kg)</th>
-                      <th className="px-2 py-1 text-right font-bold">Cost (₹)</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -847,7 +824,6 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
                         <td className="px-2 py-1 font-semibold text-slate-700">{ing.name}</td>
                         <td className="px-2 py-1 text-slate-500">{ing.brand}</td>
                         <td className="px-2 py-1 text-right font-mono">{ing.qtyInKg.toFixed(3)}</td>
-                        <td className="px-2 py-1 text-right font-mono">₹{ing.amount.toFixed(0)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -859,16 +835,16 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
           {bomResult && justGenerated.bom && (
             <div>
               <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
-                <p className="text-[11px] font-bold text-emerald-700">Packaging (PM) needed — target yield {bomResult.totalYield}</p>
+                <p className="text-tiny font-bold text-emerald-700">Packaging (PM) needed — target yield {bomResult.totalYield}</p>
                 <div className="flex gap-1.5">
                   <button
-                    className="btn-ghost btn-sm !py-1 !text-[10px]"
+                    className="btn-ghost btn-sm !py-1 !text-micro"
                     onClick={() => downloadFile(`/api/bom/plans/${justGenerated.bom!.id}/export.xlsx`, `FLS_Master_BOM_${justGenerated.bom!.id}.xlsx`)}
                   >
                     <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Excel
                   </button>
                   <button
-                    className="btn-ghost btn-sm !py-1 !text-[10px]"
+                    className="btn-ghost btn-sm !py-1 !text-micro"
                     onClick={() => downloadFile(`/api/bom/plans/${justGenerated.bom!.id}/export.pdf`, `FLS_Master_BOM_${justGenerated.bom!.id}.pdf`)}
                   >
                     <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> PDF
@@ -876,7 +852,7 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
                 </div>
               </div>
               <div className="overflow-x-auto rounded-lg border border-emerald-100 bg-white">
-                <table className="w-full text-[11px]">
+                <table className="w-full text-tiny">
                   <thead className="bg-emerald-50 text-emerald-800">
                     <tr>
                       <th className="px-2 py-1 text-left font-bold">Component</th>
@@ -898,41 +874,6 @@ function ProductionPipeline({ item, hasStarted }: { item: PurchaseOrderItem; has
             </div>
           )}
 
-          {batch && (
-            <div className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2">
-              <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-brand-700">End-to-End Cost — RM → Testing → Mfg Loss → Packaging → Profit → GST</p>
-              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px] text-slate-600 sm:grid-cols-3">
-                <p>
-                  RM Cost: <span className="font-mono font-bold text-slate-800">₹{batch.totalRmCost.toFixed(0)}</span>
-                </p>
-                <p>
-                  + Testing: <span className="font-mono font-bold text-slate-800">₹{batch.testCost.toFixed(0)}</span>
-                </p>
-                <p>
-                  + Mfg Loss: <span className="font-mono font-bold text-slate-800">₹{batch.mfgLossAmount.toFixed(0)}</span>
-                </p>
-                <p>
-                  + Packaging<sup>*</sup>: <span className="font-mono font-bold text-slate-800">₹{batch.packagingTotal.toFixed(0)}</span>
-                </p>
-                <p>
-                  + Profit: <span className="font-mono font-bold text-slate-800">₹{batch.profitAmount.toFixed(0)}</span>
-                </p>
-                <p>
-                  + GST: <span className="font-mono font-bold text-slate-800">₹{batch.gstAmount.toFixed(0)}</span>
-                </p>
-              </div>
-              <p className="mt-1 text-[9px] text-slate-400">*From the Costing Profile's Jar/Scoop/Label/Conversion/CCB inputs — a flat estimate, not derived from the packaging table above.</p>
-              <div className="mt-2 flex flex-wrap items-baseline justify-between gap-2 border-t border-brand-200 pt-2">
-                <p className="text-xs text-slate-600">
-                  Price / Pouch: <span className="font-mono font-black text-brand-700">₹{batch.pricePerPouch.toFixed(2)}</span>
-                </p>
-                <p className="text-sm text-slate-700">
-                  Total for this batch ({batch.servingsPerBatch.toFixed(0)} pouches):{" "}
-                  <span className="font-mono font-black text-brand-700">₹{(batch.pricePerPouch * batch.servingsPerBatch).toFixed(0)}</span>
-                </p>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -963,7 +904,6 @@ function ProductLineItem({
   const { data: preProductions } = usePreProductions(item.id);
   const run = preProductions?.[0];
   const { data: plants } = usePlants();
-  const createPlant = useCreatePlant();
   const createPreProduction = useCreatePreProduction();
   const removeItem = useRemovePurchaseOrderItem(poId);
   const updateItem = useUpdatePurchaseOrderItem(poId);
@@ -971,6 +911,11 @@ function ProductLineItem({
   const assignPlannedPlant = useAssignPlannedPlant(poId);
   const regulatoryReview = useRegulatoryReview(poId);
   const sendPlanToProduction = useSendPlanToProduction(poId);
+  const [sendAsk, setSendAsk] = useState(false);
+  const sendPreview = usePoItemPlan(poId, sendAsk ? item.id : null);
+  // Partial release: PPIC starts Production with part of the order and releases more later.
+  const [partialAsk, setPartialAsk] = useState(false);
+  const partiallyReleased = !!item.planSentToProductionAt && item.releasedQty != null && item.releasedQty < item.quantity - 1e-6;
   const toast = useToast();
   const [plantId, setPlantId] = useState("");
   const [showStart, setShowStart] = useState(false);
@@ -1036,7 +981,13 @@ function ProductLineItem({
   }
 
   return (
-    <div className="card-hover card p-4 sm:p-5">
+    <div className={`card-hover card p-4 sm:p-5 ${item.cancelledAt ? "opacity-70" : ""}`}>
+      {item.cancelledAt && (
+        <div className="mb-3 rounded-lg border border-slate-300 bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
+          Cancelled by PPIC on {new Date(item.cancelledAt).toLocaleDateString()}
+          {item.cancelReason ? ` - ${item.cancelReason}` : ""}. This product is closed for good.
+        </div>
+      )}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           <div className="stat-icon h-9 w-9 bg-violet-50 text-violet-600">
@@ -1076,7 +1027,7 @@ function ProductLineItem({
               <p className="flex items-center gap-1.5 font-bold text-slate-800">
                 {item.productName}
                 {item.productType === "NEW" && (
-                  <span className="pill border-violet-200 bg-violet-50 text-[10px] text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM BOM can run.">
+                  <span className="pill border-violet-200 bg-violet-50 text-micro text-violet-700" title="New product or a formulation change — R&D needs to add it before BOM/RM BOM can run.">
                     New Product
                   </span>
                 )}
@@ -1088,13 +1039,14 @@ function ProductLineItem({
               </p>
             )}
             <p className="text-xs text-slate-500">
-              {item.dosageForm && `${item.dosageForm} · `}
+              {(item.productCategory ?? item.dosageForm) && `${item.productCategory ?? item.dosageForm} · `}
               <span className="font-mono font-bold text-slate-600">
                 {item.quantity} {item.unit}
               </span>
               {item.volume ? ` · Vol ${item.volume}` : ""}
               {item.packSize && ` · ${item.packSize} ${item.packType ?? ""}`}
             </p>
+            <ConversionLine poId={item.purchaseOrderId} itemId={item.id} quantity={item.quantity} unit={item.unit} packSize={item.packSize} />
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -1111,6 +1063,7 @@ function ProductLineItem({
               <Lock className="h-3 w-3" strokeWidth={2.5} /> Awaiting PO Approval
             </span>
           ))}
+          {hasRole("BD") && isApproved && <ChangeRequestControl item={item} />}
           {hasRole("BD") && !run && (
             <button
               className="btn-icon hover:!bg-rose-50 hover:!text-rose-600"
@@ -1136,9 +1089,10 @@ function ProductLineItem({
           the backend's own guard) — shown read-only after that. */}
       {hasRole("PPIC") && (
         <div className="mt-3 border-t border-slate-100 pt-3">
-          {run ? (
-            <p className="text-[11px] text-slate-500">
+          {run || (item.plannedPlantId && isFullyPlanned(item)) ? (
+            <p className="text-tiny text-slate-500">
               Producing at <span className="font-bold text-slate-700">{item.plannedPlant?.name ?? "—"}</span>
+              {!run && " (fixed once the product is planned)"}
             </p>
           ) : (
             <div className="max-w-sm">
@@ -1172,7 +1126,7 @@ function ProductLineItem({
           itself is REGULATORY-only. */}
       <div className="mt-4 overflow-hidden rounded-2xl border border-indigo-100 bg-gradient-to-br from-indigo-50/70 via-white to-white">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-indigo-100/80 px-4 py-2.5">
-          <p className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-indigo-700">
+          <p className="flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wide text-indigo-700">
             <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> Regulatory Review
           </p>
           <span
@@ -1184,12 +1138,12 @@ function ProductLineItem({
                   : "border-slate-200 bg-slate-50 text-slate-500"
             }`}
           >
-            {item.regulatoryStatus ?? "Pending Review"}
+            {item.regulatoryStatus ?? (item.sentToRegulatoryAt ? "Pending Review" : "Awaiting plan")}
           </span>
         </div>
 
         <div className="space-y-3 p-4">
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500">
+          <div className="flex flex-wrap items-center gap-1.5 text-tiny text-slate-500">
             <span>Regulatory Body</span>
             <span className="pill border-slate-200 bg-white text-slate-600">{regulatoryBody ?? "Not set"}</span>
             <span className="pill border-slate-200 bg-white text-slate-600">{poRegulatoryStatus ?? "No status"}</span>
@@ -1219,7 +1173,7 @@ function ProductLineItem({
           )}
 
           {item.regulatoryRemarks && (
-            <p className="rounded-lg bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+            <p className="rounded-lg bg-slate-50 px-3 py-2 text-tiny text-slate-500">
               <span className="font-bold text-slate-600">Note:</span> {item.regulatoryRemarks}
             </p>
           )}
@@ -1227,6 +1181,9 @@ function ProductLineItem({
           {hasRole("REGULATORY") && (
             <div className="space-y-2 rounded-xl border border-slate-100 bg-white/80 p-3">
               <label className="label">Approval Decision</label>
+              {!item.sentToRegulatoryAt && (
+                <p className="text-tiny font-bold text-amber-600">Nothing to review yet — this product reaches Regulatory automatically once PPIC's plan is calculated.</p>
+              )}
               <textarea
                 className="field !h-16 !text-xs"
                 placeholder="Remarks (required if Not Approved)"
@@ -1234,10 +1191,10 @@ function ProductLineItem({
                 onChange={(e) => setRegulatoryRemarks(e.target.value)}
               />
               <div className="flex gap-2">
-                <button className="btn-primary btn-sm" disabled={regulatoryReview.isPending} onClick={() => handleRegulatoryReview("Approved")}>
+                <button className="btn-primary btn-sm" disabled={regulatoryReview.isPending || !item.sentToRegulatoryAt} onClick={() => handleRegulatoryReview("Approved")}>
                   <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Approve
                 </button>
-                <button className="btn-ghost btn-sm hover:!bg-rose-50 hover:!text-rose-600" disabled={regulatoryReview.isPending} onClick={() => handleRegulatoryReview("Not Approved")}>
+                <button className="btn-ghost btn-sm hover:!bg-rose-50 hover:!text-rose-600" disabled={regulatoryReview.isPending || !item.sentToRegulatoryAt} onClick={() => handleRegulatoryReview("Not Approved")}>
                   <X className="h-3.5 w-3.5" strokeWidth={2.25} /> Not Approved
                 </button>
               </div>
@@ -1250,39 +1207,102 @@ function ProductLineItem({
           costing) on to Production. Hard-gated server-side on all three
           preconditions; the button here just surfaces whichever one
           isn't met yet instead of letting the click 400 silently. */}
-      {hasRole("PPIC") && !run && !item.planSentToProductionAt && (
-        <div className="mt-3 border-t border-slate-100 pt-3">
+      {hasRole("PPIC") && (!run || partiallyReleased) && (!item.planSentToProductionAt || partiallyReleased) && !item.cancelledAt && (
+        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+          {/* Regulatory status, right beside Send Plan to Production: red until
+              Regulatory approves this product, then green — and Send Plan to
+              Production only unlocks on green. The hand-off itself is
+              automatic (the moment the plan is calculated), so this is a
+              status, not something PPIC has to click. */}
+          <span
+            role="status"
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold text-white ${item.regulatoryStatus === "Approved" ? "bg-emerald-500" : "bg-rose-500"}`}
+            title={
+              item.regulatoryStatus === "Approved"
+                ? "Regulatory has approved this product."
+                : item.regulatoryStatus === "Not Approved"
+                  ? `Regulatory marked this Not Approved${item.regulatoryRemarks ? ` — ${item.regulatoryRemarks}` : ""}. Fix and recalculate the plan to send it again.`
+                  : item.sentToRegulatoryAt
+                    ? "Sent to Regulatory — waiting for their decision."
+                    : "Goes to Regulatory automatically once this product's plan is calculated."
+            }
+          >
+            <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2.5} />
+            {item.regulatoryStatus === "Approved"
+              ? "Regulatory Approved"
+              : item.regulatoryStatus === "Not Approved"
+                ? "Regulatory: Not Approved"
+                : item.sentToRegulatoryAt
+                  ? "Sent to Regulatory — Awaiting"
+                  : "Send to Regulatory (auto)"}
+          </span>
           <button
             className="btn-primary btn-sm"
-            disabled={sendPlanToProduction.isPending}
-            onClick={async () => {
+            disabled={sendPlanToProduction.isPending || item.regulatoryStatus !== "Approved" || !!item.materialHeldAt}
+            title={item.materialHeldAt ? "On hold — release this product first." : item.regulatoryStatus !== "Approved" ? "Unlocks once Regulatory approves this product." : undefined}
+            onClick={() => setSendAsk(true)}
+          >
+            {sendPlanToProduction.isPending ? "Sending…" : partiallyReleased ? "Release the rest" : "Send Plan to Production"}
+          </button>
+          <button
+            className="btn-ghost btn-sm"
+            disabled={sendPlanToProduction.isPending || item.regulatoryStatus !== "Approved" || !!item.materialHeldAt}
+            title="Start Production with only part of the order (for example the material you already have) and release more later."
+            onClick={() => setPartialAsk(true)}
+          >
+            Send partial…
+          </button>
+          <ConfirmDialog
+            open={sendAsk}
+            title="Send plan to Production?"
+            message={
+              <>
+                <b>{item.productName}</b> goes to Production together with its plan
+                {sendPreview.data ? (
+                  <>
+                    {" "}— <b>RM: {sendPreview.data.rm?.materials.length ?? 0} material(s)</b>, <b>PM: {sendPreview.data.bom?.materials.length ?? 0} material(s)</b>, with quantities
+                  </>
+                ) : null}
+                . If any raw / packaging material is still short, the server will refuse and tell you which.
+              </>
+            }
+            busy={sendPlanToProduction.isPending}
+            onConfirm={async () => {
               try {
                 await sendPlanToProduction.mutateAsync(item.id);
                 toast.success("Plan sent to Production.");
               } catch (err) {
                 toast.error(err instanceof ApiError ? err.message : "Could not send the plan");
+              } finally {
+                setSendAsk(false);
               }
             }}
-          >
-            {sendPlanToProduction.isPending ? "Sending…" : "Send Plan to Production"}
-          </button>
+            onCancel={() => setSendAsk(false)}
+          />
+          <PartialReleaseDialog open={partialAsk} poId={poId} itemId={item.id} productName={item.productName} onClose={() => setPartialAsk(false)} />
+          {item.materialHeldAt && (
+            <span className="pill border-amber-200 bg-amber-50 text-amber-700" title="PPIC's hold — release it from Not Planned / Material Planning">
+              On Hold
+            </span>
+          )}
         </div>
       )}
       {item.planSentToProductionAt && (
-        <p className="mt-3 flex items-center gap-1.5 border-t border-slate-100 pt-3 text-[11px] font-bold text-emerald-600">
+        <p className="mt-3 flex items-center gap-1.5 border-t border-slate-100 pt-3 text-tiny font-bold text-emerald-600">
           <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Plan sent to Production
+          {partiallyReleased && <span className="text-amber-600">· Released {item.releasedQty} of {item.quantity} {item.unit}</span>}
         </p>
       )}
 
       {showStart && !run && (
         <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
-          <p className="text-[11px] text-slate-500">
+          <p className="text-tiny text-slate-500">
             Starts one production run covering this item's full ordered quantity — <span className="font-mono font-bold text-slate-600">{item.quantity} {item.unit}</span>.
           </p>
           {item.plannedPlant ? (
-            <p className="text-[11px] font-bold text-slate-600">Producing at {item.plannedPlant.name} — set by PPIC.</p>
+            <p className="text-tiny font-bold text-slate-600">Producing at {item.plannedPlant.name} — set by PPIC.</p>
           ) : (
-            <PickerWithAdd label="Plant (optional — can be set later)" placeholder="— Which plant runs this —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+            <PickerWithAdd label="Plant (optional — can be set later)" placeholder="— Which plant runs this —" options={plants ?? []} value={plantId} onChange={setPlantId} />
           )}
           <div className="flex justify-end">
             <button className="btn-primary btn-sm" disabled={createPreProduction.isPending} onClick={() => handleStartProduction()}>
@@ -1328,7 +1348,7 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
     const merged = Array.from(new Set([...ownNames, ...(allProductNames ?? [])]));
     return merged.map((name) => ({ id: name, name }));
   }, [customerSkus, allProductNames]);
-  const [dosageForm, setDosageForm] = useState("");
+  const [productCategory, setProductCategory] = useState("");
   const [quantity, setQuantity] = useState("");
   const [unit, setUnit] = useState("KG");
   const [volume, setVolume] = useState("");
@@ -1369,8 +1389,10 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
         />
       </div>
       <div>
-        <label className="label">Dosage Form (opt.)</label>
-        <input className="field" value={dosageForm} onChange={(e) => setDosageForm(e.target.value)} />
+        <label className="label">
+          Product Category <span className="text-rose-500">*</span>
+        </label>
+        <ProductCategoryPicker value={productCategory} onChange={setProductCategory} />
       </div>
       <div>
         <label className="label">Quantity</label>
@@ -1391,11 +1413,13 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
       <div className="flex items-end gap-2 sm:col-span-6">
         <button
           className="btn-primary"
+          disabled={!productName.trim() || !quantity || !productCategory}
+          title={!productCategory ? "Select a Product Category first" : undefined}
           onClick={async () => {
-            if (!productName.trim() || !quantity) return;
+            if (!productName.trim() || !quantity || !productCategory) return;
             await addItem.mutateAsync({
               productName: productName.trim(),
-              dosageForm: dosageForm.trim() || undefined,
+              productCategory,
               quantity: Number(quantity),
               unit,
               volume: volume ? Number(volume) : undefined,
@@ -1403,7 +1427,7 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
               productType,
             });
             setProductName("");
-            setDosageForm("");
+            setProductCategory("");
             setQuantity("");
             setVolume("");
             setPackSize("");
@@ -1418,5 +1442,81 @@ function AddLineItemForm({ poId, customerId, customerName }: { poId: string; cus
         </button>
       </div>
     </div>
+  );
+}
+
+/** A plan chip on a product: a link for those who can open the BOM / RM BOM screen (R&D), plain status text for the rest. */
+function PlanChip({ to, open, className, children }: { to: string; open: boolean; className: string; children: ReactNode }) {
+  return open ? (
+    <Link to={to} className={`pill shrink-0 ${className}`}>
+      {children}
+    </Link>
+  ) : (
+    <span className={`pill shrink-0 ${className.replace(/hover:\S+/g, "").trim()}`}>{children}</span>
+  );
+}
+
+// Shows how the line is worked out: SKU x pack size = Kg for the RM BOM, or Kg / pack size = packs for the Packaging BOM.
+function ConversionLine({ poId, itemId, quantity, unit, packSize }: { poId: string; itemId: string; quantity: number; unit: string; packSize: string | null }) {
+  // The inputs are in the key, so the line refreshes when the quantity, unit or pack size is corrected.
+  const { data } = usePoItemConversion(poId, itemId, `${quantity}|${unit}|${packSize ?? ""}`);
+  if (!data) return null;
+  const problem = data.packsProblem ?? data.kgProblem;
+  if (data.note && !problem) return <p className="text-[11px] font-semibold text-slate-500">{data.note}</p>;
+  return problem ? <p className="text-[11px] font-semibold text-amber-600">{data.note ? `${data.note}. ` : ""}{problem}</p> : null;
+}
+
+// BD cannot hold or cancel a product itself once the PO is approved (PPIC does): it asks PPIC. Possible until Production has made the
+// product's first batch; one open request at a time.
+function ChangeRequestControl({ item }: { item: PurchaseOrderItem }) {
+  const toast = useToast();
+  const create = useCreateItemChangeRequest();
+  const [asking, setAsking] = useState<ItemChangeKind | null>(null);
+  const open = item.changeRequests?.[0];
+  const batchMade = item.productionStage === "IN_PRODUCTION" || item.productionStage === "FINISHED_GOODS" || item.productionStage === "DISPATCH" || item.productionStage === "COMPLETED";
+  if (item.cancelledAt || batchMade) return null;
+
+  if (open) {
+    return (
+      <span className="pill border-amber-200 bg-amber-50 text-amber-700" title={`Your reason: ${open.reason}`}>
+        {open.kind === "HOLD" ? "Hold" : "Cancel"} requested: waiting for PPIC
+      </span>
+    );
+  }
+  return (
+    <>
+      {!item.materialHeldAt && (
+        <button type="button" className="btn-ghost btn-sm" onClick={() => setAsking("HOLD")} title="Ask PPIC to put this product on hold">
+          Request hold
+        </button>
+      )}
+      <button type="button" className="btn-ghost btn-sm text-rose-600" onClick={() => setAsking("CANCEL")} title="Ask PPIC to cancel this product">
+        Request cancel
+      </button>
+      <ConfirmDialog
+        open={asking !== null}
+        tone={asking === "CANCEL" ? "danger" : "brand"}
+        title={asking === "CANCEL" ? "Ask PPIC to cancel this product?" : "Ask PPIC to put this product on hold?"}
+        message={
+          <>
+            <b>{item.productName}</b> - PPIC gets your request and decides. You are told either way. {asking === "CANCEL" ? "A cancelled product is closed for good." : "Production will not start or go on with it while it is on hold."}
+          </>
+        }
+        requireReason
+        confirmLabel="Send request"
+        cancelLabel="Not now"
+        busy={create.isPending}
+        onConfirm={async (reason) => {
+          try {
+            await create.mutateAsync({ purchaseOrderItemId: item.id, kind: asking!, reason: reason ?? "" });
+            toast.success("Request sent to PPIC.");
+            setAsking(null);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : "Could not send the request");
+          }
+        }}
+        onCancel={() => setAsking(null)}
+      />
+    </>
   );
 }

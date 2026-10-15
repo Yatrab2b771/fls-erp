@@ -9,8 +9,25 @@ const regulatoryBodyField = z.string().max(60).optional();
 const REGULATORY_STATUSES = ["Applied", "Not Applied", "Issued"] as const;
 const PRODUCT_TYPES = ["EXISTING", "NEW"] as const;
 
+// Product Category (Powder / Gummies / Bars / ...) — see ProductCategory in
+// schema.prisma. Trimmed here; the route resolves it against the master
+// list (case-insensitive) so "powder" and "Powder" can't become two values.
+const productCategoryField = z.string().trim().min(1, "Product Category is required").max(60);
+
+// PPIC's Hold/Release on a product's (or a whole PO's) materials — see
+// material-planning.ts for what a hold does to the stock queue.
+// PPIC's Cancel on a product - permanent, so a reason is always required.
+export const cancelItemSchema = z.object({ reason: z.string().trim().min(3, "Give a reason for cancelling").max(500) });
+
+export const setMaterialHoldSchema = z.object({ held: z.boolean() });
+
+export const createProductCategorySchema = z.object({ name: productCategoryField });
+
 export const purchaseOrderItemSchema = z.object({
   productName: z.string().min(1).max(200),
+  // Mandatory on every new line. The manual forms send it; the update
+  // schema below is .partial() so editing an old line without one is fine.
+  productCategory: productCategoryField,
   dosageForm: z.string().max(120).optional(),
   quantity: z.coerce.number().positive(),
   unit: z.string().min(1).max(40), // KG | SKU | other free-text, per the intake form's "Unit" field
@@ -107,6 +124,10 @@ export const importPurchaseOrdersSchema = z.object({
         regulatoryBody: regulatoryBodyField,
         regulatoryStatus: z.enum(REGULATORY_STATUSES).optional(),
         productName: z.string().min(1).max(200),
+        // Required here too — the web import flags blank rows before
+        // sending, and the route rejects a name that isn't in the master
+        // list rather than silently creating one.
+        productCategory: productCategoryField,
         dosageForm: z.string().max(120).optional(),
         quantity: z.coerce.number().positive(),
         unit: z.string().min(1).max(40),
@@ -119,17 +140,10 @@ export const importPurchaseOrdersSchema = z.object({
     .max(2000),
 });
 
-// Generating the PO-level invoice — both fields optional so Accounts can
-// preview/save the computed total first and fill in the paperwork
-// numbers after, same "not everything has to be typed up front" pattern
-// as the Batch stage forms.
-export const generatePoInvoiceSchema = z.object({
-  invoiceNo: z.string().max(120).optional(),
-  invoiceDate: dateField,
-});
-
 export type PurchaseOrderItemInput = z.infer<typeof purchaseOrderItemSchema>;
-export type GeneratePoInvoiceInput = z.infer<typeof generatePoInvoiceSchema>;
+export type CreateProductCategoryInput = z.infer<typeof createProductCategorySchema>;
+export type SetMaterialHoldInput = z.infer<typeof setMaterialHoldSchema>;
+export type CancelItemInput = z.infer<typeof cancelItemSchema>;
 export type ImportPurchaseOrdersInput = z.infer<typeof importPurchaseOrdersSchema>;
 export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>;
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;

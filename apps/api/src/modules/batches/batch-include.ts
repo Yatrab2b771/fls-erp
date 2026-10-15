@@ -18,8 +18,12 @@ export const preProductionInclude = {
     select: {
       id: true,
       productName: true,
+      productCategory: true,
+      productType: true,
       quantity: true,
+      releasedQty: true,
       unit: true,
+      volume: true,
       purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { id: true, companyName: true } } } },
     },
   },
@@ -62,6 +66,7 @@ export type PreProductionWithRelations = PreProduction & {
     id: string;
     productName: string;
     quantity: number;
+    releasedQty: number | null;
     unit: string;
     purchaseOrder: { id: string; poNumber: string | null; customer: { id: string; companyName: string } };
   };
@@ -153,9 +158,12 @@ function buildBulkMfgLineClearanceChecklist(rows: PreProductionWithRelations["ch
 export function serializePreProduction(run: PreProductionWithRelations) {
   const { checklistItems, ...rest } = run;
   const remainingQty = Math.max(0, Math.round((run.plannedQty - run.combinedQty) * 1000) / 1000);
+  // How much of the order PPIC has released to Production (a partial release is less than the full quantity).
+  const releasedQty = Math.min(run.plannedQty, run.purchaseOrderItem.releasedQty ?? run.plannedQty);
   return {
     ...rest,
     remainingQty,
+    releasedQty,
     // Delay against this run's own production plan date — only
     // meaningful before manufacturing has actually started (once a
     // ProductionBatch exists, whether it's "late" is a manufacturing
@@ -214,6 +222,8 @@ export const productionBatchInclude = {
   preProduction: {
     select: {
       id: true,
+      plantId: true,
+      batchFlow: true,
       purchaseOrderItem: {
         select: {
           id: true,
@@ -232,6 +242,8 @@ export type ProductionBatchWithRelations = ProductionBatch & {
   completedBy: { fullName: string; email: string } | null;
   preProduction: {
     id: string;
+    plantId: string | null;
+    batchFlow: boolean;
     purchaseOrderItem: {
       id: string;
       productName: string;

@@ -7,6 +7,7 @@ import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { logger } from "../../common/lib/logger";
 import { createRecipeRequestSchema, giveEtaSchema, type CreateRecipeRequestInput, type GiveEtaInput } from "./recipe-request.schemas";
 import { hasBomSpec } from "../packaging-bom/bom-engine";
+import { autoCalculateBomPlansForSku, autoCalculateRmPlansForRecipe } from "../purchase-orders/auto-calculate";
 import type { RecipeRequestStatus } from "@prisma/client";
 
 export const recipeRequestRouter = Router();
@@ -83,8 +84,8 @@ async function checkGap(purchaseOrderItemId: string): Promise<{ productName: str
   // Same Kg-only gate RM Costing's own auto-match uses — if the PO
   // line's unit isn't Kg, RM Costing was never going to apply here
   // regardless of the catalog, so there's nothing to ask R&D for.
-  const isKgUnit = /^kgs?$/i.test(poItem.unit.trim());
-  const recipeMatch = isKgUnit ? await prisma.recipe.findFirst({ where: { name: { equals: poItem.productName, mode: "insensitive" } } }) : true;
+  const isKgUnit = /^(kgs?|skus?)$/i.test(poItem.unit.trim()); // Kg orders and SKU orders (turned into Kg with the pack size) both use the recipe
+  const recipeMatch = isKgUnit ? await prisma.recipe.findFirst({ where: { customerId: poItem.purchaseOrder.customerId, name: { equals: poItem.productName, mode: "insensitive" } } }) : true;
   const rmNeeded = isKgUnit && !recipeMatch;
 
   return { productName: poItem.productName, customerId: poItem.purchaseOrder.customerId, customerName: poItem.purchaseOrder.customer.companyName, bomNeeded, rmNeeded };
@@ -224,7 +225,10 @@ recipeRequestRouter.patch("/:id/eta", requireRole("RND"), validateBody(giveEtaSc
 // separate manual "mark ready" click. A request needing both sides isn't
 // READY until both have shown up. ---
 
-export async function resolveBomRequests(customerId: string, productName: string): Promise<void> {
+// `actorId` (the R&D user who uploaded it) also switches on the automatic step
+// after resolving: any Draft BOM plan waiting on this SKU is calculated on the
+// spot (auto-calculate.ts) instead of leaving PPIC to press Generate again.
+export async function resolveBomRequests(customerId: string, productName: string, actorId?: string): Promise<void> {
   // A Sku upsert alone doesn't mean R&D actually defined the packaging —
   // same bar checkGap() uses. Re-checked here (not passed in by the
   // caller) so every call site — quick-add, manual edit, bulk Import
@@ -247,11 +251,12 @@ export async function resolveBomRequests(customerId: string, productName: string
       await notifyUser(updated.requestedById, { title: `Recipe/BOM ready: ${updated.productName}`, body: "R&D has uploaded what was missing — Generate again.", link: "/rnd" }).catch(() => {});
     }
   }
+  if (actorId) await autoCalculateBomPlansForSku(customerId, productName, actorId, logger);
 }
 
-export async function resolveRmRequests(recipeName: string): Promise<void> {
+export async function resolveRmRequests(recipeName: string, customerId: string | null, actorId?: string): Promise<void> {
   const requests = await prisma.recipeRequest.findMany({
-    where: { status: { in: ["PENDING", "ETA_GIVEN"] }, rmNeeded: true, rmFulfilledAt: null, productName: { equals: recipeName, mode: "insensitive" } },
+    where: { status: { in: ["PENDING", "ETA_GIVEN"] }, rmNeeded: true, rmFulfilledAt: null, productName: { equals: recipeName, mode: "insensitive" }, ...(customerId ? { purchaseOrderItem: { purchaseOrder: { customerId } } } : { id: "__none__" }) },
   });
   for (const r of requests) {
     const nowReady = !r.bomNeeded || !!r.bomFulfilledAt;
@@ -262,5 +267,6 @@ export async function resolveRmRequests(recipeName: string): Promise<void> {
     if (nowReady) {
       await notifyUser(updated.requestedById, { title: `Recipe/BOM ready: ${updated.productName}`, body: "R&D has uploaded what was missing — Generate again.", link: "/rnd" }).catch(() => {});
     }
-  }
+  }
+  if (actorId && customerId) await autoCalculateRmPlansForRecipe(recipeName, customerId, actorId, logger);
 }

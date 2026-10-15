@@ -27,6 +27,9 @@ const CONSUMPTION_PURPOSES = ["PRODUCTION", "SAMPLE", "WASTE"] as const;
 // more, batchNo now belongs to each individual ProductionBatch run.
 export const createPreProductionSchema = z.object({
   purchaseOrderItemId: z.string().uuid(),
+  // true: start the run in the per-batch flow (no run-level stages: Indent, Batch No, Dispensing and Line Clearance are done per batch).
+  // The screens send it; a caller that does not keeps the older run-level stages.
+  batchFlow: z.boolean().optional(),
   // Which Plant this run's material is dispensed at — optional at
   // creation, but needed before Dispensing can log real RM/PM
   // consumption against it. Settable here or later via PATCH.
@@ -166,6 +169,12 @@ export const createProductionBatchSchema = z.object({
   // rollup the same way the old per-PO-item version of this already did,
   // now scoped to the parent PreProduction instead.
   plannedQty: z.coerce.number().positive(),
+  // A batch is divided (its quantity set) when the run starts. Its production sheet (shift, manpower, start date-time) is filled when
+  // its production starts; they may also be given at creation (older callers do).
+  shift: z.enum(["Day", "Night"]).optional(),
+  manpowerCount: z.coerce.number().int().positive().optional(),
+  shiftStartAt: z.coerce.date().optional(),
+  inputQty: z.coerce.number().positive().optional(),
 });
 
 // Every field this run collects, all optional — a run can be created and
@@ -173,7 +182,13 @@ export const createProductionBatchSchema = z.object({
 // once" shape the old single-Batch pipeline used stage by stage. batchNo
 // is deliberately NOT here any more — Production doesn't set it, QC does
 // (see assignBatchNoSchema below).
-export const productionBatchExecutionSchema = z.object({
+export const productionBatchExecutionSchema = z
+  .object({
+  // The batch's production sheet: shift, manpower and the full start / end date-time.
+  shift: z.enum(["Day", "Night"]).optional(),
+  manpowerCount: z.coerce.number().int().nonnegative().optional(),
+  shiftStartAt: dateField,
+  shiftEndAt: dateField,
   manufacturingStartDate: dateField,
   manufacturingStatus: z.string().max(120).optional(),
   manufacturingEndDate: dateField,
@@ -183,7 +198,8 @@ export const productionBatchExecutionSchema = z.object({
   // directly — see computeWastage in batch.engine.ts.
   inputQty: z.coerce.number().nonnegative().optional(),
   outputQty: z.coerce.number().nonnegative().optional(),
-});
+  })
+  .refine((d) => !d.shiftStartAt || !d.shiftEndAt || d.shiftEndAt.getTime() >= d.shiftStartAt.getTime(), { message: "End time can't be before the start time.", path: ["shiftEndAt"] });
 
 // Marks a run COMPLETED — the one action that actually adds its
 // outputQty to the parent PreProduction's running combinedQty (see
@@ -302,6 +318,8 @@ export const PRODUCTION_BATCH_STAGE_FIELD_SCHEMA: Partial<Record<CombinedLotStag
   FG_QC_RELEASE: productionBatchFgQcReleaseFieldsSchema,
   BILLING_EWAY_BILL: productionBatchBillingEwayBillFieldsSchema,
   DISPATCH_PLAN: productionBatchDispatchPlanFieldsSchema,
+  // Hand-over to Dispatch records nothing but the act itself (see production-batch-transition.ts).
+  FG_HANDOVER: z.object({}),
 };
 
 export const productionBatchTransitionEnvelopeSchema = z.object({

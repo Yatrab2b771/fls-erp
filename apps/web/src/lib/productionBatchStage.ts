@@ -16,7 +16,7 @@ const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const BULK_QC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const PACK_APPROVAL_STATUSES = ["Approved", "Not approved", "Hold"] as const;
 const TRANSPORT_TYPES = ["By Land", "By Courier", "By Air"] as const;
-const PACKAGING_STATUSES = [
+export const PACKAGING_STATUSES = [
   "Not Started",
   "Filling",
   "Labelling",
@@ -77,6 +77,8 @@ export const PRODUCTION_BATCH_STAGE_FIELDS: Partial<Record<CombinedLotStageId, F
     { name: "fgStoreReceivedDate", label: "Received Date", type: "date" },
     { name: "fgStoreRemarks", label: "Remarks", type: "text" },
   ],
+  // The hand-over to Dispatch records nothing but the act itself.
+  FG_HANDOVER: [],
   FG_QC_RELEASE: [
     { name: "fgQaStatus", label: "QA Status", type: "select", options: PACK_APPROVAL_STATUSES },
     { name: "fgQcStatus", label: "QC Status", type: "select", options: PACK_APPROVAL_STATUSES },

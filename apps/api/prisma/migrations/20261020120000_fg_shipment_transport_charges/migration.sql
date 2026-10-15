@@ -1,0 +1,9 @@
+ALTER TABLE "fg_shipments"
+  ADD COLUMN "transportName" TEXT,
+  ADD COLUMN "vehicleNo" TEXT,
+  ADD COLUMN "lrNo" TEXT,
+  ADD COLUMN "weightKg" DOUBLE PRECISION,
+  ADD COLUMN "cartonCount" INTEGER,
+  ADD COLUMN "goodsValue" DOUBLE PRECISION,
+  ADD COLUMN "freightCharge" DOUBLE PRECISION,
+  ADD COLUMN "insuranceCharge" DOUBLE PRECISION;

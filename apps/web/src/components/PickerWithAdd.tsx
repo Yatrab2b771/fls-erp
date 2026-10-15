@@ -27,7 +27,8 @@ export function PickerWithAdd({
   options: { id: string; name: string }[];
   value: string;
   onChange: (id: string) => void;
-  onCreate: (name: string) => Promise<{ id: string } | null>;
+  /** Leave out for a fixed list: the picker then has no "New" button. */
+  onCreate?: (name: string) => Promise<{ id: string } | null>;
   disabled?: boolean;
   icon?: LucideIcon;
   addIcon?: LucideIcon;
@@ -42,7 +43,7 @@ export function PickerWithAdd({
     if (!newName.trim()) return setError("Enter a name.");
     setCreating(true);
     try {
-      const created = await onCreate(newName.trim());
+      const created = await onCreate?.(newName.trim());
       if (created) {
         onChange(created.id);
         setShowNew(false);
@@ -63,7 +64,7 @@ export function PickerWithAdd({
           <div className="min-w-0 flex-1">
             <ItemPicker items={options} value={value} onChange={onChange} placeholder={placeholder} disabled={disabled} icon={icon} />
           </div>
-          {!disabled && (
+          {!disabled && onCreate && (
             <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNew(true)}>
               <AddIcon className="h-3.5 w-3.5" strokeWidth={2.25} /> New
             </button>
@@ -80,7 +81,7 @@ export function PickerWithAdd({
           </button>
         </div>
       )}
-      {error && <p className="mt-1 text-[11px] font-bold text-rose-600">{error}</p>}
+      {error && <p className="mt-1 text-tiny font-bold text-rose-600">{error}</p>}
     </div>
   );
 }

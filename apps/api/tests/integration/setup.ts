@@ -54,6 +54,12 @@ beforeEach(async () => {
     prisma.debitNote.deleteMany(),
     prisma.inventoryTransaction.deleteMany(),
     prisma.inventoryRequest.deleteMany(),
+    // Vendor POs reference InventoryItem and Vendor (RESTRICT); their receipts (inventoryTransaction) are already gone above.
+    prisma.financePayment.deleteMany(),
+    prisma.financeDecision.deleteMany(),
+    prisma.vendorPurchaseOrderItem.deleteMany(),
+    prisma.vendorPurchaseOrder.deleteMany(),
+    prisma.vendor.deleteMany(),
     prisma.preInventoryRequirement.deleteMany(),
     // QcSampleTransaction references QcSampleTransfer (transferId) as well
     // as PreProduction/InventoryItem — must go before QcSampleTransfer and
@@ -88,6 +94,8 @@ beforeEach(async () => {
     prisma.rndSampleRequest.deleteMany(),
     prisma.rndStoreTransaction.deleteMany(),
     prisma.rndTransfer.deleteMany(),
+    // StockTransfer references InventoryItem, DayStore and Plant (RESTRICT) - must go before all three.
+    prisma.stockTransfer.deleteMany(),
     prisma.dayStore.deleteMany(),
     prisma.plant.deleteMany(),
     prisma.inventoryItem.deleteMany(),
@@ -100,6 +108,10 @@ beforeEach(async () => {
     // is gone — see the Sku model's own schema comment), so it has to be
     // cleared before Customer, same RESTRICT-FK reasoning as everything
     // else in this list.
+    prisma.sampleRequest.deleteMany(),
+    prisma.lead.deleteMany(),
+    prisma.businessCard.deleteMany(),
+    prisma.bomVersion.deleteMany(),
     prisma.sku.deleteMany(),
     prisma.customer.deleteMany(),
     prisma.rmPlanItem.deleteMany(),

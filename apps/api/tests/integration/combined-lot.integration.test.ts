@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, BATCH_START } from "./helpers";
 
 const app = createApp();
 
@@ -11,7 +11,7 @@ async function createApprovedPoItem(bdToken: string, quantity = 100, productName
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, items: [{ productName, quantity, unit: "KG" }] });
+    .send({ customerId: customer.body.id, items: [{ productName, productCategory: "Powder", quantity, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }
@@ -37,7 +37,7 @@ async function createFreshCombinedLot(itemId: string, tokens: Awaited<ReturnType
   await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
   await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
 
-  const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ plannedQty })).body;
+  const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, plannedQty })).body;
   await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: plannedQty });
   const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
   return completed.body.combinedLot as { id: string; currentStageId: string };
@@ -143,8 +143,8 @@ describe("PATCH /api/combined-lots/:id/stage — combined-shipment guard at Disp
       .send({
         customerId: customer.body.id,
         items: [
-          { productName: "Medicine A", quantity: 100, unit: "KG" },
-          { productName: "Medicine B", quantity: 50, unit: "KG" },
+          { productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" },
+          { productName: "Medicine B", productCategory: "Powder", quantity: 50, unit: "KG" },
         ],
       });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });

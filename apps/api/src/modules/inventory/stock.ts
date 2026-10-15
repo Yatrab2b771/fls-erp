@@ -2,6 +2,7 @@ import { prisma } from "../../common/lib/prisma";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { getRndStoreOnHand } from "../rnd-store/rnd-stock";
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { allocateReceiptToPurchaseLines } from "./purchase-lines";
 
 // A subset of the Prisma client's query surface, satisfied by both the
 // top-level `prisma` singleton and the `tx` handle inside
@@ -14,8 +15,10 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 type Db = Pick<PrismaClient, "inventoryTransaction" | "batchMaterialConsumption" | "stockTransfer">;
 
 // The one place stock-on-hand math lives — sum(RECEIVED, accepted) −
-// sum(ISSUED_DAY_STORE) − sum(ISSUED_PRODUCTION) − sum(ISSUED_RND), per
-// item. Used by GET /inventory/stock (the full ledger view) and by
+// sum(ISSUED_DAY_STORE) − sum(ISSUED_RND), per item. The Warehouse never
+// issues to Production or a Plant: that only ever happens out of a Day
+// Store (an ISSUED_PRODUCTION row always carries the dayStoreId it left),
+// so it leaves that Day Store's balance and never the Warehouse's. Used by GET /inventory/stock (the full ledger view) and by
 // Pre-Inventory's live shortfall computation (Part 2 — no more manual
 // "Confirm Availability" step; PPIC's requirement is compared against
 // this same number, live, every time it's read). ISSUED_RND (a sample
@@ -31,7 +34,7 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
   // the instant an Admin restores it.
   const itemFilter: Prisma.InventoryTransactionWhereInput = { deletedAt: null, ...(itemIds ? { itemId: { in: itemIds } } : {}) };
 
-  const [receivedTotals, issuedDayStoreTotals, issuedProductionTotals, issuedRndTotals] = await Promise.all([
+  const [receivedTotals, issuedDayStoreTotals, issuedRndTotals] = await Promise.all([
     // Only ACCEPTED counts — a delivery still sitting in QC, or one QC
     // rejected, hasn't actually become usable stock yet. Opening Stock
     // rows are ACCEPTED at creation (see schema.prisma), so they're
@@ -50,19 +53,17 @@ export async function getOnHandByItemId(itemIds?: string[], db: Db = prisma): Pr
       _sum: { quantity: true, rejectedQty: true },
     }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_DAY_STORE" }, _sum: { quantity: true } }),
-    db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_PRODUCTION" }, _sum: { quantity: true } }),
     db.inventoryTransaction.groupBy({ by: ["itemId"], where: { ...itemFilter, type: "ISSUED_RND" }, _sum: { quantity: true } }),
   ]);
 
   const received = new Map(receivedTotals.map((r) => [r.itemId, (r._sum.quantity ?? 0) - (r._sum.rejectedQty ?? 0)]));
   const issuedDayStore = new Map(issuedDayStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
-  const issuedProduction = new Map(issuedProductionTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
   const issuedRnd = new Map(issuedRndTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
 
-  const allItemIds = new Set([...received.keys(), ...issuedDayStore.keys(), ...issuedProduction.keys(), ...issuedRnd.keys(), ...(itemIds ?? [])]);
+  const allItemIds = new Set([...received.keys(), ...issuedDayStore.keys(), ...issuedRnd.keys(), ...(itemIds ?? [])]);
   const onHand = new Map<string, number>();
   for (const id of allItemIds) {
-    onHand.set(id, (received.get(id) ?? 0) - (issuedDayStore.get(id) ?? 0) - (issuedProduction.get(id) ?? 0) - (issuedRnd.get(id) ?? 0));
+    onHand.set(id, (received.get(id) ?? 0) - (issuedDayStore.get(id) ?? 0) - (issuedRnd.get(id) ?? 0));
   }
   return onHand;
 }
@@ -252,6 +253,13 @@ export async function notifyIfNewlyAvailable(params: { itemId: string; addedQty:
   const { itemId, addedQty, actorId, onFail } = params;
   if (addedQty <= 0) return;
 
+  // The delivery is real stock now: take it off the PI lines still "on order" for this item
+  // (earliest ETA first), so it is not counted both as stock and as incoming.
+  await allocateReceiptToPurchaseLines(itemId, addedQty).catch(onFail(`pre_inventory.purchase_lines.receipt.${itemId}`));
+
+  // A Day Store waiting on this material for a plan is told it is in the Warehouse now, so it can ask for it.
+  await notifyDayStoresWaitingFor(itemId, addedQty).catch(onFail(`day_store.material_arrived.${itemId}`));
+
   const onHand = await getOnHandByItemId([itemId]);
   const currentStock = onHand.get(itemId) ?? 0;
   const stockBefore = currentStock - addedQty;
@@ -277,4 +285,33 @@ export async function notifyIfNewlyAvailable(params: { itemId: string; addedQty:
       actorId,
     ).catch(onFail("pre_inventory.stock_available.production")),
   ]);
+}
+
+/** Day Stores with an open production request for this item hear that new stock reached the Warehouse. */
+async function notifyDayStoresWaitingFor(itemId: string, addedQty: number): Promise<void> {
+  const open = await prisma.inventoryRequest.findMany({
+    where: { itemId, purpose: "ISSUED_PRODUCTION", deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] }, plant: { dayStoreId: { not: null } } },
+    select: { purchaseOrderItemId: true, plant: { select: { name: true, dayStoreId: true } }, item: { select: { name: true, unit: true } } },
+  });
+  if (open.length === 0) return;
+  const poItems = await prisma.purchaseOrderItem.findMany({ where: { id: { in: open.map((r) => r.purchaseOrderItemId).filter((id): id is string => !!id) } }, select: { id: true, productName: true } });
+  const productOf = new Map(poItems.map((p) => [p.id, p.productName]));
+  const byStore = new Map<string, { itemName: string; unit: string; products: Set<string> }>();
+  for (const r of open) {
+    const storeId = r.plant?.dayStoreId;
+    if (!storeId) continue;
+    const cur = byStore.get(storeId) ?? { itemName: r.item.name, unit: r.item.unit ?? "", products: new Set<string>() };
+    const product = r.purchaseOrderItemId ? productOf.get(r.purchaseOrderItemId) : undefined;
+    if (product) cur.products.add(product);
+    byStore.set(storeId, cur);
+  }
+  for (const [storeId, info] of byStore) {
+    const content = {
+      title: `${info.itemName} arrived in the Warehouse`,
+      body: `${Math.round(addedQty * 1000) / 1000}${info.unit ? ` ${info.unit}` : ""} received${info.products.size ? ` - needed for ${[...info.products].join(", ")}` : ""}. Ask the Warehouse for it.`,
+      link: "/my-store/production-requests",
+    };
+    const users = await prisma.dayStoreAssignment.findMany({ where: { dayStoreId: storeId, user: { isActive: true } }, select: { userId: true } });
+    if (users.length > 0) await Promise.all(users.map((u) => notifyUser(u.userId, content)));
+  }
 }

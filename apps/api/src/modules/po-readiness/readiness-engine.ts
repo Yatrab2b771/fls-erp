@@ -37,7 +37,9 @@ export interface PoReadinessRow {
 // just reintroduced at the query level instead of the math level.
 export async function computeReadiness(filterPoIds?: string[]): Promise<PoReadinessRow[]> {
   const requirements = await prisma.poMaterialRequirement.findMany({
-    where: { deletedAt: null },
+    // Approved POs only — a Draft/Rejected PO is BD's own working state and
+    // never reaches PPIC's readiness view or the stock allocation queue.
+    where: { deletedAt: null, purchaseOrder: { status: "APPROVED" } },
     include: { item: true, purchaseOrder: { include: poSummaryInclude } },
     orderBy: { createdAt: "asc" },
   });

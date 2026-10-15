@@ -5,3 +5,6 @@
 export function formatEmployeeId(employeeId: number): string {
   return `FLS-${String(employeeId).padStart(4, "0")}`;
 }
+
+/** A quantity for display: at most 3 decimals, no float noise (0.5689999999999998 -> 0.569). */
+export const fmtQty = (n: number): string => String(Math.round(n * 1000) / 1000);

@@ -3,7 +3,7 @@ import multer, { MulterError } from "multer";
 import type { NextFunction, Request, Response } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
-import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
+import { parsePagination, parseSearch, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import { detectFileType, resolveStoragePath, saveUploadedFile } from "../../common/lib/storage";
@@ -12,25 +12,39 @@ import { buildPurchaseOrderPdf } from "./po-pdf";
 import { getPoFullReport } from "./po-full-report";
 import { buildPoFullReportPdf } from "./po-full-report-pdf";
 import { getPendingPoMaterials } from "./pending-materials";
-import { poInclude, computeCompletion, type PoWithBatches } from "./po-completion";
+import { getMaterialPlanning } from "./material-planning";
+import { autoCalculateAfterRelease } from "./auto-calculate";
+import { loadOrderConversion } from "./order-conversion";
+import { syncShortToPurchaseSafe } from "./purchase-sync";
+import { notifyProductionOfProductHold } from "./hold-notify";
+import { raiseRequestsForPlannedItemSafe, notifyPlantDayStore } from "../inventory/plan-requests";
+import { getPoStats } from "./po-stats";
+import { getPoItemPlanAvailability } from "../planning/add-on-plan";
+import { canSeeUnapprovedPos, poVisibilityWhere } from "./po-visibility";
+import { poInclude, computeCompletion, computeItemDispatch, type PoWithBatches } from "./po-completion";
+import { productionStageOf } from "../ppic/production-stage";
 import {
   createPurchaseOrderSchema,
-  generatePoInvoiceSchema,
+  createProductCategorySchema,
   importPurchaseOrdersSchema,
   reviewPurchaseOrderSchema,
   updatePurchaseOrderItemSchema,
   assignPlannedPlantSchema,
   regulatoryReviewSchema,
+  setMaterialHoldSchema,
+  cancelItemSchema,
   setRegulatoryBodySchema,
   updatePurchaseOrderSchema,
   type CreatePurchaseOrderInput,
-  type GeneratePoInvoiceInput,
+  type CreateProductCategoryInput,
   type ImportPurchaseOrdersInput,
   type ReviewPurchaseOrderInput,
   type UpdatePurchaseOrderInput,
   type UpdatePurchaseOrderItemInput,
   type AssignPlannedPlantInput,
   type RegulatoryReviewInput,
+  type SetMaterialHoldInput,
+  type CancelItemInput,
   type SetRegulatoryBodyInput,
 } from "./purchase-orders.schemas";
 import type { Prisma } from "@prisma/client";
@@ -69,16 +83,128 @@ function serializePo(po: PoWithBatches) {
   // preProduction was only fetched to compute completion — strip it back
   // out of each item before responding, same "don't leak the query's
   // working data into the API shape" reasoning as everywhere else.
-  return { ...po, items: po.items.map(({ preProduction: _preProduction, ...item }) => item), completion: computeCompletion(po) };
+  // Each product also says how much of its own order has been dispatched, so a product shows as complete on its own (BD's Completed Products).
+  const items = po.items.map((full) => {
+    const { preProduction: _preProduction, ...item } = full;
+    const d = computeItemDispatch(full);
+    const completionDate = d.dispatchDates.length ? new Date(Math.max(...d.dispatchDates.map((x) => x.getTime()))).toISOString() : null;
+    // Where the product is once it has been sent to Production (null before that): the same rule the data check and every list use.
+    const productionStage = productionStageOf({
+      planSentToProductionAt: full.planSentToProductionAt,
+      quantity: full.quantity,
+      batches: (full.preProduction?.productionBatches ?? []).map((b) => ({ currentStageId: b.currentStageId, prepStageId: b.prepStageId, handedOverToDispatchAt: b.handedOverToDispatchAt, customerShippedQty: b.fgShipments.reduce((a, s) => a + s.quantity, 0) })),
+    });
+    return { ...item, productionStage, dispatch: { dispatchedQty: d.dispatchedQty, isCompleted: d.isDone, completionDate: d.isDone ? completionDate : null } };
+  });
+  return { ...po, items, completion: computeCompletion(po) };
 }
 
-// Read is open to any authenticated user; only BD/Admin write.
-purchaseOrdersRouter.get("/", async (req, res, next) => {
+// Matches each requested Product Category name against the master list
+// (case-insensitive) and returns the canonical spelling, so "powder" and
+// "Powder" can't become two different values on PO lines. Anything not in
+// the master list comes back in `unknown` — the caller 400s rather than
+// silently creating a category (that's what POST /product-categories is for).
+async function resolveProductCategories(names: string[]) {
+  const master = await prisma.productCategory.findMany({ select: { name: true } });
+  const byLower = new Map(master.map((c) => [c.name.toLowerCase(), c.name]));
+  const canonical = new Map<string, string>();
+  const unknown: string[] = [];
+  for (const name of new Set(names.map((n) => n.trim()))) {
+    const hit = byLower.get(name.toLowerCase());
+    if (hit) canonical.set(name.toLowerCase(), hit);
+    else unknown.push(name);
+  }
+  return { canonical: (name: string) => canonical.get(name.trim().toLowerCase())!, unknown };
+}
+
+// Dropdown source for the PO forms' Product Category field — open to any
+// authenticated user, same as the PO reads below.
+purchaseOrdersRouter.get("/product-categories", async (_req, res, next) => {
+  try {
+    res.json(await prisma.productCategory.findMany({ orderBy: { createdAt: "asc" }, select: { id: true, name: true } }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// "+ Add new product category" from the PO form. Idempotent on a
+// case-insensitive name match: adding "powder" when "Powder" exists returns
+// the existing row (200) instead of a duplicate or an error, since the
+// caller's real intent — "make this one selectable" — is already satisfied.
+purchaseOrdersRouter.post("/product-categories", requireRole("BD"), validateBody(createProductCategorySchema), async (req: AuthedRequest, res, next) => {
+  try {
+    const { name } = req.body as CreateProductCategoryInput;
+    const existing = await prisma.productCategory.findFirst({ where: { name: { equals: name, mode: "insensitive" } }, select: { id: true, name: true } });
+    if (existing) return res.json(existing);
+
+    const created = await prisma.productCategory.create({ data: { name, createdById: req.user!.id }, select: { id: true, name: true } });
+    await recordAudit({ actorId: req.user!.id, action: "product_category.created", entityType: "ProductCategory", entityId: created.id, metadata: { name } });
+    res.status(201).json(created);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Only BD/Admin can see a PO that hasn't been approved (Draft) or was
+// rejected — every other department only ever sees Approved POs. This
+// runs for every route below with an `:id`, so a direct link, the PDF, the
+// full report, billing, planning actions... all 404 for a non-BD/Admin
+// user on an unapproved PO, exactly as if it didn't exist. (Unknown ids
+// fall through to each route's own 404.)
+purchaseOrdersRouter.param("id", async (req, res, next, id) => {
+  try {
+    if (canSeeUnapprovedPos((req as AuthedRequest).user?.roles)) return next();
+    const po = await prisma.purchaseOrder.findUnique({ where: { id }, select: { status: true } });
+    if (po && po.status !== "APPROVED") return res.status(404).json({ error: "Purchase order not found" });
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Order Tracking's tiles over every PO the caller may see (see po-stats.ts).
+purchaseOrdersRouter.get("/summary", async (req: AuthedRequest, res, next) => {
+  try {
+    res.json(await getPoStats(poVisibilityWhere(req.user?.roles)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Read is open to any authenticated user, but non-BD/Admin only get
+// Approved POs (see poVisibilityWhere); only BD/Admin write.
+// ?search= matches PO number, customer, or any live product's name / category
+// on the server; paginated with ?page=&pageSize= (X-Total-Count = matches).
+purchaseOrdersRouter.get("/", async (req: AuthedRequest, res, next) => {
   try {
     const pagination = parsePagination(req);
+    const search = parseSearch(req);
+    const visible: Prisma.PurchaseOrderWhereInput = {
+      AND: [
+        poVisibilityWhere(req.user?.roles),
+        ...(search
+          ? [
+              {
+                OR: [
+                  { poNumber: { contains: search, mode: "insensitive" as const } },
+                  { customer: { companyName: { contains: search, mode: "insensitive" as const } } },
+                  {
+                    items: {
+                      some: {
+                        deletedAt: null,
+                        OR: [{ productName: { contains: search, mode: "insensitive" as const } }, { productCategory: { contains: search, mode: "insensitive" as const } }],
+                      },
+                    },
+                  },
+                ],
+              },
+            ]
+          : []),
+      ],
+    };
     const [total, orders] = await Promise.all([
-      prisma.purchaseOrder.count(),
-      prisma.purchaseOrder.findMany({ include: poInclude, orderBy: { createdAt: "desc" }, skip: pagination.skip, take: pagination.take }),
+      prisma.purchaseOrder.count({ where: visible }),
+      prisma.purchaseOrder.findMany({ where: visible, include: poInclude, orderBy: { createdAt: "desc" }, skip: pagination.skip, take: pagination.take }),
     ]);
     setPaginationHeaders(res, total, pagination);
     res.json(orders.map(serializePo));
@@ -168,28 +294,38 @@ purchaseOrdersRouter.get("/reports/pending-materials", requireRole("PPIC"), asyn
   }
 });
 
-purchaseOrdersRouter.get("/reports/bd-ppic", requireRole("BD", "PPIC"), async (_req, res, next) => {
+// Material Planning — every planned product's raw/packaging materials with
+// how much live stock covers vs. how much is short, allocated FIFO across
+// products (see material-planning.ts).
+purchaseOrdersRouter.get("/reports/material-planning", requireRole("PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const planning = await getMaterialPlanning();
+    // Opening the list also brings the shortfall requirements already sent to
+    // Purchase back in line with it (see purchase-sync.ts).
+    await syncShortToPurchaseSafe(req.user?.id ?? null, req.log, planning);
+    res.json(planning);
+  } catch (err) {
+    next(err);
+  }
+});
+
+purchaseOrdersRouter.get("/reports/bd-ppic", requireRole("BD", "PPIC"), async (req: AuthedRequest, res, next) => {
   try {
     const orders = await prisma.purchaseOrder.findMany({
-      where: { status: { not: "REJECTED" } },
+      // BD/Admin still see their own Drafts here; PPIC only Approved.
+      where: canSeeUnapprovedPos(req.user?.roles) ? { status: { not: "REJECTED" } } : { status: "APPROVED" },
       select: {
         poNumber: true,
         orderDate: true,
         createdAt: true,
         customer: { select: { companyName: true } },
         items: {
-          where: { deletedAt: null },
+          where: { deletedAt: null, cancelledAt: null },
           select: {
             productName: true,
             quantity: true,
             unit: true,
             preProduction: { select: { combinedLot: { select: { dispatchedQty: true, dispatchDate: true } } } },
-            rmPlans: {
-              where: { status: "CALCULATED" },
-              orderBy: { calculatedAt: "desc" },
-              take: 1,
-              select: { resultSnapshot: true },
-            },
           },
           orderBy: { createdAt: "asc" },
         },
@@ -207,14 +343,6 @@ purchaseOrdersRouter.get("/reports/bd-ppic", requireRole("BD", "PPIC"), async (_
         const dispatchedQtyKg = round(lot?.dispatchedQty ?? 0);
         const dispatchDate = lot?.dispatchDate ?? null;
 
-        const snapshot = item.rmPlans[0]?.resultSnapshot as { batches?: { packSizeG?: number; pricePerPouch?: number }[] } | null | undefined;
-        const batchResult = snapshot?.batches?.[0];
-        let value: number | null = null;
-        if (batchResult?.packSizeG && batchResult?.pricePerPouch) {
-          const estimatedPouches = round((dispatchedQtyKg * 1000) / batchResult.packSizeG);
-          value = round(estimatedPouches * batchResult.pricePerPouch);
-        }
-
         const startDate = po.orderDate ?? po.createdAt;
         const ageingEnd = dispatchDate ?? new Date(now);
         const ageingDays = Math.max(0, Math.round((ageingEnd.getTime() - startDate.getTime()) / dayMs));
@@ -228,7 +356,6 @@ purchaseOrdersRouter.get("/reports/bd-ppic", requireRole("BD", "PPIC"), async (_
           unit: item.unit,
           dispatchedQty: dispatchedQtyKg,
           dispatchDate,
-          value,
           ageingDays,
         };
       }),
@@ -247,6 +374,9 @@ purchaseOrdersRouter.post("/", requireRole("BD"), validateBody(createPurchaseOrd
     const customer = await prisma.customer.findUnique({ where: { id: customerId } });
     if (!customer) return res.status(400).json({ error: "Unknown customer" });
 
+    const cats = await resolveProductCategories(items.map((i) => i.productCategory));
+    if (cats.unknown.length) return res.status(400).json({ error: `Unknown Product Category: ${cats.unknown.join(", ")}` });
+
     // Explicit, strictly-increasing createdAt per item — a nested create
     // all runs inside one transaction, and Postgres's now() returns the
     // *transaction's* start time for every row in it, not a fresh
@@ -264,7 +394,7 @@ purchaseOrdersRouter.post("/", requireRole("BD"), validateBody(createPurchaseOrd
         customerId,
         ...rest,
         createdById: req.user!.id,
-        items: { create: items.map((item, idx) => ({ ...item, createdAt: new Date(baseCreatedAt + idx) })) },
+        items: { create: items.map((item, idx) => ({ ...item, productCategory: cats.canonical(item.productCategory), createdAt: new Date(baseCreatedAt + idx) })) },
       },
       include: poInclude,
     });
@@ -289,6 +419,9 @@ purchaseOrdersRouter.post("/", requireRole("BD"), validateBody(createPurchaseOrd
 purchaseOrdersRouter.post("/import", requireRole("BD"), validateBody(importPurchaseOrdersSchema), async (req: AuthedRequest, res, next) => {
   try {
     const { rows } = req.body as ImportPurchaseOrdersInput;
+
+    const cats = await resolveProductCategories(rows.map((r) => r.productCategory));
+    if (cats.unknown.length) return res.status(400).json({ error: `Unknown Product Category in import: ${cats.unknown.join(", ")}. Add it first from the PO form, or fix the sheet.` });
 
     const groups = new Map<string, typeof rows>();
     for (const row of rows) {
@@ -339,6 +472,7 @@ purchaseOrdersRouter.post("/import", requireRole("BD"), validateBody(importPurch
           items: {
             create: groupRows.map((r, idx) => ({
               productName: r.productName,
+              productCategory: cats.canonical(r.productCategory),
               dosageForm: r.dosageForm,
               quantity: r.quantity,
               unit: r.unit,
@@ -572,149 +706,6 @@ purchaseOrdersRouter.get("/:id/reconciliation", async (req: AuthedRequest<{ id: 
   }
 });
 
-// --- PO-level consolidated Billing — separate from each Batch's own
-// Billing & E-Way Bill stage (that one's per-shipment paperwork:
-// invoiceNo/ewayBillNo). This is the whole-PO commercial amount, per the
-// client: one PO can carry several products/batches and Accounts wants
-// one number for the lot.
-//
-// Per item: Price per Pouch (from that item's own, latest CALCULATED RM
-// Costing plan) x estimated pouches shipped. "Estimated pouches" isn't
-// dispatchedQty itself — dispatchedQty is recorded in the same unit as
-// the PO item (Kg, since RM Costing only ever runs for Kg-unit items —
-// see rm-plan.routes.ts's own isKgUnit gate), so it's converted via the
-// same plan's packSizeG (grams per pouch): dispatchedKg * 1000 /
-// packSizeG. An item with no CALCULATED RM Costing plan (a BOM-only or
-// pouch-unit product) simply can't be priced this way yet — its line
-// carries amount: null and priced: false, and is left out of the total
-// rather than guessed at. ---
-
-async function computePoBilling(purchaseOrderId: string) {
-  const po = await prisma.purchaseOrder.findUnique({
-    where: { id: purchaseOrderId },
-    select: {
-      id: true,
-      poNumber: true,
-      items: {
-        where: { deletedAt: null },
-        select: {
-          id: true,
-          productName: true,
-          unit: true,
-          preProduction: { select: { combinedLot: { select: { dispatchedQty: true } } } },
-          rmPlans: {
-            where: { status: "CALCULATED" },
-            orderBy: { calculatedAt: "desc" },
-            take: 1,
-            select: { resultSnapshot: true },
-          },
-        },
-        orderBy: { createdAt: "asc" },
-      },
-    },
-  });
-  if (!po) return null;
-
-  const round = (n: number) => Math.round(n * 100) / 100;
-
-  const lines = po.items.map((item) => {
-    const dispatchedQtyKg = round(item.preProduction?.combinedLot?.dispatchedQty ?? 0);
-    const snapshot = item.rmPlans[0]?.resultSnapshot as { batches?: { packSizeG?: number; pricePerPouch?: number }[] } | null | undefined;
-    const batchResult = snapshot?.batches?.[0];
-
-    if (!batchResult?.packSizeG || !batchResult?.pricePerPouch) {
-      return {
-        purchaseOrderItemId: item.id,
-        productName: item.productName,
-        unit: item.unit,
-        dispatchedQtyKg,
-        packSizeG: null,
-        pricePerPouch: null,
-        estimatedPouches: null,
-        amount: null,
-        priced: false,
-      };
-    }
-
-    const estimatedPouches = round((dispatchedQtyKg * 1000) / batchResult.packSizeG);
-    const amount = round(estimatedPouches * batchResult.pricePerPouch);
-
-    return {
-      purchaseOrderItemId: item.id,
-      productName: item.productName,
-      unit: item.unit,
-      dispatchedQtyKg,
-      packSizeG: batchResult.packSizeG,
-      pricePerPouch: batchResult.pricePerPouch,
-      estimatedPouches,
-      amount,
-      priced: true,
-    };
-  });
-
-  const totalAmount = round(lines.reduce((sum, l) => sum + (l.amount ?? 0), 0));
-  return { poId: po.id, poNumber: po.poNumber, lines, totalAmount };
-}
-
-// Live preview — recomputes off current data every call, doesn't touch
-// the saved invoice (if one already exists it's returned alongside, so
-// the UI can show "this is what's saved" vs "this is what it'd be now").
-// Pricing data, same visibility rule as item-pricing.ts.
-purchaseOrdersRouter.get("/:id/billing", requireRole("PURCHASE", "ACCOUNTS"), async (req: AuthedRequest<{ id: string }>, res, next) => {
-  try {
-    const preview = await computePoBilling(req.params.id);
-    if (!preview) return res.status(404).json({ error: "Purchase order not found" });
-    const saved = await prisma.purchaseOrderInvoice.findUnique({ where: { purchaseOrderId: req.params.id }, include: { generatedBy: { select: { fullName: true, email: true } } } });
-    res.json({ ...preview, invoice: saved });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Generate/regenerate the saved invoice — Accounts-only (Purchase can see
-// the preview above, only Accounts commits it). A repeat call overwrites
-// the previous snapshot with a fresh computation, same "recalculating
-// re-opens it" reasoning as BomPlan/RmPlan's own Calculate.
-purchaseOrdersRouter.post("/:id/billing", requireRole("ACCOUNTS"), validateBody(generatePoInvoiceSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
-  try {
-    const computed = await computePoBilling(req.params.id);
-    if (!computed) return res.status(404).json({ error: "Purchase order not found" });
-
-    const { invoiceNo, invoiceDate } = req.body as GeneratePoInvoiceInput;
-    const invoice = await prisma.purchaseOrderInvoice.upsert({
-      where: { purchaseOrderId: req.params.id },
-      create: {
-        purchaseOrderId: req.params.id,
-        invoiceNo,
-        invoiceDate,
-        totalAmount: computed.totalAmount,
-        lineItems: computed.lines as unknown as Prisma.InputJsonValue,
-        generatedById: req.user!.id,
-      },
-      update: {
-        invoiceNo,
-        invoiceDate,
-        totalAmount: computed.totalAmount,
-        lineItems: computed.lines as unknown as Prisma.InputJsonValue,
-        generatedById: req.user!.id,
-      },
-      include: { generatedBy: { select: { fullName: true, email: true } } },
-    });
-
-    await recordAudit({
-      actorId: req.user!.id,
-      action: "purchase_order.invoice_generated",
-      entityType: "PurchaseOrder",
-      entityId: req.params.id,
-      metadata: { totalAmount: computed.totalAmount, lineCount: computed.lines.length },
-    });
-
-    res.status(201).json({ ...computed, invoice });
-  } catch (err) {
-    next(err);
-  }
-});
-
 purchaseOrdersRouter.patch("/:id", requireRole("BD"), validateBody(updatePurchaseOrderSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
@@ -789,15 +780,9 @@ purchaseOrdersRouter.patch("/:id/review", requireRole("BD"), validateBody(review
         notifyRoles(["PPIC"], { title: `${poLabel} approved`, body: `${updated.customer.companyName} — ready to plan batches.`, link: `/purchase-orders/${updated.id}` }, req.user!.id).catch(
           notifyFailed("po.approved.ppic"),
         ),
-        // Regulatory otherwise has no way to know a product line needs
-        // their sign-off — no other event in the system tells them.
-        // Same "the moment it becomes relevant" timing as PPIC's own
-        // notice above.
-        notifyRoles(
-          ["REGULATORY"],
-          { title: `${poLabel} approved`, body: `${updated.customer.companyName} — needs regulatory review.`, link: `/purchase-orders/${updated.id}` },
-          req.user!.id,
-        ).catch(notifyFailed("po.approved.regulatory")),
+        // Regulatory is deliberately NOT notified here any more — there's
+        // nothing for it to review until PPIC's plan for a product is
+        // calculated. It gets its notice then (regulatory-handoff.ts).
       ]);
     } else {
       await notifyUser(updated.createdById, { title: `${poLabel} rejected`, body: rejectionReason, link: `/purchase-orders/${updated.id}` }).catch(notifyFailed("po.rejected.creator"));
@@ -809,6 +794,197 @@ purchaseOrdersRouter.patch("/:id/review", requireRole("BD"), validateBody(review
   }
 });
 
+// PPIC's Hold / Release on a product. Held and not fully planned: its plan
+// can't be generated. Held and fully planned: it can't be sent to Production
+// and stops claiming stock in Material Planning's FIFO queue (Regulatory's
+// review is not held). Allowed until Production has started making it (a batch that is READY): after the plan is sent to Production Hold
+// stops Production opening or moving the run and making batches. Batches still in preparation are held one by one by Production
+// (it is told), see batch-prep.routes.ts.
+purchaseOrdersRouter.patch(
+  "/:id/items/:itemId/material-hold",
+  requireRole("PPIC"),
+  validateBody(setMaterialHoldSchema),
+  async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+    try {
+      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { preProduction: { select: { id: true, _count: { select: { productionBatches: { where: { prepStageId: "READY" } } } } } } } });
+      if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+      if (item.cancelledAt) return res.status(409).json({ error: "This product is cancelled." });
+      const { held } = req.body as SetMaterialHoldInput;
+      if (held && item.preProduction && item.preProduction._count.productionBatches > 0) {
+        return res.status(409).json({ error: "Production has already started making a batch of this product, so it can't be held any more." });
+      }
+
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id: item.id },
+        data: held ? { materialHeldAt: new Date(), materialHeldById: req.user!.id } : { materialHeldAt: null, materialHeldById: null },
+      });
+      await recordAudit({ actorId: req.user!.id, action: held ? "purchase_order.item_material_held" : "purchase_order.item_material_released", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: item.id } });
+      // Released: pick up any R&D catalog update that landed while it was held.
+      if (!held) {
+        const owner = await prisma.purchaseOrder.findUnique({ where: { id: item.purchaseOrderId }, select: { customerId: true } });
+        if (owner) await autoCalculateAfterRelease(owner.customerId, item.productName, req.user!.id, req.log).catch((err) => req.log?.error({ err }, "auto-calculate after release failed"));
+      }
+      await syncShortToPurchaseSafe(req.user!.id, req.log);
+      if (!!item.materialHeldAt !== held) await notifyProductionOfProductHold([item.id], held, req.user!.id);
+      res.json({ id: updated.id, materialHeldAt: updated.materialHeldAt });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// Same, for every product on the PO at once. Products already sent to
+// Production with a batch already made are skipped, not errored.
+purchaseOrdersRouter.patch("/:id/material-hold", requireRole("PPIC"), validateBody(setMaterialHoldSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!order) return res.status(404).json({ error: "Purchase order not found" });
+
+    const { held } = req.body as SetMaterialHoldInput;
+    const targetWhere = { purchaseOrderId: order.id, deletedAt: null, cancelledAt: null, OR: [{ preProduction: null }, { preProduction: { productionBatches: { none: { prepStageId: "READY" as const } } } }] };
+    // Only the products whose hold really changes: Production is told about those
+    const changing = await prisma.purchaseOrderItem.findMany({ where: { ...targetWhere, materialHeldAt: held ? null : { not: null } }, select: { id: true } });
+    const result = await prisma.purchaseOrderItem.updateMany({
+      where: targetWhere,
+      data: held ? { materialHeldAt: new Date(), materialHeldById: req.user!.id } : { materialHeldAt: null, materialHeldById: null },
+    });
+    await notifyProductionOfProductHold(changing.map((i) => i.id), held, req.user!.id);
+    await recordAudit({ actorId: req.user!.id, action: held ? "purchase_order.material_held" : "purchase_order.material_released", entityType: "PurchaseOrder", entityId: order.id, metadata: { itemCount: result.count } });
+    // Released: pick up any R&D catalog update that landed while they were held.
+    if (!held) {
+      const owner = await prisma.purchaseOrder.findUnique({ where: { id: order.id }, select: { customerId: true, items: { where: { deletedAt: null, cancelledAt: null }, select: { productName: true } } } });
+      for (const it of owner?.items ?? []) {
+        await autoCalculateAfterRelease(owner!.customerId, it.productName, req.user!.id, req.log).catch((err) => req.log?.error({ err }, "auto-calculate after release failed"));
+      }
+    }
+    await syncShortToPurchaseSafe(req.user!.id, req.log);
+    res.json({ updated: result.count });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// "Send short material to Purchase" (Material Planning's Action menu): turns
+// the SHORT materials of one product into Pre-Inventory requirements - the
+// existing place Purchase works from - already marked as notified, and tells
+// Purchase once. requiredQty is stored as live stock + the shortfall, because
+// Pre-Inventory judges a shortfall against live stock alone (it doesn't know
+// stock is reserved for other products): that way Purchase sees exactly the
+// quantity that is really missing. Sending twice doesn't duplicate - a material
+// already sent for this product is skipped.
+purchaseOrdersRouter.post("/:id/items/:itemId/send-short-to-purchase", requireRole("PPIC"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+  try {
+    const item = await prisma.purchaseOrderItem.findUnique({
+      where: { id: req.params.itemId },
+      include: { purchaseOrder: { select: { id: true, poNumber: true } } },
+    });
+    if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+    if (item.cancelledAt) return res.status(409).json({ error: "This product is cancelled." });
+    if (item.materialHeldAt) return res.status(409).json({ error: "This product is on hold - release it first." });
+
+    const planning = await getMaterialPlanning();
+    const shorts = planning.rows.filter((r) => r.purchaseOrderItemId === item.id && r.status === "SHORT");
+    if (shorts.length === 0) return res.status(400).json({ error: "Nothing is short for this product right now." });
+
+    const poLabel = item.purchaseOrder.poNumber ?? `PO ${item.purchaseOrder.id.slice(0, 8)}`;
+    const note = `Material Planning - ${poLabel} / ${item.productName}`;
+    let sent = 0;
+    let updated = 0;
+    let skipped = 0;
+    for (const s of shorts) {
+      const inv = await prisma.inventoryItem.findUnique({ where: { category_name: { category: s.type, name: s.material } } });
+      if (!inv) {
+        skipped += 1;
+        continue;
+      }
+      const requiredQty = Math.round(((s.onHand ?? 0) + (s.shortQty ?? 0)) * 100) / 100;
+      const already = await prisma.preInventoryRequirement.findFirst({ where: { itemId: inv.id, sourcePoItemId: item.id, deletedAt: null } });
+      if (already) {
+        // Already sent. While Purchase hasn't logged a PO, a second click just brings the quantity up to date.
+        if (!already.purchaseAt && Math.abs(already.requiredQty - requiredQty) > 0.005) {
+          await prisma.preInventoryRequirement.update({ where: { id: already.id }, data: { requiredQty } });
+          updated += 1;
+        } else {
+          skipped += 1;
+        }
+        continue;
+      }
+      await prisma.preInventoryRequirement.create({
+        data: {
+          date: new Date(),
+          category: s.type,
+          itemId: inv.id,
+          unit: s.unit,
+          requiredQty,
+          note,
+          sourcePoItemId: item.id,
+          requestedById: req.user!.id,
+          purchaseNotifiedAt: new Date(),
+        },
+      });
+      sent += 1;
+    }
+
+    if (sent > 0 || updated > 0) {
+      await notifyRoles(
+        ["PURCHASE"],
+        { title: `Shortfall: ${item.productName}`, body: `${poLabel} - ${sent} new, ${updated} updated material shortfall(s), please log a PO.`, link: "/pre-inventory" },
+        req.user!.id,
+      ).catch((err) => req.log?.error({ err }, "notify failed: purchase_order.short_sent_to_purchase"));
+    }
+    await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_short_sent_to_purchase", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: item.id, sent, updated, skipped } });
+
+    res.json({ sent, updated, skipped });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PPIC's Cancel - the product is dead for good (no undo): it drops out of the
+// PPIC lists, the stock queue, Regulatory's queue and the PO's completion. The
+// row is kept, marked cancelled with who/when/why. Allowed until the first batch is made (Production is stopped, the Day Store's untouched
+// material requests for it are dropped). BD (who owns the PO) is told.
+purchaseOrdersRouter.patch(
+  "/:id/items/:itemId/cancel",
+  requireRole("PPIC"),
+  validateBody(cancelItemSchema),
+  async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+    try {
+      const item = await prisma.purchaseOrderItem.findUnique({
+        where: { id: req.params.itemId },
+        include: { preProduction: { select: { id: true, _count: { select: { productionBatches: true } } } }, purchaseOrder: { select: { id: true, poNumber: true, createdById: true, customer: { select: { companyName: true } } } } },
+      });
+      if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+      if (item.cancelledAt) return res.status(409).json({ error: "This product is already cancelled." });
+      if (item.preProduction && item.preProduction._count.productionBatches > 0) {
+        return res.status(409).json({ error: "Production has already made a batch of this product - it can't be cancelled from here." });
+      }
+
+      const { reason } = req.body as CancelItemInput;
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id: item.id },
+        data: { cancelledAt: new Date(), cancelledById: req.user!.id, cancelReason: reason, materialHeldAt: null, materialHeldById: null },
+      });
+      await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_cancelled", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: item.id, reason } });
+      // The Day Store's requests for this product that nobody has started on are dropped (material already issued stays where it is, as stock)
+      await prisma.inventoryRequest.updateMany({ where: { purchaseOrderItemId: item.id, deletedAt: null, status: "PENDING", fulfillments: { none: {} } }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
+
+      const poLabel = item.purchaseOrder.poNumber ?? `PO ${item.purchaseOrder.id.slice(0, 8)}`;
+      await notifyUser(item.purchaseOrder.createdById, {
+        title: `${item.productName} cancelled by PPIC`,
+        body: `${item.purchaseOrder.customer.companyName} · ${poLabel} - ${reason}`,
+        link: `/purchase-orders/${item.purchaseOrder.id}`,
+      }).catch((err) => req.log?.error({ err }, "notify failed: purchase_order.item_cancelled"));
+
+      // Its stock is free again - keep Purchase's shortfall requirements in step.
+      await syncShortToPurchaseSafe(req.user!.id, req.log);
+      res.json({ id: updated.id, cancelledAt: updated.cancelledAt, cancelReason: updated.cancelReason });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 // "Add More" — appends one more product line item to an existing PO.
 purchaseOrdersRouter.post(
   "/:id/items",
@@ -819,7 +995,10 @@ purchaseOrdersRouter.post(
       const order = await prisma.purchaseOrder.findUnique({ where: { id: req.params.id } });
       if (!order) return res.status(404).json({ error: "Purchase order not found" });
 
-      const item = await prisma.purchaseOrderItem.create({ data: { purchaseOrderId: req.params.id, ...req.body } });
+      const cats = await resolveProductCategories([req.body.productCategory]);
+      if (cats.unknown.length) return res.status(400).json({ error: `Unknown Product Category: ${cats.unknown.join(", ")}` });
+
+      const item = await prisma.purchaseOrderItem.create({ data: { purchaseOrderId: req.params.id, ...req.body, productCategory: cats.canonical(req.body.productCategory) } });
 
       await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_added", entityType: "PurchaseOrder", entityId: order.id, metadata: { itemId: item.id } });
 
@@ -829,6 +1008,17 @@ purchaseOrdersRouter.post(
     }
   },
 );
+
+// How a line's quantity is turned into packs (for the Packaging BOM) and Kg (for the RM BOM), with the working shown.
+purchaseOrdersRouter.get("/:id/items/:itemId/conversion", async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+  try {
+    const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, select: { purchaseOrderId: true, productName: true, quantity: true, unit: true, packSize: true, deletedAt: true, purchaseOrder: { select: { customerId: true } } } });
+    if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+    res.json(await loadOrderConversion(item, item.purchaseOrder.customerId));
+  } catch (err) {
+    next(err);
+  }
+});
 
 purchaseOrdersRouter.patch(
   "/:id/items/:itemId",
@@ -840,6 +1030,11 @@ purchaseOrdersRouter.patch(
       if (!item || item.purchaseOrderId !== req.params.id) return res.status(404).json({ error: "Line item not found" });
 
       const data = req.body as UpdatePurchaseOrderItemInput;
+      if (data.productCategory) {
+        const cats = await resolveProductCategories([data.productCategory]);
+        if (cats.unknown.length) return res.status(400).json({ error: `Unknown Product Category: ${cats.unknown.join(", ")}` });
+        data.productCategory = cats.canonical(data.productCategory);
+      }
       const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data, include: { preProduction: { select: { id: true } } } });
 
       // Editing a line item stays allowed even once it has a real
@@ -882,9 +1077,17 @@ purchaseOrdersRouter.patch(
   validateBody(assignPlannedPlantSchema),
   async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
     try {
-      const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, include: { preProduction: { select: { id: true } } } });
+      const item = await prisma.purchaseOrderItem.findUnique({
+        where: { id: req.params.itemId },
+        include: { preProduction: { select: { id: true } }, bomPlans: { where: { status: "CALCULATED" }, select: { id: true }, take: 1 }, rmPlans: { where: { status: "CALCULATED" }, select: { id: true }, take: 1 } },
+      });
       if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
       if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item — the Plant is locked in." });
+      // The Plant can be set or changed only while the product is Not Planned. Once both plans are calculated their
+      // material has gone to that Plant's Day Store, so changing it then would leave that material in the wrong place.
+      if (item.plannedPlantId && item.bomPlans.length > 0 && item.rmPlans.length > 0) {
+        return res.status(409).json({ error: "This product is already planned - its Plant can't be changed any more." });
+      }
 
       const { plantId } = req.body as AssignPlannedPlantInput;
       if (plantId) {
@@ -893,6 +1096,8 @@ purchaseOrdersRouter.patch(
       }
 
       const updated = await prisma.purchaseOrderItem.update({ where: { id: req.params.itemId }, data: { plannedPlantId: plantId }, include: { plannedPlant: { select: { id: true, name: true } } } });
+      // Plans already calculated: the materials now go to this Plant's Day Store.
+      if (plantId) await raiseRequestsForPlannedItemSafe(updated.id, req.user!.id, req.log);
       await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_planned_plant_set", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: updated.id, plantId } });
 
       res.json(updated);
@@ -914,6 +1119,13 @@ purchaseOrdersRouter.patch(
     try {
       const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId } });
       if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+
+      if (item.cancelledAt) return res.status(409).json({ error: "This product was cancelled by PPIC." });
+      // Nothing for Regulatory to review until PPIC's plan for this product
+      // is calculated — that's what sends it here (see regulatory-handoff.ts).
+      if (!item.sentToRegulatoryAt) {
+        return res.status(400).json({ error: "This product's plan hasn't been sent to Regulatory yet — it goes automatically once PPIC's plan is calculated." });
+      }
 
       const { status, remarks } = req.body as RegulatoryReviewInput;
       const updated = await prisma.purchaseOrderItem.update({
@@ -958,16 +1170,31 @@ purchaseOrdersRouter.post(
         },
       });
       if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
-      if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item." });
-      if (item.planSentToProductionAt) return res.status(409).json({ error: "The plan was already sent to Production for this line item." });
+      // A release can be the whole order or part of it ({ quantity }); PPIC can keep releasing more until the whole order is out.
+      const alreadyReleased = item.planSentToProductionAt ? Math.min(item.quantity, item.releasedQty ?? item.quantity) : 0;
+      const remainingToRelease = item.quantity - alreadyReleased;
+      if (item.planSentToProductionAt && remainingToRelease <= 1e-6) return res.status(409).json({ error: "The whole quantity has already been released to Production for this line item." });
+      if (item.preProduction && !item.planSentToProductionAt) return res.status(409).json({ error: "Production has already started on this line item." });
+      if (item.cancelledAt) return res.status(409).json({ error: "This product is cancelled." });
+      const rawQty = (req.body as { quantity?: unknown } | undefined)?.quantity;
+      const partialQty = rawQty === undefined || rawQty === null || rawQty === "" ? null : Number(rawQty);
+      if (partialQty !== null && (!Number.isFinite(partialQty) || partialQty <= 0)) return res.status(400).json({ error: "Enter a quantity greater than zero." });
+      if (partialQty !== null && partialQty > remainingToRelease + 1e-6) {
+        return res.status(400).json({ error: `Only ${Math.round(remainingToRelease * 1000) / 1000} ${item.unit} is left to release (ordered ${item.quantity}, released ${Math.round(alreadyReleased * 1000) / 1000}).` });
+      }
+      const releaseQty = partialQty ?? remainingToRelease;
+      // PPIC's Hold — a held product can't go on to Production until released.
+      if (item.materialHeldAt) return res.status(409).json({ error: "This product is on hold — release it before sending its plan to Production." });
 
       if (!item.plannedPlantId) {
         return res.status(400).json({ error: "Assign a Plant to this product before sending the plan to Production." });
       }
 
-      const hasCalculatedPlan = item.bomPlans.some((p) => p.status === "CALCULATED") || item.rmPlans.some((p) => p.status === "CALCULATED");
-      if (!hasCalculatedPlan) {
-        return res.status(400).json({ error: "Generate and calculate a Packaging BOM or RM Costing plan for this product first." });
+      // Both plans, never just one: half a plan would hide half the material from Material Planning and from the Day Store.
+      const rmDone = item.rmPlans.some((p) => p.status === "CALCULATED");
+      const bomDone = item.bomPlans.some((p) => p.status === "CALCULATED");
+      if (!rmDone || !bomDone) {
+        return res.status(400).json({ error: `Calculate the ${!rmDone && !bomDone ? "RM plan and the Packaging BOM plan" : !rmDone ? "RM plan" : "Packaging BOM plan"} for this product before sending it to Production.` });
       }
 
       if (item.regulatoryStatus !== "Approved") {
@@ -979,22 +1206,132 @@ purchaseOrdersRouter.post(
         });
       }
 
-      const updated = await prisma.purchaseOrderItem.update({ where: { id: item.id }, data: { planSentToProductionAt: new Date() } });
+      // Material gate: don't let a product with short raw / packaging material
+      // slip into Production by accident. Judged on the same FIFO allocation the
+      // Material Planning list shows (only possible once both plans are
+      // calculated, which is when the product is in that list). A PARTIAL release skips it: PPIC is choosing how much to start
+      // with while the rest of the material is still being bought.
+      const planning = partialQty === null ? await getMaterialPlanning() : { rows: [] as Awaited<ReturnType<typeof getMaterialPlanning>>["rows"] };
+      const shortages = planning.rows.filter((r) => r.purchaseOrderItemId === item.id && r.status === "SHORT");
+      if (shortages.length > 0) {
+        return res.status(409).json({
+          error: `Material is short for this product - ${shortages.map((s) => `${s.material} (short ${s.shortQty} ${s.unit})`).join(", ")}. It can be sent to Production once everything is covered.`,
+          code: "MATERIAL_SHORT",
+          shortages: shortages.map((s) => ({ type: s.type, material: s.material, unit: s.unit, requiredQty: s.requiredQty, shortQty: s.shortQty })),
+        });
+      }
 
-      await recordAudit({ actorId: req.user!.id, action: "purchase_order.item_plan_sent_to_production", entityType: "PurchaseOrder", entityId: req.params.id, metadata: { itemId: item.id, plantId: item.plannedPlantId } });
+      const newReleased = alreadyReleased + releaseQty;
+      const isWhole = newReleased >= item.quantity - 1e-6;
+      const updated = await prisma.purchaseOrderItem.update({
+        where: { id: item.id },
+        // releasedQty stays null once the whole order is out (null = all of it)
+        data: { planSentToProductionAt: item.planSentToProductionAt ?? new Date(), releasedQty: isWhole ? null : Math.round(newReleased * 1000) / 1000 },
+      });
+
+      await recordAudit({
+        actorId: req.user!.id,
+        action: "purchase_order.item_plan_sent_to_production",
+        entityType: "PurchaseOrder",
+        entityId: req.params.id,
+        metadata: { itemId: item.id, plantId: item.plannedPlantId, releasedNow: releaseQty, releasedTotal: newReleased, orderQty: item.quantity },
+      });
 
       await notifyRoles(
         ["PRODUCTION"],
-        { title: `${item.productName} planned for ${item.plannedPlant?.name ?? "production"}`, body: "PPIC's plan is ready — Indent Issue can start once material arrives.", link: `/purchase-orders/${req.params.id}` },
+        {
+          title: `${item.productName} planned for ${item.plannedPlant?.name ?? "production"}`,
+          body: isWhole && alreadyReleased === 0 ? "PPIC's plan is ready — Indent Issue can start once material arrives." : `PPIC released ${releaseQty} ${item.unit} (${Math.round(newReleased * 1000) / 1000} of ${item.quantity} ${item.unit} so far).`,
+          link: `/purchase-orders/${req.params.id}`,
+        },
         req.user!.id,
       ).catch((err) => req.log?.error({ err }, "notify failed: purchase_order.item_plan_sent_to_production"));
 
+      // The Plant's Day Store hears what Production may now start, so it can have the material ready for the GRN.
+      if (item.plannedPlantId) {
+        const plant = await prisma.plant.findUnique({ where: { id: item.plannedPlantId }, select: { dayStoreId: true } });
+        await notifyPlantDayStore(
+          plant?.dayStoreId,
+          {
+            title: `${item.productName} released to Production`,
+            body: isWhole && alreadyReleased === 0 ? "The whole order is released. Material must reach the Plant for the Material Received & GRN step." : `${releaseQty} ${item.unit} released (${Math.round(newReleased * 1000) / 1000} of ${item.quantity} ${item.unit} so far). Material for that quantity must reach the Plant.`,
+            link: "/my-store/production-requests",
+          },
+          req.user!.id,
+        ).catch((err) => req.log?.error({ err }, "notify failed: plan released to day store"));
+      }
+      await syncShortToPurchaseSafe(req.user!.id, req.log);
       res.json(updated);
     } catch (err) {
       next(err);
     }
   },
 );
+
+// (Regulatory reads it too: it reviews a product by the materials of its plan.)
+// Read-only "View" for PPIC's plan-sent list and Production's own drill-
+// down into it — what did PPIC actually plan for this one product? Same
+// material-availability read the Add on Plan feature does, just resolved
+// from a PO line item instead of a Sku/Recipe search (see
+// getPoItemPlanAvailability's own comment).
+purchaseOrdersRouter.get("/:id/items/:itemId/plan", requireRole("PPIC", "PRODUCTION", "REGULATORY"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+  try {
+    const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId } });
+    if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+
+    const plan = await getPoItemPlanAvailability(item.id);
+    // How far the run's preparation has got (GRN, Indent, Dispensing, Line Clearance), so the plan view shows it too.
+    const prepRun = await prisma.preProduction.findUnique({
+      where: { purchaseOrderItemId: item.id },
+      select: { currentStageId: true, grnNo: true, grnDate: true, prodIndentSlipSign: true, productionPlanDate: true, rmDispensingDate: true, pmIssuedDate: true, sampleQcStatus: true },
+    });
+    const preparation = prepRun && { stage: prepRun.currentStageId, grnNo: prepRun.grnNo, grnDate: prepRun.grnDate, indentSlip: prepRun.prodIndentSlipSign, indentDate: prepRun.productionPlanDate, rmDispensingDate: prepRun.rmDispensingDate, pmIssuedDate: prepRun.pmIssuedDate, lineClearance: prepRun.sampleQcStatus };
+    // ?released=1 (Production's view): quantities for the part PPIC has released so far, not the whole order.
+    const releasedQty = item.planSentToProductionAt ? Math.min(item.quantity, item.releasedQty ?? item.quantity) : item.quantity;
+    const factor = item.quantity > 0 ? releasedQty / item.quantity : 1;
+    if (req.query.released !== "1" || factor >= 1 - 1e-9) return res.json({ ...plan, preparation, release: { orderQty: item.quantity, releasedQty, unit: item.unit } });
+    const scale = <T extends { materials: { requiredQty: number; onHand: number | null; short: boolean; shortfallQty: number }[] }>(d: T | null): T | null =>
+      d && {
+        ...d,
+        materials: d.materials.map((m) => {
+          const requiredQty = Math.round(m.requiredQty * factor * 1000) / 1000;
+          const short = m.onHand != null && m.onHand < requiredQty;
+          return { ...m, requiredQty, short, shortfallQty: short ? Math.round((requiredQty - (m.onHand ?? 0)) * 1000) / 1000 : 0 };
+        }),
+      };
+    res.json({ bom: scale(plan.bom), rm: scale(plan.rm), preparation, release: { orderQty: item.quantity, releasedQty, unit: item.unit } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PPIC's "Send partial" dialog: how much is left to release and a SUGGESTION of how much the material in hand can cover. It is only
+// a suggestion - PPIC can release any quantity up to what is left.
+purchaseOrdersRouter.get("/:id/items/:itemId/release-info", requireRole("PPIC"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
+  try {
+    const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId } });
+    if (!item || item.purchaseOrderId !== req.params.id || item.deletedAt) return res.status(404).json({ error: "Line item not found" });
+    const releasedQty = item.planSentToProductionAt ? Math.min(item.quantity, item.releasedQty ?? item.quantity) : 0;
+    const remainingQty = Math.max(0, item.quantity - releasedQty);
+
+    const planning = await getMaterialPlanning();
+    const rows = planning.rows.filter((r) => r.purchaseOrderItemId === item.id && r.requiredQty > 0);
+    let fraction = 1;
+    let limitedBy: string | null = null;
+    for (const r of rows) {
+      const f = Math.max(0, (r.requiredQty - (r.shortQty ?? 0)) / r.requiredQty);
+      if (f < fraction) {
+        fraction = f;
+        limitedBy = r.material;
+      }
+    }
+    const coverableTotal = rows.length ? fraction * item.quantity : null;
+    const suggestedQty = coverableTotal === null ? null : Math.max(0, Math.min(remainingQty, Math.floor((coverableTotal - releasedQty) * 100) / 100));
+    res.json({ orderQty: item.quantity, releasedQty, remainingQty, unit: item.unit, suggestedQty, limitedBy });
+  } catch (err) {
+    next(err);
+  }
+});
 
 purchaseOrdersRouter.delete("/:id/items/:itemId", requireRole("BD"), async (req: AuthedRequest<{ id: string; itemId: string }>, res, next) => {
   try {

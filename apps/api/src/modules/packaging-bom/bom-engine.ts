@@ -35,6 +35,13 @@ export interface PackagingComponentInput {
   quantity: number | null;
   unit: string;
   pmCode?: string | null;
+  /** Overage as a fraction (0.02 = 2%), from the PM BOM sheet's OV% column; unset = the old default. */
+  overagePct?: number | null;
+  /** Primary / Secondary / Tertiary when the sheet states it; otherwise guessed from the type name. */
+  packingLevel?: string | null;
+  /** The Store item this component is linked to (its name), when R&D picked one. */
+  pmItemName?: string | null;
+  pmItem?: { name: string } | null;
 }
 
 export interface BomPlanLineInput {
@@ -48,6 +55,8 @@ export interface BomPlanLineInput {
 export interface BomResultLine {
   category: BomCategory;
   component: string;
+  /** Store item name when the component is linked to one — what stock/PR matching should use. */
+  itemName?: string;
   spec: string;
   baseQty: number;
   wastageRate: number;
@@ -107,10 +116,16 @@ function cleanString(str: unknown): string {
     .replace(/\s+/g, " ");
 }
 
+/** Name to match against the Store item master: the linked item when there is one, else the generic component name. */
+export function pmLineName(l: { component: string; itemName?: string }): string {
+  return (l.itemName ?? l.component).trim();
+}
+
 export function calculateMasterBOM(items: BomPlanLineInput[]): BomResult {
   interface AggEntry {
     category: BomCategory;
     component: string;
+    itemName?: string;
     spec: string;
     base: number;
     wastageRate: number;
@@ -128,19 +143,21 @@ export function calculateMasterBOM(items: BomPlanLineInput[]): BomResult {
 
     const sourceKey = `${brandName} (${productName})`;
 
-    const pushMaterial = (category: BomCategory, component: string, rawSpec: unknown, baseQty: number) => {
+    const pushMaterial = (category: BomCategory, component: string, rawSpec: unknown, baseQty: number, itemName?: string, overage?: number | null) => {
       const cleanSpec = cleanString(rawSpec);
       if (!cleanSpec) return;
 
-      const key = `${category}_|_${component}_|_${cleanSpec}`;
+      const wastageRate = overage != null && overage >= 0 ? overage : category === "3-Tertiary" ? 0 : 0.02;
+      const key = `${category}_|_${component}_|_${cleanSpec}${itemName ? `_|_${itemName}` : ""}_|_${wastageRate}`;
       let entry = aggregatedMap.get(key);
       if (!entry) {
         entry = {
           category,
           component,
+          ...(itemName ? { itemName } : {}),
           spec: cleanSpec,
           base: 0,
-          wastageRate: category === "3-Tertiary" ? 0 : 0.02,
+          wastageRate,
           sources: {},
         };
         aggregatedMap.set(key, entry);
@@ -198,15 +215,16 @@ export function calculateMasterBOM(items: BomPlanLineInput[]): BomResult {
       const typeLower = comp.type.toLowerCase();
       const isBoxType = /box|carton|shipper/.test(typeLower);
       const isPrimaryType = /jar|pouch|sachet|tin|monocarton|scoop|wad/.test(typeLower);
-      const category: BomCategory = isBoxType ? "3-Tertiary" : isPrimaryType ? "1-Primary" : "2-Secondary";
+      const levelCategory: BomCategory | null = /^primary/i.test(comp.packingLevel ?? "") ? "1-Primary" : /^secondary/i.test(comp.packingLevel ?? "") ? "2-Secondary" : /^tertiary/i.test(comp.packingLevel ?? "") ? "3-Tertiary" : null;
+      const category: BomCategory = levelCategory ?? (isBoxType ? "3-Tertiary" : isPrimaryType ? "1-Primary" : "2-Secondary");
       const specLabel = comp.pmCode?.trim() || comp.unit || "Standard";
 
       if (isBoxType && comp.quantity && comp.quantity > 0) {
         const boxesRequired = Math.ceil(targetYield / comp.quantity);
-        pushMaterial(category, comp.type, `${specLabel} (Pack of ${comp.quantity})`, boxesRequired);
+        pushMaterial(category, comp.type, `${specLabel} (Pack of ${comp.quantity})`, boxesRequired, (comp.pmItemName ?? comp.pmItem?.name)?.trim() || undefined, comp.overagePct);
       } else {
         const perUnitQty = comp.quantity && comp.quantity > 0 ? comp.quantity : 1;
-        pushMaterial(category, comp.type, specLabel, targetYield * perUnitQty);
+        pushMaterial(category, comp.type, specLabel, targetYield * perUnitQty, (comp.pmItemName ?? comp.pmItem?.name)?.trim() || undefined, comp.overagePct);
       }
     }
   }
@@ -217,6 +235,7 @@ export function calculateMasterBOM(items: BomPlanLineInput[]): BomResult {
       return {
         category: entry.category,
         component: entry.component,
+        ...(entry.itemName ? { itemName: entry.itemName } : {}),
         spec: entry.spec,
         baseQty: entry.base,
         wastageRate: entry.wastageRate,

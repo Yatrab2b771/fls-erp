@@ -4,6 +4,7 @@ import { usePoFullReport } from "../lib/hooks";
 import { downloadFile } from "../lib/api";
 import { EmptyState } from "../components/EmptyState";
 import type { PoFullReportBatch, StageHistoryRow } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
 
 // The on-screen twin of po-full-report-pdf.ts — same data (from
 // usePoFullReport, GET /:id/full-report), same field labels, so switching
@@ -85,11 +86,11 @@ function fmt(v: unknown): string {
 
 function FieldTable({ fields, labels }: { fields: Record<string, unknown>; labels: Record<string, string> }) {
   const rows = Object.entries(fields).filter(([, v]) => v !== null && v !== undefined && v !== "");
-  if (rows.length === 0) return <p className="text-[11px] text-slate-400">No data recorded yet.</p>;
+  if (rows.length === 0) return <p className="text-tiny text-slate-400">No data recorded yet.</p>;
   return (
     <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
       {rows.map(([k, v]) => (
-        <div key={k} className="flex justify-between gap-2 border-b border-slate-50 py-1 text-[11px]">
+        <div key={k} className="flex justify-between gap-2 border-b border-slate-50 py-1 text-tiny">
           <span className="text-slate-400">{labels[k] ?? k}</span>
           <span className="font-bold text-slate-700">{fmt(v)}</span>
         </div>
@@ -102,7 +103,7 @@ function HistoryTable({ history }: { history: StageHistoryRow[] }) {
   if (history.length === 0) return null;
   return (
     <div className="mt-2 overflow-x-auto">
-      <table className="table-modern w-full text-[11px]">
+      <table className="table-modern w-full text-tiny">
         <thead>
           <tr>
             <th>Action</th>
@@ -143,7 +144,7 @@ function BatchCard({ batch, index, unit }: { batch: PoFullReportBatch; index: nu
           <span className="pill border-amber-200 bg-amber-50 text-amber-700">{batch.currentStageId}</span>
         </div>
       </div>
-      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] sm:grid-cols-4">
+      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-tiny sm:grid-cols-4">
         <div>
           <span className="text-slate-400">Planned</span> <span className="font-bold text-slate-700">{batch.plannedQty}</span> {unit}
         </div>
@@ -158,7 +159,7 @@ function BatchCard({ batch, index, unit }: { batch: PoFullReportBatch; index: nu
         </div>
       </div>
       <div className="mt-3">
-        <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">Tier-3 Pipeline (IPQC → Dispatch)</p>
+        <p className="mb-1 text-micro font-bold uppercase tracking-wide text-slate-400">Tier-3 Pipeline (IPQC → Dispatch)</p>
         <FieldTable fields={batch.tier3Fields} labels={TIER3_LABELS} />
       </div>
       <HistoryTable history={batch.history} />
@@ -198,7 +199,7 @@ export function PoFullReportPage() {
             <div>
               <h1 className="text-xl font-black tracking-tight text-slate-900">Full Report — {po.poNumber ?? po.id.slice(0, 8)}</h1>
               <p className="text-sm text-slate-500">
-                {po.customerName} · {po.status}
+                <CustomerName name={po.customerName} /> · {po.status}
               </p>
             </div>
           </div>
@@ -212,19 +213,19 @@ export function PoFullReportPage() {
 
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Products</p>
+            <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Products</p>
             <p className="text-lg font-black text-slate-800">{totals.itemCount}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Batches</p>
+            <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Batches</p>
             <p className="text-lg font-black text-slate-800">{totals.batchCount}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Planned Total</p>
+            <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Planned Total</p>
             <p className="text-lg font-black text-slate-800">{totals.plannedTotal}</p>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Dispatched Total</p>
+            <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Dispatched Total</p>
             <p className="text-lg font-black text-emerald-700">{totals.dispatchedTotal}</p>
           </div>
         </div>
@@ -236,7 +237,7 @@ export function PoFullReportPage() {
             <div>
               <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Product {idx + 1}</p>
               <h2 className="text-base font-black text-slate-900">{item.productName}</h2>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-tiny text-slate-500">
                 Ordered {item.quantity} {item.unit} · {item.productType} · {item.batchCount} batch{item.batchCount === 1 ? "" : "es"} · Dispatched {item.dispatchedTotal} {item.unit}
               </p>
             </div>
@@ -265,7 +266,7 @@ export function PoFullReportPage() {
                     <FlaskConical className="h-3.5 w-3.5" strokeWidth={2.5} /> Production Batches ({item.batches.length})
                   </p>
                   {item.batches.length === 0 ? (
-                    <p className="text-[11px] text-slate-400">No production batches created yet.</p>
+                    <p className="text-tiny text-slate-400">No production batches created yet.</p>
                   ) : (
                     <div className="space-y-3">
                       {item.batches.map((b, bIdx) => (

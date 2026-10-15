@@ -1,3 +1,4 @@
+import { assertPlantAccess, getScopedPlantIds } from "../inventory/day-store-access";
 import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
@@ -40,6 +41,7 @@ plantConsumptionRouter.post(
     try {
       const run = await prisma.preProduction.findUnique({ where: { id: req.params.preProductionId }, select: { id: true, plantId: true } });
       if (!run) return res.status(404).json({ error: "Production run not found" });
+      await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
       if (!run.plantId) return res.status(400).json({ error: "This run has no Plant set yet — nothing to record consumption against." });
 
       const input = req.body as RecordPlantConsumptionInput;
@@ -50,25 +52,52 @@ plantConsumptionRouter.post(
         if (!destStore) return res.status(400).json({ error: "Unknown destination Day Store" });
       }
 
-      const totalQty = input.consumedQty + input.wastedQty + input.rejectedQty + input.returnedQty;
+      if (input.productionBatchId) {
+        const batch = await prisma.productionBatch.findUnique({ where: { id: input.productionBatchId }, select: { preProductionId: true } });
+        if (!batch || batch.preProductionId !== run.id) return res.status(400).json({ error: "That batch does not belong to this production run." });
+      }
 
       // Same check-then-write-under-SERIALIZABLE pattern every other
       // gated stock action in this app uses — closes the race between
       // two entries racing the same on-hand number.
       const result = await runSerializable(async (tx) => {
         const onHand = (await getOnHandByPlantAndItem(run.plantId!, [input.itemId], tx)).get(input.itemId) ?? 0;
-        if (totalQty > onHand) {
-          throw new RouteError(409, `Only ${onHand} ${input.unit} of ${item.name} actually on hand at this Plant — can't account for more than that.`);
-        }
 
-        const consumptionRows = (
+        const wanted = (
           [
             { purpose: "PRODUCTION", quantity: input.consumedQty },
             { purpose: "WASTE", quantity: input.wastedQty },
             { purpose: "REJECTED", quantity: input.rejectedQty },
-          ] satisfies { purpose: "PRODUCTION" | "WASTE" | "REJECTED"; quantity: number }[]
+            { purpose: "SAMPLE", quantity: input.sampleQty },
+          ] satisfies { purpose: "PRODUCTION" | "WASTE" | "REJECTED" | "SAMPLE"; quantity: number }[]
         ).filter((r) => r.quantity > 0);
 
+        // The Day Store dispensed the whole plan to the run at Dispensing (logged on the run, not on a batch), and that already left the
+        // Plant's stock. A batch's usage is its share of THAT material: it is booked out of what was given at Dispensing first, and only what
+        // goes beyond it is new consumption that has to be on hand at the Plant. (Without a batch the entry is plain new consumption.)
+        const fromPool = new Map<string, number>(); // purpose -> how much of this entry comes out of the Dispensing pool
+        if (input.productionBatchId) {
+          for (const w of wanted) {
+            const pool = await tx.batchMaterialConsumption.findMany({ where: { preProductionId: run.id, itemId: input.itemId, purpose: w.purpose, productionBatchId: null }, orderBy: { createdAt: "asc" } });
+            let left = w.quantity;
+            for (const r of pool) {
+              if (left <= 1e-9) break;
+              const take = Math.min(left, r.quantity);
+              if (take >= r.quantity - 1e-9) await tx.batchMaterialConsumption.delete({ where: { id: r.id } });
+              else await tx.batchMaterialConsumption.update({ where: { id: r.id }, data: { quantity: r.quantity - take } });
+              left -= take;
+            }
+            fromPool.set(w.purpose, w.quantity - left);
+          }
+        }
+        // A batch's E · Return is leftover that stays in the Plant's stock: it needs nothing more on hand. Without a batch it is a real return.
+        const isLeftover = !!input.productionBatchId;
+        const newQty = wanted.reduce((sum, w) => sum + (w.quantity - (fromPool.get(w.purpose) ?? 0)), 0) + (isLeftover ? 0 : input.returnedQty);
+        if (newQty > onHand + 1e-9) {
+          throw new RouteError(409, `Only ${onHand} ${input.unit} of ${item.name} actually on hand at this Plant — can't account for more than that.`);
+        }
+
+        const consumptionRows = wanted;
         if (consumptionRows.length > 0) {
           await tx.batchMaterialConsumption.createMany({
             data: consumptionRows.map((r) => ({
@@ -78,12 +107,17 @@ plantConsumptionRouter.post(
               unit: input.unit,
               purpose: r.purpose,
               createdById: req.user!.id,
+              productionBatchId: input.productionBatchId ?? null,
             })),
           });
         }
 
+        if (isLeftover && input.returnedQty > 0) {
+          await tx.batchLeftover.create({ data: { productionBatchId: input.productionBatchId!, itemId: input.itemId, quantity: input.returnedQty, unit: input.unit, createdById: req.user!.id } });
+        }
+
         let transfer = null;
-        if (input.returnedQty > 0) {
+        if (input.returnedQty > 0 && !isLeftover) {
           transfer = await tx.stockTransfer.create({
             data: {
               itemId: input.itemId,
@@ -95,6 +129,7 @@ plantConsumptionRouter.post(
               destinationType: input.destinationType!,
               destDayStoreId: input.destinationType === "DAY_STORE" ? input.destDayStoreId : undefined,
               preProductionId: run.id,
+              productionBatchId: input.productionBatchId ?? null,
               sentById: req.user!.id,
             },
           });
@@ -135,6 +170,7 @@ plantConsumptionRouter.get("/:preProductionId/balance", requireRole(...READ_ROLE
       select: { id: true, plantId: true, plant: { select: { id: true, name: true } } },
     });
     if (!run) return res.status(404).json({ error: "Production run not found" });
+    await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
     if (!run.plantId) return res.json({ plant: null, items: [] });
 
     const [consumptions, returns] = await Promise.all([
@@ -151,11 +187,11 @@ plantConsumptionRouter.get("/:preProductionId/balance", requireRole(...READ_ROLE
     const itemIds = [...new Set([...consumptions.map((c) => c.itemId), ...returns.map((r) => r.itemId)])];
     const onHand = itemIds.length ? await getOnHandByPlantAndItem(run.plantId, itemIds) : new Map<string, number>();
 
-    const byItem = new Map<string, { itemId: string; itemName: string; unit: string; consumedQty: number; wastedQty: number; rejectedQty: number; returnedQty: number; plantOnHand: number }>();
+    const byItem = new Map<string, { itemId: string; itemName: string; unit: string; consumedQty: number; wastedQty: number; rejectedQty: number; sampleQty: number; returnedQty: number; plantOnHand: number }>();
     function bucket(itemId: string, itemName: string, unit: string) {
       let b = byItem.get(itemId);
       if (!b) {
-        b = { itemId, itemName, unit, consumedQty: 0, wastedQty: 0, rejectedQty: 0, returnedQty: 0, plantOnHand: onHand.get(itemId) ?? 0 };
+        b = { itemId, itemName, unit, consumedQty: 0, wastedQty: 0, rejectedQty: 0, sampleQty: 0, returnedQty: 0, plantOnHand: onHand.get(itemId) ?? 0 };
         byItem.set(itemId, b);
       }
       return b;
@@ -166,6 +202,7 @@ plantConsumptionRouter.get("/:preProductionId/balance", requireRole(...READ_ROLE
       if (c.purpose === "PRODUCTION") b.consumedQty += c.quantity;
       else if (c.purpose === "WASTE") b.wastedQty += c.quantity;
       else if (c.purpose === "REJECTED") b.rejectedQty += c.quantity;
+      else if (c.purpose === "SAMPLE") b.sampleQty += c.quantity;
     }
     for (const r of returns) {
       const b = bucket(r.itemId, r.item.name, r.unit);
@@ -199,15 +236,16 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
       dateTo?: string;
     };
 
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const consumptions = await prisma.batchMaterialConsumption.findMany({
       where: {
         itemId: itemId || undefined,
         preProductionId: preProductionId || undefined,
-        preProduction: poId
-          ? {
-              purchaseOrderItem: { purchaseOrderId: poId },
-            }
-          : undefined,
+        preProduction: {
+          ...(poId ? { purchaseOrderItem: { purchaseOrderId: poId } } : {}),
+          // A Plant-limited Production login reads only its own Plant's consumption.
+          ...(plantScope ? { plantId: { in: plantScope } } : {}),
+        },
         // Both ends inclusive — dateTo covers the whole day, not just its
         // midnight instant, same "calendar date, not timestamp" rule the
         // rest of this app's date-range filters use.
@@ -330,7 +368,7 @@ plantConsumptionRouter.get("/report", requireRole(...READ_ROLES, "QA_QC"), async
         if (line) row.requiredQty = line.totalKg;
       } else {
         const plan = latestBomByPoItem.get(row.purchaseOrderItemId);
-        const line = plan?.lines.find((l) => l.component === row.itemName);
+        const line = plan?.lines.find((l) => (l.itemName ?? l.component) === row.itemName || `${l.component} — ${l.spec}` === row.itemName);
         if (line) row.requiredQty = line.totalQty;
       }
     }

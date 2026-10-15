@@ -1,10 +1,15 @@
+import { assertPlantAccess, assertRunDayStoreAccess, getScopedDayStoreIds, getScopedPlantIds } from "../inventory/day-store-access";
 import { Router } from "express";
+import { productionBlockedByHoldOrCancel } from "../purchase-orders/hold-guards";
+import { getMaterialCoverage } from "./material-coverage";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { notifyRoles } from "../../common/lib/notify";
 import { getPoReadinessForOne } from "../po-readiness/readiness-engine";
+import { getPoItemPlanAvailability } from "../planning/add-on-plan";
+import { getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "../inventory/stock";
 import { getDispensingRequirementStatus } from "./dispensing-requirements";
 import { preProductionInclude, serializePreProduction, type PreProductionWithRelations } from "./batch-include";
 import { transitionPreProductionStage } from "./pre-production-transition";
@@ -40,7 +45,7 @@ export { preProductionInclude, serializePreProduction, type PreProductionWithRel
 // Every department needs to see the pipeline board and every run's
 // current status — read access is open to any authenticated user; only
 // acting on the current stage is role-gated below.
-preProductionRouter.get("/", async (req, res, next) => {
+preProductionRouter.get("/", async (req: AuthedRequest, res, next) => {
   try {
     const pagination = parsePagination(req);
     const where: Prisma.PreProductionWhereInput = {};
@@ -50,6 +55,12 @@ preProductionRouter.get("/", async (req, res, next) => {
     // same "Plant is unrestricted" reasoning day-store-access.ts already
     // documents for PRODUCTION/PPIC.
     if (typeof req.query.plantId === "string") where.plantId = req.query.plantId;
+    // A Plant-limited Production login sees only its own Plant's runs.
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
+    if (plantScope) where.plantId = typeof where.plantId === "string" ? (plantScope.includes(where.plantId) ? where.plantId : "none") : { in: plantScope };
+    // ...and a Day Store login sees only the runs at its own store's Plant.
+    const storeScope = await getScopedDayStoreIds(req.user!.id, req.user!.roles);
+    if (storeScope) where.plant = { dayStoreId: { in: storeScope } };
 
     const [total, runs] = await Promise.all([
       prisma.preProduction.count({ where }),
@@ -77,11 +88,13 @@ preProductionRouter.post("/", requireRole("PRODUCTION"), async (req: AuthedReque
   try {
     const parsed = createPreProductionSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
-    const { purchaseOrderItemId, plantId: requestedPlantId, confirmNotReady } = parsed.data as CreatePreProductionInput;
+    const { purchaseOrderItemId, plantId: requestedPlantId, confirmNotReady, batchFlow } = parsed.data as CreatePreProductionInput;
 
     const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, include: { purchaseOrder: { select: { id: true, status: true } }, preProduction: true } });
     if (!item) return res.status(400).json({ error: "Unknown purchase order item" });
     if (item.preProduction) return res.status(409).json({ error: "Production has already started on this line item." });
+    const blocked = await productionBlockedByHoldOrCancel(purchaseOrderItemId);
+    if (blocked) return res.status(409).json({ error: blocked });
     if (item.purchaseOrder.status !== "APPROVED") {
       return res.status(400).json({ error: "This purchase order hasn't been approved yet — BD must approve it before production can start against it." });
     }
@@ -94,6 +107,8 @@ preProductionRouter.post("/", requireRole("PRODUCTION"), async (req: AuthedReque
     if (requestedPlantId && item.plannedPlantId && requestedPlantId !== item.plannedPlantId) {
       return res.status(400).json({ error: "PPIC has already planned this product for a different Plant — Production can't override it here." });
     }
+    // A Plant-limited Production login starts runs only for products planned at its own Plant.
+    await assertPlantAccess(req.user!.id, req.user!.roles, plantId);
     if (plantId && !(await prisma.plant.findUnique({ where: { id: plantId } }))) {
       return res.status(400).json({ error: "Unknown Plant" });
     }
@@ -137,7 +152,9 @@ preProductionRouter.post("/", requireRole("PRODUCTION"), async (req: AuthedReque
     }
 
     const run = await prisma.preProduction.create({
-      data: { purchaseOrderItemId, plantId, plannedQty: item.quantity },
+      // Per-batch flow: the run has no stages of its own, so it starts already past them (Line Clearance "Approved" is what lets batches be
+      // made); each batch then goes through its own Indent, Batch No, Dispensing and Line Clearance.
+      data: { purchaseOrderItemId, plantId, plannedQty: item.quantity, ...(batchFlow ? { batchFlow: true, currentStageId: "SAMPLE_QC_APPROVAL" as const, sampleQcStatus: "Approved" } : {}) },
       include: preProductionInclude,
     });
 
@@ -167,10 +184,447 @@ preProductionRouter.post("/import", async (req: AuthedRequest, res, next) => {
   }
 });
 
+// New Plans: the products PPIC has sent to Production whose run has not been started yet - the details come ready-filled from
+// the PO (customer, product, type, quantity) and the Plant PPIC planned. A Plant-limited Production login sees only its own Plant's.
+preProductionRouter.get("/new-plans", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
+    const running = req.query.status === "running"; // ?status=running: the plans whose run has started (default: not started)
+    const items = await prisma.purchaseOrderItem.findMany({
+      where: {
+        cancelledAt: null,
+        materialHeldAt: null, // a product on Hold is listed only under On Hold
+        planSentToProductionAt: { not: null },
+        preProduction: running ? { isNot: null } : null,
+        ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}),
+      },
+      select: {
+        id: true,
+        productName: true,
+        productCategory: true,
+        productType: true,
+        quantity: true,
+        releasedQty: true,
+        unit: true,
+        volume: true,
+        packSize: true,
+        planSentToProductionAt: true,
+        preProduction: { select: { id: true, currentStageId: true, plannedQty: true, combinedQty: true } },
+        plannedPlant: { select: { id: true, name: true } },
+        purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+      },
+      orderBy: { planSentToProductionAt: "asc" },
+    });
+    res.json(
+      items.map((i) => ({
+        itemId: i.id,
+        poId: i.purchaseOrder.id,
+        poNumber: i.purchaseOrder.poNumber,
+        customerName: i.purchaseOrder.customer.companyName,
+        productName: i.productName,
+        productCategory: i.productCategory,
+        productType: i.productType,
+        quantity: i.quantity,
+        releasedQty: Math.min(i.quantity, i.releasedQty ?? i.quantity),
+        unit: i.unit,
+        volume: i.volume,
+        packSize: i.packSize,
+        plant: i.plannedPlant,
+        sentAt: i.planSentToProductionAt,
+        run: i.preProduction,
+      })),
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The "Material Received" page: for every plan PPIC has sent to Production, each material of its plan (RM + PM) with how much was
+// required (for the part released so far), how much has reached the Plant against it, what is on the way, what is still to come,
+// how much of it is in production, and what is on hand at the Plant now. A Plant-limited Production login sees only its own Plant.
+//   Received      issued by the Day Store to the Plant for this product's requests and delivered
+//   In transit    issued but not yet received by the Plant
+//   Balance       Required - Received - In transit (still to come)
+//   Used          A + B + C + D - E over the run (production, wastage, rejected, sample, minus what went back to the store)
+//   Left          Received - Used (with Production for this product)
+//   Available     whole-Plant on hand for the material (shared by every run at the Plant)
+preProductionRouter.get("/material-board", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
+    const items = await prisma.purchaseOrderItem.findMany({
+      where: { cancelledAt: null, materialHeldAt: null, deletedAt: null, planSentToProductionAt: { not: null }, ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}) },
+      select: {
+        id: true,
+        productName: true,
+        productCategory: true,
+        quantity: true,
+        releasedQty: true,
+        unit: true,
+        planSentToProductionAt: true,
+        plannedPlant: { select: { id: true, name: true } },
+        purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+        preProduction: { select: { id: true, currentStageId: true } },
+      },
+      orderBy: { planSentToProductionAt: "asc" },
+    });
+    if (items.length === 0) return res.json([]);
+
+    const itemIds = items.map((i) => i.id);
+    const runIds = items.flatMap((i) => (i.preProduction ? [i.preProduction.id] : []));
+    const [plans, requests, consumptions, returns] = await Promise.all([
+      Promise.all(items.map((i) => getPoItemPlanAvailability(i.id))),
+      prisma.inventoryRequest.findMany({
+        where: { purpose: "ISSUED_PRODUCTION", deletedAt: null, purchaseOrderItemId: { in: itemIds } },
+        select: { purchaseOrderItemId: true, itemId: true, fulfillments: { where: { deletedAt: null }, select: { quantity: true, deliveredAt: true } } },
+      }),
+      prisma.batchMaterialConsumption.findMany({ where: { preProductionId: { in: runIds } }, select: { preProductionId: true, itemId: true, quantity: true, purpose: true } }),
+      prisma.stockTransfer.findMany({ where: { preProductionId: { in: runIds }, deletedAt: null }, select: { preProductionId: true, itemId: true, quantity: true } }),
+    ]);
+
+    // Plan materials are named; match them to catalog items (by category + name) to find their stock and requests.
+    const names = new Set<string>();
+    for (const p of plans) for (const m of [...(p.rm?.materials ?? []), ...(p.bom?.materials ?? [])]) names.add(m.name);
+    const catalog = await prisma.inventoryItem.findMany({ where: { name: { in: [...names] } }, select: { id: true, category: true, name: true } });
+    const catalogByKey = new Map(catalog.map((c) => [`${c.category}::${c.name}`, c.id]));
+
+    const onHandByPlant = new Map<string, Map<string, number>>();
+    for (const plantId of new Set(items.flatMap((i) => (i.plannedPlant ? [i.plannedPlant.id] : [])))) {
+      onHandByPlant.set(plantId, await getOnHandByPlantAndItem(plantId, catalog.map((c) => c.id)));
+    }
+
+    const key = (a: string, b: string) => `${a}::${b}`;
+    const received = new Map<string, { delivered: number; transit: number }>();
+    for (const r of requests) {
+      const k = key(r.purchaseOrderItemId!, r.itemId);
+      const cur = received.get(k) ?? { delivered: 0, transit: 0 };
+      for (const f of r.fulfillments) {
+        if (f.deliveredAt) cur.delivered += f.quantity;
+        else cur.transit += f.quantity;
+      }
+      received.set(k, cur);
+    }
+    const usedByRunItem = new Map<string, number>();
+    // What the Day Store has dispensed to Production so far, per run and item (the Dispensing stage's own lines).
+    const dispensedByRunItem = new Map<string, number>();
+    for (const c of consumptions) if (c.purpose === "PRODUCTION") dispensedByRunItem.set(key(c.preProductionId, c.itemId), (dispensedByRunItem.get(key(c.preProductionId, c.itemId)) ?? 0) + c.quantity);
+    for (const c of consumptions) usedByRunItem.set(key(c.preProductionId, c.itemId), (usedByRunItem.get(key(c.preProductionId, c.itemId)) ?? 0) + c.quantity);
+    for (const r of returns) if (r.preProductionId) usedByRunItem.set(key(r.preProductionId, r.itemId), (usedByRunItem.get(key(r.preProductionId, r.itemId)) ?? 0) - r.quantity);
+
+    const r3 = (n: number) => Math.round(n * 1000) / 1000;
+    const rows = items.flatMap((item, idx) => {
+      const released = Math.min(item.quantity, item.releasedQty ?? item.quantity);
+      const factor = item.quantity > 0 ? released / item.quantity : 1;
+      const plan = plans[idx]!;
+      const materials = [...(plan.rm?.materials ?? []).map((m) => ({ ...m, category: "RM" as const })), ...(plan.bom?.materials ?? []).map((m) => ({ ...m, category: "PM" as const }))];
+      return materials.map((m) => {
+        const invId = catalogByKey.get(key(m.category, m.name)) ?? null;
+        const required = r3(m.requiredQty * factor);
+        // Production sees material only once it has been dispensed to it: nothing before Dispensing, what has been dispensed so far during
+        // it, and (as before) what reached the Plant after it.
+        const stageId = item.preProduction?.currentStageId ?? null;
+        const notDispensed = !stageId || stageId === "MATERIAL_RECEIVED" || stageId === "INDENT_ISSUE";
+        const got = invId && !notDispensed ? received.get(key(item.id, invId)) : undefined;
+        const receivedQty = notDispensed ? 0 : stageId === "DISPENSING" ? r3(invId && item.preProduction ? (dispensedByRunItem.get(key(item.preProduction.id, invId)) ?? 0) : 0) : r3(got?.delivered ?? 0);
+        const inTransitQty = notDispensed || stageId === "DISPENSING" ? 0 : r3(got?.transit ?? 0);
+        const usedQty = invId && item.preProduction ? r3(usedByRunItem.get(key(item.preProduction.id, invId)) ?? 0) : 0;
+        const available = invId && item.plannedPlant && !notDispensed ? r3(onHandByPlant.get(item.plannedPlant.id)?.get(invId) ?? 0) : null;
+        const status = !invId ? "NOT_IN_CATALOG" : notDispensed ? "NOT_DISPENSED" : receivedQty >= required - 1e-6 ? "FULL" : receivedQty > 0 ? "PARTIAL" : inTransitQty > 0 ? "IN_TRANSIT" : "NOT_RECEIVED";
+        return {
+          itemId: item.id,
+          poId: item.purchaseOrder.id,
+          poNumber: item.purchaseOrder.poNumber,
+          customerName: item.purchaseOrder.customer.companyName,
+          productName: item.productName,
+          productCategory: item.productCategory,
+          plant: item.plannedPlant,
+          releasedQty: released,
+          orderQty: item.quantity,
+          productUnit: item.unit,
+          material: m.name,
+          category: m.category,
+          unit: m.unit,
+          requiredQty: required,
+          receivedQty,
+          inTransitQty,
+          balanceQty: Math.max(0, r3(required - receivedQty - inTransitQty)),
+          usedQty,
+          leftQty: r3(receivedQty - usedQty),
+          availableQty: available,
+          status,
+          sentAt: item.planSentToProductionAt,
+        };
+      });
+    });
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The New Plan page's list: every plan PPIC has sent to Production (run started or not), one entry per product. Each carries what the
+// page's three dropdowns show: the run and its batches (shift, manpower, start / end time) and, per batch, the Material Utilization
+// (A used in production, B wastage, C rejected, D sample, E returned to store). Usage logged without a batch comes back under
+// `unassigned`. A Plant-limited Production login sees only its own Plant's plans.
+preProductionRouter.get("/plans-board", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
+    const items = await prisma.purchaseOrderItem.findMany({
+      where: { cancelledAt: null, materialHeldAt: null, deletedAt: null, planSentToProductionAt: { not: null }, ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}) },
+      select: {
+        id: true,
+        productName: true,
+        productCategory: true,
+        productType: true,
+        quantity: true,
+        releasedQty: true,
+        unit: true,
+        planSentToProductionAt: true,
+        plannedPlant: { select: { id: true, name: true } },
+        purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+        preProduction: {
+          select: {
+            id: true,
+            currentStageId: true,
+            sampleQcStatus: true,
+            batchFlow: true,
+            plannedQty: true,
+            combinedQty: true,
+            plant: { select: { id: true, name: true } },
+            productionBatches: {
+              orderBy: { createdAt: "asc" },
+              select: { id: true, batchNo: true, status: true, prepStageId: true, plannedQty: true, inputQty: true, outputQty: true, shift: true, manpowerCount: true, shiftStartAt: true, shiftEndAt: true },
+            },
+          },
+        },
+      },
+      orderBy: { planSentToProductionAt: "asc" },
+    });
+
+    const runIds = items.flatMap((i) => (i.preProduction ? [i.preProduction.id] : []));
+    const [consumptions, returns, leftovers] = await Promise.all([
+      prisma.batchMaterialConsumption.findMany({
+        where: { preProductionId: { in: runIds } },
+        select: { preProductionId: true, productionBatchId: true, itemId: true, quantity: true, unit: true, purpose: true, item: { select: { name: true, category: true } } },
+      }),
+      prisma.stockTransfer.findMany({
+        where: { preProductionId: { in: runIds }, deletedAt: null },
+        select: { preProductionId: true, productionBatchId: true, itemId: true, quantity: true, unit: true, item: { select: { name: true, category: true } } },
+      }),
+      prisma.batchLeftover.findMany({ where: { productionBatch: { preProductionId: { in: runIds } } }, select: { productionBatchId: true, itemId: true, quantity: true, unit: true, productionBatch: { select: { preProductionId: true } } } }),
+    ]);
+    const leftoverItems = new Map((leftovers.length ? await prisma.inventoryItem.findMany({ where: { id: { in: [...new Set(leftovers.map((l) => l.itemId))] } }, select: { id: true, name: true, category: true } }) : []).map((i) => [i.id, i]));
+
+    type Material = { itemId: string; itemName: string; category: string; unit: string; consumedQty: number; wastedQty: number; rejectedQty: number; sampleQty: number; returnedQty: number };
+    // run -> batch id (or "" for no batch) -> item -> totals
+    const usage = new Map<string, Map<string, Map<string, Material>>>();
+    const bucket = (runId: string, batchId: string | null, itemId: string, name: string, category: string, unit: string) => {
+      const byBatch = usage.get(runId) ?? new Map<string, Map<string, Material>>();
+      usage.set(runId, byBatch);
+      const byItem = byBatch.get(batchId ?? "") ?? new Map<string, Material>();
+      byBatch.set(batchId ?? "", byItem);
+      let m = byItem.get(itemId);
+      if (!m) {
+        m = { itemId, itemName: name, category, unit, consumedQty: 0, wastedQty: 0, rejectedQty: 0, sampleQty: 0, returnedQty: 0 };
+        byItem.set(itemId, m);
+      }
+      return m;
+    };
+    for (const c of consumptions) {
+      const m = bucket(c.preProductionId, c.productionBatchId, c.itemId, c.item.name, c.item.category, c.unit);
+      if (c.purpose === "PRODUCTION") m.consumedQty += c.quantity;
+      else if (c.purpose === "WASTE") m.wastedQty += c.quantity;
+      else if (c.purpose === "REJECTED") m.rejectedQty += c.quantity;
+      else if (c.purpose === "SAMPLE") m.sampleQty += c.quantity;
+    }
+    for (const r of returns) {
+      if (r.preProductionId) bucket(r.preProductionId, r.productionBatchId, r.itemId, r.item.name, r.item.category, r.unit).returnedQty += r.quantity;
+    }
+    // A batch's leftover (E) stays in the Plant's stock until it is sent back from Plant Stock.
+    for (const l of leftovers) bucket(l.productionBatch.preProductionId, l.productionBatchId, l.itemId, leftoverItems.get(l.itemId)?.name ?? "", leftoverItems.get(l.itemId)?.category ?? "RM", l.unit).returnedQty += l.quantity;
+    const materialsOf = (runId: string, batchId: string) => [...(usage.get(runId)?.get(batchId)?.values() ?? [])];
+
+    const rows = items.map((i) => {
+      const run = i.preProduction;
+      return {
+        itemId: i.id,
+        poId: i.purchaseOrder.id,
+        poNumber: i.purchaseOrder.poNumber,
+        customerName: i.purchaseOrder.customer.companyName,
+        productName: i.productName,
+        productCategory: i.productCategory,
+        productType: i.productType,
+        quantity: i.quantity,
+        releasedQty: Math.min(i.quantity, i.releasedQty ?? i.quantity),
+        unit: i.unit,
+        plant: run?.plant ?? i.plannedPlant,
+        sentAt: i.planSentToProductionAt,
+        run: run && { id: run.id, currentStageId: run.currentStageId, sampleQcStatus: run.sampleQcStatus, batchFlow: run.batchFlow, plannedQty: run.plannedQty, combinedQty: run.combinedQty },
+        batches: (run?.productionBatches ?? []).map((b) => ({ ...b, materials: materialsOf(run!.id, b.id) })),
+        unassigned: run ? materialsOf(run.id, "") : [],
+      };
+    });
+    // Plans whose run has not started come first (that is Production's next move), oldest first; the rest follow, newest first.
+    res.json([...rows.filter((r) => !r.run), ...rows.filter((r) => r.run).reverse()]);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Production's Indent Issue tile: every run waiting at Indent Issue (Stage 1 is done), with the plan's materials for the released
+// quantity. The indent is the plan's own list, so nothing is typed per material - Production fills the slip and dates and forwards
+// the run through PATCH /:id/stage. A Plant-limited Production login sees only its own Plant's runs.
+preProductionRouter.get("/indent-board", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
+    const runs = await prisma.preProduction.findMany({
+      where: { currentStageId: "INDENT_ISSUE", purchaseOrderItem: { cancelledAt: null, materialHeldAt: null }, ...(plantScope ? { plantId: { in: plantScope } } : {}) },
+      select: {
+        id: true,
+        purchaseOrderItemId: true,
+        grnNo: true,
+        grnDate: true,
+        prodIndentSlipSign: true,
+        productionPlanDate: true,
+        dispatchPlanDate: true,
+        unit: true,
+        plantId: true,
+        updatedAt: true,
+        purchaseOrderItem: {
+          select: { productName: true, productCategory: true, quantity: true, releasedQty: true, unit: true, plannedPlant: { select: { id: true, name: true } }, purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } } },
+        },
+      },
+      orderBy: { updatedAt: "asc" },
+    });
+    const rows = await Promise.all(
+      runs.map(async (r) => {
+        const coverage = await getMaterialCoverage(r.purchaseOrderItemId);
+        const item = r.purchaseOrderItem;
+        return {
+          id: r.id,
+          purchaseOrderItemId: r.purchaseOrderItemId,
+          poId: item.purchaseOrder.id,
+          poNumber: item.purchaseOrder.poNumber,
+          customerName: item.purchaseOrder.customer.companyName,
+          productName: item.productName,
+          productCategory: item.productCategory,
+          plantName: item.plannedPlant?.name ?? null,
+          orderQty: item.quantity,
+          releasedQty: coverage?.releasedQty ?? Math.min(item.quantity, item.releasedQty ?? item.quantity),
+          productUnit: item.unit,
+          grnNo: r.grnNo,
+          grnDate: r.grnDate,
+          prodIndentSlipSign: r.prodIndentSlipSign,
+          productionPlanDate: r.productionPlanDate,
+          dispatchPlanDate: r.dispatchPlanDate,
+          unit: r.unit,
+          waitingSince: r.updatedAt,
+          materials: coverage?.lines ?? [],
+          allCovered: coverage?.allCovered ?? true,
+        };
+      }),
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The Day Store's two tiles: runs waiting at Material Received & GRN (?stage=MATERIAL_RECEIVED) or at Dispensing (?stage=DISPENSING)
+// at the Plant of the logged-in Day Store. Each row carries what the form needs: the plan's materials with what the Day Store and the
+// Plant hold, and (Dispensing) what is still to be dispensed. The stage itself is moved through PATCH /:id/stage.
+preProductionRouter.get("/store-board", requireRole("STORE", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const stage = req.query.stage === "DISPENSING" ? "DISPENSING" : "MATERIAL_RECEIVED";
+    const scope = await getScopedDayStoreIds(req.user!.id, req.user!.roles);
+    const runs = await prisma.preProduction.findMany({
+      where: { currentStageId: stage, purchaseOrderItem: { cancelledAt: null, materialHeldAt: null }, ...(scope ? { plant: { dayStoreId: { in: scope } } } : {}) },
+      select: {
+        id: true,
+        purchaseOrderItemId: true,
+        grnNo: true,
+        grnDate: true,
+        materialReceivedRemarks: true,
+        prodIndentSlipSign: true,
+        rmDispensingDate: true,
+        pmIssuedDate: true,
+        rmDispensingRemarks: true,
+        pmDispensingRemarks: true,
+        updatedAt: true,
+        plant: { select: { id: true, name: true, dayStoreId: true } },
+        purchaseOrderItem: { select: { productName: true, productCategory: true, quantity: true, releasedQty: true, unit: true, purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } } } },
+      },
+      orderBy: { updatedAt: "asc" },
+    });
+    const rows = await Promise.all(
+      runs.map(async (r) => {
+        const item = r.purchaseOrderItem;
+        const coverage = await getMaterialCoverage(r.purchaseOrderItemId);
+        let required: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; consumedQty: number; covered: boolean; dayStoreQty: number; plantQty: number }[] = [];
+        if (stage === "DISPENSING") {
+          const status = await getDispensingRequirementStatus(r.id, r.purchaseOrderItemId);
+          const ids = status.map((s) => s.itemId);
+          const [shelf, plantHeld] = await Promise.all([
+            r.plant?.dayStoreId ? getOnHandByDayStoreAndItem(r.plant.dayStoreId, ids) : Promise.resolve(new Map<string, { onHand: number }>()),
+            r.plant ? getOnHandByPlantAndItem(r.plant.id, ids) : Promise.resolve(new Map<string, number>()),
+          ]);
+          required = status.map((s) => ({ ...s, dayStoreQty: Math.round((shelf.get(s.itemId)?.onHand ?? 0) * 1000) / 1000, plantQty: Math.round((plantHeld.get(s.itemId) ?? 0) * 1000) / 1000 }));
+        }
+        return {
+          id: r.id,
+          purchaseOrderItemId: r.purchaseOrderItemId,
+          poId: item.purchaseOrder.id,
+          poNumber: item.purchaseOrder.poNumber,
+          customerName: item.purchaseOrder.customer.companyName,
+          productName: item.productName,
+          productCategory: item.productCategory,
+          plantName: r.plant?.name ?? null,
+          orderQty: item.quantity,
+          releasedQty: coverage?.releasedQty ?? Math.min(item.quantity, item.releasedQty ?? item.quantity),
+          productUnit: item.unit,
+          grnNo: r.grnNo,
+          grnDate: r.grnDate,
+          materialReceivedRemarks: r.materialReceivedRemarks,
+          prodIndentSlipSign: r.prodIndentSlipSign,
+          rmDispensingDate: r.rmDispensingDate,
+          pmIssuedDate: r.pmIssuedDate,
+          rmDispensingRemarks: r.rmDispensingRemarks,
+          pmDispensingRemarks: r.pmDispensingRemarks,
+          waitingSince: r.updatedAt,
+          materials: coverage?.lines ?? [],
+          allCovered: coverage?.allCovered ?? true,
+          required,
+        };
+      }),
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Stage 1's panel: what the released quantity needs, what has reached the Plant, what is on its way, what is still short.
+preProductionRouter.get("/:id/material-coverage", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const run = await prisma.preProduction.findUnique({ where: { id: req.params.id }, select: { id: true, purchaseOrderItemId: true, plantId: true } });
+    if (!run) return res.status(404).json({ error: "Run not found" });
+    await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
+    res.json(await getMaterialCoverage(run.purchaseOrderItemId));
+  } catch (err) {
+    next(err);
+  }
+});
+
 preProductionRouter.get("/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const run = await prisma.preProduction.findUnique({ where: { id: req.params.id }, include: preProductionInclude });
     if (!run) return res.status(404).json({ error: "Pre-production run not found" });
+    await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
+    // A Day Store login opens only the runs at its own Plant (the Warehouse seat and every other role still read any run).
+    const storeScope = await getScopedDayStoreIds(req.user!.id, req.user!.roles);
+    if (storeScope) {
+      const plant = run.plantId ? await prisma.plant.findUnique({ where: { id: run.plantId }, select: { dayStoreId: true } }) : null;
+      if (!plant?.dayStoreId || !storeScope.includes(plant.dayStoreId)) return res.status(403).json({ error: "This run belongs to another Plant." });
+    }
     res.json(serializePreProduction(run));
   } catch (err) {
     next(err);
@@ -253,6 +707,7 @@ preProductionRouter.patch("/:id/checklist", async (req: AuthedRequest<{ id: stri
 
     const existing = await prisma.preProduction.findUnique({ where: { id: req.params.id } });
     if (!existing) return res.status(404).json({ error: "Pre-production run not found" });
+    await assertPlantAccess(req.user!.id, req.user!.roles, existing.plantId);
 
     const dispensingKeys = preProductionChecklistKeys();
     const bulkMfgKeys = combinedLotChecklistKeys();
@@ -263,6 +718,8 @@ preProductionRouter.patch("/:id/checklist", async (req: AuthedRequest<{ id: stri
       const needsStore = items.some((i) => dispensingKeys.has(i.itemKey));
       const needsProduction = items.some((i) => bulkMfgKeys.has(i.itemKey));
       if (needsStore && !req.user!.roles.includes("STORE")) return res.status(403).json({ error: "Only Store can fill in this column." });
+      // The Dispensing checklist is the run's own Day Store's.
+      if (needsStore) await assertRunDayStoreAccess(req.user!.id, req.user!.roles, existing.plantId);
       if (needsProduction && !req.user!.roles.includes("PRODUCTION")) return res.status(403).json({ error: "Only Production can fill in this column." });
     }
 
@@ -313,6 +770,9 @@ preProductionRouter.patch("/:id/stage", async (req: AuthedRequest<{ id: string }
   try {
     const run = await prisma.preProduction.findUnique({ where: { id: req.params.id } });
     if (!run) return res.status(404).json({ error: "Pre-production run not found" });
+    await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
+    // Material Received & GRN and Dispensing belong to the Day Store of the run's own Plant.
+    if (run.currentStageId === "MATERIAL_RECEIVED" || run.currentStageId === "DISPENSING") await assertRunDayStoreAccess(req.user!.id, req.user!.roles, run.plantId);
 
     const currentStage = run.currentStageId;
 

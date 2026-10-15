@@ -9,13 +9,13 @@ import {
   useImportPurchaseLog,
   useImportRequirements,
   useInventoryItems,
-  useInventoryVendors,
   useNotifyPurchase,
   usePreInventoryRequirements,
-  useSetRequirementPurchase,
 } from "../lib/hooks";
 import type { InventoryCategory, PreInventoryRequirement } from "../lib/types";
-import { requirementStatus, REQUIREMENT_STATUS_LABEL, type RequirementStatus } from "../lib/purchasePlanning";
+import { hasPiOnOrder, needsPi, requirementStatus, REQUIREMENT_STATUS_LABEL, type RequirementStatus } from "../lib/purchasePlanning";
+import { PiLogForm, PurchaseLineList } from "../components/PurchaseLines";
+import { PoProductPicker, type PickedProduct } from "../components/PoProductPicker";
 import { parsePurchaseLogWorkbook, parseRequirementWorkbook } from "../lib/inventoryImport";
 import { downloadPurchaseLogImportTemplate, downloadRequirementImportTemplate, exportRequirementsReport } from "../lib/inventoryExport";
 import { ApiError } from "../lib/api";
@@ -25,6 +25,7 @@ import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { ItemPicker } from "../components/ItemPicker";
 import { useToast } from "../components/Toast";
+import { ExpandTable } from "../components/ExpandTable";
 
 const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
 const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
@@ -38,15 +39,10 @@ const CATEGORY_LABEL: Record<InventoryCategory, string> = { RM: "Raw Material", 
 // A starting point, not a real numbering scheme — Purchase's own PO
 // series lives outside this system, so this only needs to save typing
 // on the common case, not be authoritative. Freely editable in the form.
-function suggestPoNumber(r: PreInventoryRequirement): string {
-  const datePart = new Date().toISOString().slice(2, 10).replace(/-/g, ""); // yymmdd
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `PO-${r.category}-${datePart}-${suffix}`;
-}
-
 const STATUS_STYLE: Record<RequirementStatus, string> = {
   COVERED: "bg-emerald-50 text-emerald-700 border-emerald-200",
   SHORTFALL: "bg-amber-50 text-amber-700 border-amber-200",
+  PARTIAL: "bg-orange-50 text-orange-700 border-orange-200",
   ORDERED: "bg-brand-50 text-brand-700 border-brand-200",
 };
 function StatusBadge({ status }: { status: RequirementStatus }) {
@@ -94,19 +90,33 @@ export function PreInventoryPage() {
     if (!requirements) return requirements;
     const q = search.trim().toLowerCase();
     return requirements.filter((r) => {
-      if (statusFilter && requirementStatus(r) !== statusFilter) return false;
-      if (q && !r.item.name.toLowerCase().includes(q) && !r.vendorName?.toLowerCase().includes(q) && !r.poNumber?.toLowerCase().includes(q)) return false;
+      if (statusFilter === "SHORTFALL" ? !needsPi(r) : statusFilter === "ORDERED" ? !hasPiOnOrder(r) : statusFilter && requirementStatus(r) !== statusFilter) return false;
+      if (q && !r.item.name.toLowerCase().includes(q) && !(r.sourcePo?.poNumber ?? "").toLowerCase().includes(q) && !r.purchaseLines.some((l) => l.vendorName.toLowerCase().includes(q) || l.piNumber.toLowerCase().includes(q))) return false;
       return true;
     });
   }, [requirements, search, statusFilter]);
+
+  // PO-wise (default) or the plain item list.
+  // One table, grouped PO-wise: ordered by customer PO, then product, so a PO's materials sit together
+  const ordered = useMemo(
+    () =>
+      [...(filtered ?? [])].sort(
+        (x, y) =>
+          (x.sourcePo?.poNumber ?? "~").localeCompare(y.sourcePo?.poNumber ?? "~", undefined, { numeric: true }) ||
+          (x.sourcePo?.productName ?? "").localeCompare(y.sourcePo?.productName ?? "") ||
+          x.category.localeCompare(y.category) ||
+          x.item.name.localeCompare(y.item.name),
+      ),
+    [filtered],
+  );
 
   const stats = useMemo(() => {
     const rows = requirements ?? [];
     return {
       total: rows.length,
       covered: rows.filter((r) => requirementStatus(r) === "COVERED").length,
-      shortfall: rows.filter((r) => requirementStatus(r) === "SHORTFALL").length,
-      ordered: rows.filter((r) => requirementStatus(r) === "ORDERED").length,
+      shortfall: rows.filter(needsPi).length,
+      ordered: rows.filter(hasPiOnOrder).length,
     };
   }, [requirements]);
 
@@ -152,7 +162,7 @@ export function PreInventoryPage() {
         console.error("[Pre-Inventory PO log import] No usable rows.", { fileName: file.name, fileSize: file.size, sheetNames, detectedHeaders, skipped });
         return toast.error(
           detectedHeaders.length
-            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Item + PO Number + Vendor Name + ETA together.`
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid Item + PI Number + Vendor Name + ETA together.`
             : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}) — is this the right file?`,
         );
       }
@@ -193,11 +203,11 @@ export function PreInventoryPage() {
           )}
           {canPurchase && (
             <>
-              <button className="btn-ghost" onClick={downloadPurchaseLogImportTemplate} title="Download a blank PO log template with the correct columns">
-                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download PO Sample
+              <button className="btn-ghost" onClick={downloadPurchaseLogImportTemplate} title="Download a blank PI log template with the correct columns">
+                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download PI Sample
               </button>
-              <button className="btn-ghost" disabled={importPurchaseLog.isPending} onClick={() => importPurchaseFileRef.current?.click()} title="Bulk-log POs against existing open requirements, matched by item + category">
-                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importPurchaseLog.isPending ? "Importing…" : "Import PO Log"}
+              <button className="btn-ghost" disabled={importPurchaseLog.isPending} onClick={() => importPurchaseFileRef.current?.click()} title="Bulk-log PIs against existing open requirements, matched by item + category">
+                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> {importPurchaseLog.isPending ? "Importing…" : "Import PI Log"}
               </button>
               <input ref={importPurchaseFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportPurchaseFile} />
             </>
@@ -216,7 +226,7 @@ export function PreInventoryPage() {
           <StatTile icon={Package} label="Shortfall" value={stats.shortfall} accent="amber" />
         </button>
         <button type="button" className="block text-left" onClick={() => setStatusFilter("ORDERED")}>
-          <StatTile icon={ShoppingCart} label="PO Logged" value={stats.ordered} accent="violet" />
+          <StatTile icon={ShoppingCart} label="PI Logged" value={stats.ordered} accent="violet" />
         </button>
       </div>
 
@@ -224,7 +234,7 @@ export function PreInventoryPage() {
 
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-[220px] flex-1">
-          <SearchBar value={search} onChange={setSearch} placeholder="Search item, vendor, or PO number…" />
+          <SearchBar value={search} onChange={setSearch} placeholder="Search item, vendor, customer PO or PI number…" />
         </div>
         <div className="w-48">
           <ItemPicker items={CATEGORY_FILTER_ITEMS} value={category} onChange={(v) => setCategory(v as InventoryCategory | "")} clearable={false} />
@@ -246,11 +256,28 @@ export function PreInventoryPage() {
       ) : !filtered?.length ? (
         <EmptyState icon={Warehouse} title="No matching requirements" hint="Try a different search." accent="slate" />
       ) : (
-        <div className="space-y-3">
-          {filtered.map((r) => (
-            <RequirementCard key={r.id} requirement={r} canPurchase={canPurchase} canNotifyPurchase={canNotifyPurchase} isOwner={r.requestedBy.id === user?.id} />
-          ))}
-        </div>
+        <ExpandTable
+          rows={ordered}
+          rowKey={(r) => r.id}
+          openLabel={canPurchase || canNotifyPurchase ? "Open / actions" : "Open"}
+          renderExpanded={(r) => <RequirementCard requirement={r} canPurchase={canPurchase} canNotifyPurchase={canNotifyPurchase} isOwner={r.requestedBy.id === user?.id} />}
+          columns={[
+            { header: "Customer PO", cell: (r) => r.sourcePo?.poNumber ?? "General (no PO)", className: "font-bold text-slate-700" },
+            { header: "Customer", cell: (r) => r.sourcePo?.customerName ?? "-" },
+            { header: "Product", cell: (r) => r.sourcePo?.productName ?? "-" },
+            { header: "Item", cell: (r) => r.item.name, className: "font-bold text-slate-800" },
+            { header: "Material", cell: (r) => CATEGORY_LABEL[r.category] },
+            { header: "Required", cell: (r) => `${r.requiredQty} ${r.unit}`, align: "right", className: "font-mono text-slate-700" },
+            { header: "In Stock", cell: (r) => r.currentStock, align: "right", className: "font-mono text-slate-600" },
+            { header: "Short", cell: (r) => (r.shortQty > 0 ? `${r.shortQty} ${r.unit}` : "-"), align: "right", className: "font-mono font-bold text-amber-700" },
+            { header: "On Order", cell: (r) => (r.onOrderQty > 0 ? r.onOrderQty : "-"), align: "right", className: "font-mono text-brand-700" },
+            { header: "Left To Log", cell: (r) => (r.shortQty > 0 && r.remainingToLog > 0 ? r.remainingToLog : "-"), align: "right", className: "font-mono text-amber-700" },
+            { header: "Status", cell: (r) => <StatusBadge status={requirementStatus(r)} /> },
+            { header: "PI / Vendor", cell: (r) => (r.purchaseLines.length ? r.purchaseLines.map((l) => `${l.piNumber} (${l.vendorName})`).join(", ") : [r.poNumber, r.vendorName].filter(Boolean).join(" · ") || "-"), className: "max-w-[16rem] truncate" },
+            { header: "ETA", cell: (r) => (r.purchaseLines.length ? r.purchaseLines.map((l) => new Date(l.eta).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })).join(", ") : r.eta ? new Date(r.eta).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-") },
+            { header: "Requested By", cell: (r) => `${r.requestedBy.fullName} · ${new Date(r.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` },
+          ]}
+        />
       )}
     </div>
   );
@@ -272,6 +299,7 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
   const [requiredQty, setRequiredQty] = useState("");
   const [size, setSize] = useState("");
   const [note, setNote] = useState("");
+  const [forProduct, setForProduct] = useState<PickedProduct | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -306,6 +334,7 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
         requiredQty: Number(requiredQty),
         size: size.trim() || undefined,
         note: note.trim() || undefined,
+        purchaseOrderItemId: forProduct?.itemId,
       });
       toast.success(created.shortQty > 0 ? `Added — ${created.shortQty} ${unit} short. Send it to Purchase when you're ready.` : "Added — already fully covered by current stock.");
       onDone();
@@ -359,6 +388,11 @@ function NewRequirementForm({ onDone }: { onDone: () => void }) {
           <label className="label">Size (optional)</label>
           <input className="field" placeholder="e.g. 25 Kg bag" value={size} onChange={(e) => setSize(e.target.value)} />
         </div>
+        <div className="sm:col-span-2 lg:col-span-3">
+          <label className="label">For PO / Product (optional)</label>
+          <PoProductPicker value={forProduct} onChange={setForProduct} />
+          <p className="mt-1 text-[11px] text-slate-400">Pick the customer PO product this material is for, so it shows under that PO here and in Incoming Material.</p>
+        </div>
         <div className="sm:col-span-2">
           <label className="label">Note (optional)</label>
           <input className="field" placeholder="e.g. For next month's production run" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -383,17 +417,18 @@ function RequirementCard({
   canPurchase,
   canNotifyPurchase,
   isOwner,
+  nested = false,
 }: {
   requirement: PreInventoryRequirement;
   canPurchase: boolean;
   canNotifyPurchase: boolean;
   isOwner: boolean;
+  /** Inside a PO > product group: a lighter box, and no "Raw / Packaging Material" prefix (the section says it). */
+  nested?: boolean;
 }) {
   const toast = useToast();
-  const setPurchase = useSetRequirementPurchase();
   const notifyPurchase = useNotifyPurchase();
   const deleteRequirement = useDeleteRequirement();
-  const { data: vendors } = useInventoryVendors({ enabled: canPurchase });
 
   async function handleNotifyPurchase() {
     try {
@@ -405,26 +440,8 @@ function RequirementCard({
   }
 
   const [showPurchase, setShowPurchase] = useState(false);
-  const [poNumber, setPoNumber] = useState("");
-  const [vendorName, setVendorName] = useState("");
-  const [eta, setEta] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   const status = requirementStatus(requirement);
-
-  const isEditing = !!requirement.poNumber;
-
-  async function handleSetPurchase() {
-    setError(null);
-    if (!poNumber.trim() || !vendorName.trim() || !eta) return setError("PO Number, Vendor Name, and ETA are all required.");
-    try {
-      await setPurchase.mutateAsync({ id: requirement.id, poNumber: poNumber.trim(), vendorName: vendorName.trim(), eta });
-      toast.success(isEditing ? "PO details updated — PPIC will see the new ETA." : "PO logged — Finance has been notified.");
-      setShowPurchase(false);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the PO");
-    }
-  }
 
   async function handleDelete() {
     if (!window.confirm(`Remove this requirement for ${requirement.requiredQty} ${requirement.unit} ${requirement.item.name}? This can't be undone.`)) return;
@@ -439,7 +456,7 @@ function RequirementCard({
   const canDelete = isOwner && !requirement.purchaseAt;
 
   return (
-    <div className="card space-y-3 p-4 sm:p-5">
+    <div className={nested ? "space-y-3 rounded-xl border border-slate-200/80 bg-white p-3.5" : "card space-y-3 p-4 sm:p-5"}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -447,7 +464,7 @@ function RequirementCard({
             <StatusBadge status={status} />
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            {CATEGORY_LABEL[requirement.category]} · <span className="font-mono font-bold text-slate-700">{requirement.requiredQty}</span> {requirement.unit} required ·{" "}
+            {!nested && <>{CATEGORY_LABEL[requirement.category]} · </>}<span className="font-mono font-bold text-slate-700">{requirement.requiredQty}</span> {requirement.unit} required ·{" "}
             <span className="font-mono font-bold text-slate-700">{requirement.currentStock}</span> in stock
             {requirement.shortQty > 0 && (
               <>
@@ -456,30 +473,46 @@ function RequirementCard({
                 <span className="font-mono font-bold text-amber-600">
                   {requirement.shortQty} {requirement.unit} short
                 </span>
+                {requirement.onOrderQty > 0 && (
+                  <>
+                    {" "}
+                    · <span className="font-mono font-bold text-brand-700">{requirement.onOrderQty}</span> on order
+                    {requirement.remainingToLog > 0 && (
+                      <>
+                        {" "}
+                        · <span className="font-mono font-bold text-amber-600">{requirement.remainingToLog}</span> {requirement.unit} left to log
+                      </>
+                    )}
+                  </>
+                )}
               </>
             )}
             {requirement.size && <> · {requirement.size}</>} · {new Date(requirement.date).toLocaleDateString()}
           </p>
-          <p className="mt-0.5 text-[11px] text-slate-400">
+          {!nested && requirement.sourcePo && (
+            <p className="mt-0.5 text-tiny font-semibold text-slate-500">
+              For customer PO <span className="text-slate-700">{requirement.sourcePo.poNumber ?? "—"}</span> · {requirement.sourcePo.productName}
+            </p>
+          )}
+          {requirement.requestSource && (
+            <p className="mt-0.5 text-tiny font-semibold text-violet-600">
+              For {requirement.requestSource.label} material request — Warehouse was short{requirement.purchaseNotifiedAt ? "" : " · send it to Purchase when you are ready"}
+            </p>
+          )}
+          <p className="mt-0.5 text-tiny text-slate-400">
             Requested by {requirement.requestedBy.fullName}
             {requirement.purchaseBy && <> · ordered by {requirement.purchaseBy.fullName}</>}
           </p>
           {requirement.note && <p className="mt-1.5 text-xs text-slate-600">"{requirement.note}"</p>}
-          {requirement.poNumber && (
-            <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs font-bold text-brand-700">
-              <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.5} /> {requirement.poNumber} · {requirement.vendorName} · ETA{" "}
-              {requirement.eta && new Date(requirement.eta).toLocaleDateString()}
-              {requirement.purchaseCorrectedAt && (
-                <span className="pill border-blue-200 bg-blue-50 text-blue-700" title={`Corrected ${new Date(requirement.purchaseCorrectedAt).toLocaleString()}`}>
-                  Updated
-                </span>
-              )}
-            </p>
+          {requirement.purchaseLines.length > 0 && (
+            <div className="mt-2.5">
+              <PurchaseLineList requirement={requirement} canPurchase={canPurchase} />
+            </div>
           )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {canNotifyPurchase && status === "SHORTFALL" && (
+          {canNotifyPurchase && (status === "SHORTFALL" || status === "PARTIAL") && (
             <button
               type="button"
               className="btn-ghost btn-sm"
@@ -491,31 +524,9 @@ function RequirementCard({
               {notifyPurchase.isPending ? "Sending…" : requirement.purchaseNotifiedAt ? "Notified" : "Send to Purchase"}
             </button>
           )}
-          {canPurchase && status === "SHORTFALL" && !showPurchase && (
-            <button
-              type="button"
-              className="btn-primary btn-sm"
-              onClick={() => {
-                setPoNumber(suggestPoNumber(requirement));
-                setShowPurchase(true);
-              }}
-            >
-              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Log PO
-            </button>
-          )}
-          {canPurchase && isEditing && !showPurchase && (
-            <button
-              type="button"
-              className="btn-ghost btn-sm"
-              title="Correct the PO Number, Vendor or ETA — PPIC sees the updated ETA immediately"
-              onClick={() => {
-                setPoNumber(requirement.poNumber ?? "");
-                setVendorName(requirement.vendorName ?? "");
-                setEta(requirement.eta ? requirement.eta.slice(0, 10) : "");
-                setShowPurchase(true);
-              }}
-            >
-              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> Edit PO
+          {canPurchase && needsPi(requirement) && !showPurchase && (
+            <button type="button" className="btn-primary btn-sm" onClick={() => setShowPurchase(true)}>
+              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> {requirement.purchaseLines.length > 0 ? "Log another PI" : "Log PI"}
             </button>
           )}
           {canDelete && (
@@ -526,44 +537,7 @@ function RequirementCard({
         </div>
       </div>
 
-      {showPurchase && (
-        <div className="animate-fade-in grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-3">
-          <div>
-            <label className="label">PO Number</label>
-            <input className="field font-mono" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
-            {!isEditing && <p className="mt-1 text-[11px] text-slate-400">Suggested — overwrite with your own PO number if you already have one.</p>}
-          </div>
-          <div>
-            <label className="label">Vendor Name</label>
-            <input className="field" list={`po-vendor-options-${requirement.id}`} placeholder="Pick a known vendor or type a new one" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
-            <datalist id={`po-vendor-options-${requirement.id}`}>
-              {vendors?.vendors.map((v) => (
-                <option key={v} value={v} />
-              ))}
-            </datalist>
-          </div>
-          <div>
-            <label className="label">ETA</label>
-            <input type="date" className="field" value={eta} onChange={(e) => setEta(e.target.value)} />
-          </div>
-          {error && <p className="sm:col-span-3 text-xs font-bold text-rose-600">{error}</p>}
-          <div className="flex justify-end gap-2 sm:col-span-3">
-            <button
-              type="button"
-              className="btn-ghost btn-sm"
-              onClick={() => {
-                setShowPurchase(false);
-                setError(null);
-              }}
-            >
-              Cancel
-            </button>
-            <button type="button" className="btn-primary btn-sm" disabled={setPurchase.isPending} onClick={handleSetPurchase}>
-              {setPurchase.isPending ? "Saving…" : isEditing ? "Update PO" : "Save PO"}
-            </button>
-          </div>
-        </div>
-      )}
+      {showPurchase && <PiLogForm requirement={requirement} onDone={() => setShowPurchase(false)} />}
     </div>
   );
 }

@@ -17,6 +17,8 @@ import { StatTile } from "../components/StatTile";
 import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import { exportVendorPurchaseOrdersReport } from "../lib/vendorPurchaseOrdersReport";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
 
 const fmtCurrency = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 
@@ -49,6 +51,8 @@ export function VendorPurchaseOrdersPage() {
 
   const totalItems = (orders ?? []).reduce((sum, po) => sum + po.items.length, 0);
   const totalValue = (orders ?? []).reduce((sum, po) => sum + po.totalAmount, 0);
+
+  const pg = useClientPaging(filtered);
 
   return (
     <div className="space-y-6">
@@ -112,36 +116,37 @@ export function VendorPurchaseOrdersPage() {
               <thead>
                 <tr>
                   <th>PO Number</th>
+                  <th>Status</th>
                   <th>Vendor</th>
                   <th className="text-center">Line Items</th>
                   <th>Order Date</th>
                   <th>ETA</th>
                   <th className="text-right">Amount</th>
-                  <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((po) => (
+                {pg.rows.map((po) => (
                   <tr key={po.id}>
                     <td className="font-bold">
                       <Link to={`/vendor-purchase-orders/${po.id}`} className="text-brand-600 hover:underline">
                         {po.poNumber}
                       </Link>
                     </td>
-                    <td className="text-slate-600">{po.vendor.name}</td>
-                    <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
-                    <td className="text-slate-500">{new Date(po.orderDate).toLocaleDateString()}</td>
-                    <td className="text-slate-500">{po.eta ? new Date(po.eta).toLocaleDateString() : "—"}</td>
-                    <td className="text-right font-mono font-bold text-slate-700">{fmtCurrency(po.totalAmount)}</td>
                     <td>
                       <span className={`pill ${po.status === "ORDERED" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
                         {po.status === "ORDERED" ? "Ordered" : "Draft"}
                       </span>
                     </td>
+                    <td className="text-slate-600">{po.vendor.name}</td>
+                    <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
+                    <td className="text-slate-500">{new Date(po.orderDate).toLocaleDateString()}</td>
+                    <td className="text-slate-500">{po.eta ? new Date(po.eta).toLocaleDateString() : "—"}</td>
+                    <td className="text-right font-mono font-bold text-slate-700">{fmtCurrency(po.totalAmount)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            <ClientPager pg={pg} />
           </div>
         </div>
       )}

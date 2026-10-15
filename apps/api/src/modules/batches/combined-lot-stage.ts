@@ -20,7 +20,9 @@ export type CombinedLotStageId =
   | "FG_STORE"
   | "FG_QC_RELEASE"
   | "BILLING_EWAY_BILL"
-  | "DISPATCH_PLAN";
+  | "DISPATCH_PLAN"
+  // ProductionBatch only: finished goods approved by QA, with the Day Store, ready to hand over to Dispatch.
+  | "FG_HANDOVER";
 
 export const COMBINED_LOT_STAGE_ORDER: CombinedLotStageId[] = [
   "IPQC",
@@ -47,6 +49,7 @@ export const COMBINED_LOT_STAGE_ROLE: Record<CombinedLotStageId, RoleName[]> = {
   FG_QC_RELEASE: ["QA_QC"],
   BILLING_EWAY_BILL: ["ACCOUNTS"],
   DISPATCH_PLAN: ["DISPATCH"],
+  FG_HANDOVER: ["STORE"],
 };
 
 export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
@@ -59,6 +62,7 @@ export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
   FG_QC_RELEASE: "Finished Goods QC & Release",
   BILLING_EWAY_BILL: "Billing & E-Way Bill",
   DISPATCH_PLAN: "Dispatch Plan",
+  FG_HANDOVER: "Hand over to Dispatch",
 };
 
 export function getForwardTarget(stage: CombinedLotStageId): CombinedLotStageId {
@@ -86,4 +90,22 @@ export const ALL_COMBINED_LOT_STAGE_IDS: CombinedLotStageId[] = COMBINED_LOT_STA
 export function actorCanActOnStage(stage: CombinedLotStageId, actorRoles: RoleName[]): boolean {
   if (actorRoles.includes("ADMIN" as RoleName)) return true;
   return COMBINED_LOT_STAGE_ROLE[stage].some((r) => actorRoles.includes(r));
+}
+
+// --- ProductionBatch's own order. A batch no longer walks Billing and Dispatch Plan as stages: after QA approves the finished goods
+// (held by the Day Store of its Plant) the Day Store hands them to Dispatch, and what Dispatch does next is a list of shipments (to the
+// customer or the Warehouse, see FgShipment). Batches that were already past FG QC & Release (Billing, Dispatch Plan) finish the old way. ---
+export const PRODUCTION_BATCH_STAGE_ORDER: CombinedLotStageId[] = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING", "QA_GATE_PACKAGING", "FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"];
+
+export function getBatchForwardTarget(stage: CombinedLotStageId): CombinedLotStageId {
+  if (stage === "BILLING_EWAY_BILL" || stage === "DISPATCH_PLAN") return getForwardTarget(stage); // older batches finish the old way
+  if (stage === "FG_HANDOVER") return stage; // the end of the pipeline: forward means "handed over"
+  const idx = PRODUCTION_BATCH_STAGE_ORDER.indexOf(stage);
+  return PRODUCTION_BATCH_STAGE_ORDER[idx + 1] ?? stage;
+}
+
+export function getBatchRejectTarget(stage: CombinedLotStageId): CombinedLotStageId | null {
+  if (stage === "BILLING_EWAY_BILL" || stage === "DISPATCH_PLAN") return getRejectTarget(stage);
+  const idx = PRODUCTION_BATCH_STAGE_ORDER.indexOf(stage);
+  return idx > 0 ? PRODUCTION_BATCH_STAGE_ORDER[idx - 1]! : null;
 }

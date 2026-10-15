@@ -10,7 +10,7 @@ async function createApprovedPoItem(bdToken: string, poNumber: string) {
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Transit Product", quantity: 100, unit: "Kg" }] });
+    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Transit Product", productCategory: "Powder", quantity: 100, unit: "Kg" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }

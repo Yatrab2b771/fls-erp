@@ -11,7 +11,9 @@ const ACCENT_CLASSES: Record<string, { bg: string; text: string; bar: string }> 
   slate: { bg: "bg-slate-500/10", text: "text-slate-500", bar: "from-slate-300 to-slate-400" },
 };
 
-export function StatTile({ icon: Icon, label, value, accent = "brand" }: { icon: LucideIcon; label: string; value: string | number; accent?: keyof typeof ACCENT_CLASSES }) {
+export type StatAccent = keyof typeof ACCENT_CLASSES;
+
+export function StatTile({ icon: Icon, label, value, accent = "brand" }: { icon: LucideIcon; label: string; value: string | number; accent?: StatAccent }) {
   const classes = ACCENT_CLASSES[accent] ?? ACCENT_CLASSES.brand!;
   return (
     <div className="stat-tile relative overflow-hidden">
@@ -24,8 +26,8 @@ export function StatTile({ icon: Icon, label, value, accent = "brand" }: { icon:
             short status line, not a count) gets a smaller size and
             truncates instead of wrapping — a long string at text-2xl
             would otherwise wrap across 2-3 lines and blow out the tile. */}
-        <p className={`truncate font-black leading-tight tracking-tight text-slate-900 ${typeof value === "number" ? "text-2xl leading-none" : "text-sm sm:text-base"}`}>{value}</p>
-        <p className="mt-1 truncate text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{label}</p>
+        <p className={`truncate font-black leading-tight tracking-tight text-slate-900 ${typeof value === "number" || /^\d+\s*\/\s*\d+$/.test(value) ? "text-2xl leading-none" : "text-sm sm:text-base"}`}>{value}</p>
+        <p className="mt-1 truncate text-micro font-bold uppercase tracking-wider text-slate-400">{label}</p>
       </div>
     </div>
   );

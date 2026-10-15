@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
-import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
+import { parsePagination, parseSearch, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
 import {
@@ -23,9 +23,22 @@ vendorsRouter.use(requireAuth);
 vendorsRouter.get("/", requireRole("PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"), async (req, res, next) => {
   try {
     const pagination = parsePagination(req);
+    const search = parseSearch(req);
+    const where = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" as const } },
+            { code: { contains: search, mode: "insensitive" as const } },
+            { contactPerson: { contains: search, mode: "insensitive" as const } },
+            { contactNo: { contains: search, mode: "insensitive" as const } },
+            { gstNo: { contains: search, mode: "insensitive" as const } },
+            { email: { contains: search, mode: "insensitive" as const } },
+          ],
+        }
+      : undefined;
     const [total, vendors] = await Promise.all([
-      prisma.vendor.count(),
-      prisma.vendor.findMany({ orderBy: { name: "asc" }, skip: pagination.skip, take: pagination.take }),
+      prisma.vendor.count({ where }),
+      prisma.vendor.findMany({ where, orderBy: { name: "asc" }, skip: pagination.skip, take: pagination.take }),
     ]);
     setPaginationHeaders(res, total, pagination);
     res.json(vendors);

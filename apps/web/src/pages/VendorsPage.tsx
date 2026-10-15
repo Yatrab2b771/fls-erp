@@ -1,7 +1,10 @@
 import { useRef, useState, type ChangeEvent } from "react";
 import { Download, Pencil, Truck, Upload, UserPlus } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCreateVendor, useImportVendors, useUpdateVendor, useVendors } from "../lib/hooks";
+import { useCreateVendor, useImportVendors, useUpdateVendor } from "../lib/hooks";
+import { usePagedList } from "../lib/usePagedList";
+import { apiAll } from "../lib/api";
+import { Pagination } from "../components/Pagination";
 import { downloadVendorImportTemplate, exportVendorsReport, parseVendorWorkbook } from "../lib/vendorsImport";
 import { FieldGrid, type FieldDef } from "../components/FieldGrid";
 import { SearchBar } from "../components/SearchBar";
@@ -45,21 +48,19 @@ export function VendorsPage() {
   // bypasses server-side regardless); the directory read itself is
   // broad, same list Pre-Inventory's GET already uses.
   const canWrite = hasRole("PURCHASE");
-  const { data: vendors, isLoading } = useVendors();
+  // Server-side paginated + searched; the whole directory is never loaded here.
+  const paged = usePagedList<Vendor>({ key: ["vendors"], path: "/api/vendors" });
+  const isLoading = paged.isLoading;
   const createVendor = useCreateVendor();
   const updateVendor = useUpdateVendor();
   const importVendors = useImportVendors();
   const toast = useToast();
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  const [search, setSearch] = useState("");
   const [mode, setMode] = useState<"none" | "create" | string>("none"); // any other string = editing that vendor's id
   const [draft, setDraft] = useState<Record<string, string>>({});
 
-  const q = search.trim().toLowerCase();
-  const filtered = vendors?.filter(
-    (v) => !q || v.name.toLowerCase().includes(q) || (v.code ?? "").toLowerCase().includes(q) || (v.contactPerson ?? "").toLowerCase().includes(q) || (v.gstNo ?? "").toLowerCase().includes(q),
-  );
+  const filtered = paged.rows;
 
   function startCreate() {
     setDraft({});
@@ -162,15 +163,17 @@ export function VendorsPage() {
 
       <div className="flex flex-wrap items-center gap-3">
         <div className="w-full sm:w-72">
-          <SearchBar value={search} onChange={setSearch} placeholder="Search by name, code, contact, GST…" />
+          <SearchBar value={paged.search} onChange={paged.setSearch} placeholder="Search by name, code, contact, GST…" />
         </div>
         <button
           className="btn-ghost"
-          disabled={!filtered?.length}
-          onClick={() => {
-            if (!filtered?.length) return toast.error("Nothing to export — no vendors match.");
-            exportVendorsReport(filtered);
-            toast.success("Report downloaded.");
+          disabled={!paged.total}
+          onClick={async () => {
+            if (!paged.total) return toast.error("Nothing to export — no vendors match.");
+            // The whole matching list, not just the page on screen.
+            const all = await apiAll<Vendor>(`/api/vendors${paged.search.trim() ? `?search=${encodeURIComponent(paged.search.trim())}` : ""}`);
+            exportVendorsReport(all);
+            toast.success(`Report downloaded — ${all.length} vendor(s).`);
           }}
           title="Download the vendor directory as an Excel report"
         >
@@ -216,8 +219,13 @@ export function VendorsPage() {
 
       {isLoading ? (
         <SkeletonRows rows={5} cols={5} />
-      ) : !filtered?.length ? (
-        <EmptyState icon={Truck} title="No vendors yet" hint="Add your first vendor, or import a list from Excel." accent="brand" />
+      ) : !filtered.length ? (
+        <EmptyState
+          icon={Truck}
+          title={paged.isFiltered ? "No matching vendors" : "No vendors yet"}
+          hint={paged.isFiltered ? "Try a different search." : "Add your first vendor, or import a list from Excel."}
+          accent="brand"
+        />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -254,6 +262,7 @@ export function VendorsPage() {
               </tbody>
             </table>
           </div>
+          <Pagination page={paged.page} pageSize={paged.pageSize} total={paged.total} onPage={paged.setPage} onPageSize={paged.setPageSize} isFetching={paged.isFetching} />
         </div>
       )}
     </div>

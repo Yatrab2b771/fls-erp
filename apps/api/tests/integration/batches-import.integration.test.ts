@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, ensurePlant } from "./helpers";
 
 const app = createApp();
 
-async function createApprovedPo(bdToken: string, poNumber: string, items: { productName: string; quantity: number; unit: string }[]) {
+async function createApprovedPo(bdToken: string, poNumber: string, items: { productName: string; productCategory?: string; quantity: number; unit: string }[]) {
   const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: `Customer for ${poNumber}` });
-  const po = await request(app).post("/api/purchase-orders").set(authHeader(bdToken)).send({ customerId: customer.body.id, poNumber, items });
+  const po = await request(app).post("/api/purchase-orders").set(authHeader(bdToken)).send({ customerId: customer.body.id, poNumber, items: items.map((i) => ({ productCategory: "Powder", ...i })) });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body as { id: string; items: { id: string; productName: string }[] };
 }
@@ -25,8 +25,8 @@ describe("POST /api/pre-productions/import", () => {
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: storeToken } = await createUser(["STORE"]);
 
-    const poA = await createApprovedPo(bdToken, "PO-IMPORT-A", [{ productName: "Import Product A", quantity: 50, unit: "KG" }]);
-    const poB = await createApprovedPo(bdToken, "PO-IMPORT-B", [{ productName: "Import Product B", quantity: 50, unit: "KG" }]);
+    const poA = await createApprovedPo(bdToken, "PO-IMPORT-A", [{ productName: "Import Product A", productCategory: "Powder", quantity: 50, unit: "KG" }]);
+    const poB = await createApprovedPo(bdToken, "PO-IMPORT-B", [{ productName: "Import Product B", productCategory: "Powder", quantity: 50, unit: "KG" }]);
     const runA = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poA.items[0]!.id })).body;
     const runB = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poB.items[0]!.id })).body;
     expect(runA.currentStageId).toBe("MATERIAL_RECEIVED");
@@ -58,7 +58,7 @@ describe("POST /api/pre-productions/import", () => {
 
   it("reports unmatched rows (bad PO Number / product name, or a line item production hasn't started on yet) without touching real runs", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    await createApprovedPo(bdToken, "PO-IMPORT-NOSTART", [{ productName: "Not Started Product", quantity: 100, unit: "KG" }]);
+    await createApprovedPo(bdToken, "PO-IMPORT-NOSTART", [{ productName: "Not Started Product", productCategory: "Powder", quantity: 100, unit: "KG" }]);
     const { token: storeToken } = await createUser(["STORE"]);
 
     const bulk = await request(app)
@@ -88,8 +88,8 @@ describe("POST /api/pre-productions/import", () => {
     // One run still at MATERIAL_RECEIVED (Store-owned), one already
     // walked to INDENT_ISSUE (PPIC-owned) — a Store-only caller can
     // forward the first but not the second.
-    const poA = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-A", [{ productName: "RBAC Product A", quantity: 10, unit: "KG" }]);
-    const poB = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-B", [{ productName: "RBAC Product B", quantity: 10, unit: "KG" }]);
+    const poA = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-A", [{ productName: "RBAC Product A", productCategory: "Powder", quantity: 10, unit: "KG" }]);
+    const poB = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-B", [{ productName: "RBAC Product B", productCategory: "Powder", quantity: 10, unit: "KG" }]);
     const runA = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poA.items[0]!.id })).body;
     const runB = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poB.items[0]!.id })).body;
     await request(app).patch(`/api/pre-productions/${runB.id}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // now at INDENT_ISSUE
@@ -128,7 +128,8 @@ describe("POST /api/pre-productions/import", () => {
       .set(authHeader(rndToken))
       .send({ recipes: [{ name: "Import Gate Product", ingredients: [{ name: "Import Gate Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
 
-    const po = await createApprovedPo(bdToken, "PO-IMPORT-GATE", [{ productName: "Import Gate Product", quantity: 10, unit: "Kg" }]);
+    const po = await createApprovedPo(bdToken, "PO-IMPORT-GATE", [{ productName: "Import Gate Product", productCategory: "Powder", quantity: 10, unit: "Kg" }]);
+    await ensurePlant(po.items[0]!.id);
     const rmPlan = await request(app).post("/api/rm-costing/plans").set(authHeader(bdToken)).send({ name: "Import Gate — RM", purchaseOrderItemId: po.items[0]!.id });
     expect(rmPlan.body.status).toBe("CALCULATED");
 

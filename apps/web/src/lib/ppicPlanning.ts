@@ -6,16 +6,19 @@ import { COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ORDER } from "./combinedLo
 // AND its drill-down list (PpicPlanningDetailPage) — both read through
 // this file instead of each recomputing the same filter, so a tile's
 // number and its "click to see the list" page can never drift apart.
-export type PpicPlanningMetric = "total-pos" | "total-products" | "pending-pos" | "have-bom" | "have-rm-bom" | "missing-both" | "plan-sent" | "plan-not-sent";
+export type PpicPlanningMetric = "total-pos" | "not-planned-pos" | "total-products" | "pending-pos" | "have-bom" | "have-rm-bom" | "missing-both" | "plan-sent" | "plan-not-sent" | "on-hold" | "cancelled";
 
 export const PPIC_PLANNING_METRIC_LABEL: Record<PpicPlanningMetric, string> = {
   "total-pos": "Total Purchase Orders",
+  "not-planned-pos": "Not Planned",
   "total-products": "Total Products",
   "pending-pos": "Pending Purchase Orders",
   "have-bom": "Products with Packaging BOM",
   "have-rm-bom": "Products with RM BOM",
   "missing-both": "Products Missing Packaging BOM & RM BOM",
-  "plan-sent": "Plan Sent to Production",
+  "plan-sent": "In Production",
+  "on-hold": "Hold",
+  cancelled: "Cancelled",
   "plan-not-sent": "Not Sent to Production",
 };
 
@@ -23,6 +26,27 @@ export const PPIC_PLANNING_METRIC_LABEL: Record<PpicPlanningMetric, string> = {
 // REJECTED, not yet completed.
 export function getPendingPos(orders: PurchaseOrder[]): PurchaseOrder[] {
   return orders.filter((po) => po.status !== "REJECTED" && !po.completion.isCompleted);
+}
+
+// A product is fully planned once BOTH its RM plan and its Packaging (BOM)
+// plan are calculated — the same bar Material Planning uses to list it.
+export function isFullyPlanned(item: PurchaseOrderItem): boolean {
+  return hasCalculatedBom(item) && hasCalculatedRm(item);
+}
+
+// PPIC's "Not Planned" inbox, product by product: every product of a
+// BD-approved PO that isn't fully planned yet — nothing planned, or only one
+// of RM / Packaging BOM done (a Draft plan doesn't count). Once both are
+// calculated the product moves on to Material Planning. The row's Status
+// shows which of the two is done.
+export function getNotPlannedItemRows(orders: PurchaseOrder[]): PpicPlanningItemRow[] {
+  return toItemRows(orders.filter((po) => po.status === "APPROVED")).filter(({ item }) => !isFullyPlanned(item) && !item.materialHeldAt && !item.planSentToProductionAt); // a product on Hold is listed only under On Hold
+}
+
+// The dashboard tile counts POs: an approved PO with at least one product
+// that isn't fully planned yet.
+export function getNotPlannedPos(orders: PurchaseOrder[]): PurchaseOrder[] {
+  return orders.filter((po) => po.status === "APPROVED" && po.items.some((item) => !item.cancelledAt && !item.materialHeldAt && !item.planSentToProductionAt && !isFullyPlanned(item)));
 }
 
 // Same aging formula the old Pending PO Aging report used — from
@@ -73,6 +97,8 @@ export function hasCalculatedRm(item: PurchaseOrderItem): boolean {
 export interface PpicPlanningItemRow {
   po: PurchaseOrder;
   item: PurchaseOrderItem;
+  // When the product entered the list it is shown in (server-side) - its Aging.
+  sinceAt?: string | null;
 }
 
 export type PpicPlanningResult = { kind: "po"; rows: PurchaseOrder[] } | { kind: "item"; rows: PpicPlanningItemRow[] };
@@ -80,11 +106,32 @@ export type PpicPlanningResult = { kind: "po"; rows: PurchaseOrder[] } | { kind:
 // Shared with bdPlanning.ts — both modules read the same PurchaseOrder[]
 // data and flatten it to (po, item) pairs the same way.
 export function toItemRows(orders: PurchaseOrder[]): PpicPlanningItemRow[] {
-  return orders.flatMap((po) => po.items.map((item) => ({ po, item })));
+  // Cancelled products are dead - they never appear in any planning list.
+  return orders.flatMap((po) => po.items.filter((item) => !item.cancelledAt).map((item) => ({ po, item })));
 }
+
+// Which field the search box looks in — "all" is the original behaviour
+// (PO Number, Customer, and Product where the tile lists products).
+export type PpicSearchField = "all" | "po" | "customer" | "product" | "category";
+
+export const PPIC_SEARCH_FIELD_LABEL: Record<PpicSearchField, string> = {
+  all: "All",
+  po: "PO Number",
+  customer: "Customer",
+  product: "Product",
+  category: "Category",
+};
+
+// Tiles that show the "Search by" dropdown next to the search box. Rolled
+// out tile by tile — to give another tile the same dropdown, just add its
+// metric here; the filter below and the page already handle it.
+export const PPIC_SEARCH_FIELD_METRICS: ReadonlySet<PpicPlanningMetric> = new Set<PpicPlanningMetric>(["not-planned-pos", "plan-sent", "on-hold", "cancelled"]);
 
 export interface PpicPlanningFilters {
   search?: string;
+  // Defaults to "all". Choosing "customer" also groups the list by
+  // customer name (all of one customer's POs together, A→Z).
+  searchField?: PpicSearchField;
   // Both inclusive, matched against the PO's own orderDate (falling back
   // to createdAt, same as getPoAgingDays) — a calendar-date pick, not a
   // timestamp, so a PO placed at any time on dateTo still matches it.
@@ -109,27 +156,50 @@ function dateMatches(po: PurchaseOrder, filters: PpicPlanningFilters): boolean {
 // untouched (same reference, no unnecessary re-render).
 export function filterPpicPlanningResult(result: PpicPlanningResult, filters: PpicPlanningFilters): PpicPlanningResult {
   const q = filters.search?.trim().toLowerCase();
-  if (!q && !filters.dateFrom && !filters.dateTo) return result;
+  const field = filters.searchField ?? "all";
+  const groupByCustomer = field === "customer";
+  if (!q && !filters.dateFrom && !filters.dateTo && !groupByCustomer) return result;
+
+  const poMatches = (po: PurchaseOrder) => (po.poNumber ?? "").toLowerCase().includes(q!);
+  const customerMatches = (po: PurchaseOrder) => po.customer.companyName.toLowerCase().includes(q!);
+  const byCustomer = (a: PurchaseOrder, b: PurchaseOrder) => a.customer.companyName.localeCompare(b.customer.companyName);
 
   if (result.kind === "po") {
-    return {
-      kind: "po",
-      rows: result.rows.filter((po) => dateMatches(po, filters) && (!q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q))),
+    // A PO-level tile has no single product per row — a product search
+    // (the "Product" field, and "All") matches if any of the PO's products
+    // does. (Before this, PO-level tiles ignored the product part of the
+    // search entirely, even though the placeholder promised it.)
+    const productMatches = (po: PurchaseOrder) => po.items.some((item) => item.productName.toLowerCase().includes(q!));
+    const categoryMatches = (po: PurchaseOrder) => po.items.some((item) => (item.productCategory ?? "").toLowerCase().includes(q!));
+    const searchMatches = (po: PurchaseOrder) => {
+      if (!q) return true;
+      if (field === "po") return poMatches(po);
+      if (field === "customer") return customerMatches(po);
+      if (field === "product") return productMatches(po);
+      if (field === "category") return categoryMatches(po);
+      return poMatches(po) || customerMatches(po) || productMatches(po) || categoryMatches(po);
     };
+    const rows = result.rows.filter((po) => dateMatches(po, filters) && searchMatches(po));
+    return { kind: "po", rows: groupByCustomer ? [...rows].sort(byCustomer) : rows };
   }
-  return {
-    kind: "item",
-    rows: result.rows.filter(
-      ({ po, item }) =>
-        dateMatches(po, filters) &&
-        (!q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q) || item.productName.toLowerCase().includes(q)),
-    ),
+
+  const searchMatches = ({ po, item }: PpicPlanningItemRow) => {
+    if (!q) return true;
+    const productMatches = item.productName.toLowerCase().includes(q);
+    const categoryMatches = (item.productCategory ?? "").toLowerCase().includes(q);
+    if (field === "po") return poMatches(po);
+    if (field === "customer") return customerMatches(po);
+    if (field === "product") return productMatches;
+    if (field === "category") return categoryMatches;
+    return poMatches(po) || customerMatches(po) || productMatches || categoryMatches;
   };
+  const rows = result.rows.filter((row) => dateMatches(row.po, filters) && searchMatches(row));
+  return { kind: "item", rows: groupByCustomer ? [...rows].sort((a, b) => byCustomer(a.po, b.po)) : rows };
 }
 
 export function getPpicPlanningRows(metric: PpicPlanningMetric, orders: PurchaseOrder[]): PpicPlanningResult {
   const pendingOrders = getPendingPos(orders);
-  const pendingItemRows = toItemRows(pendingOrders);
+  const pendingItemRows = toItemRows(pendingOrders).filter((r) => !r.item.materialHeldAt); // held products are listed only under On Hold
   // Plan Sent / Not Sent look at EVERY product, not just pending ones —
   // a completed, already-dispatched PO's item necessarily had its plan
   // sent to Production at some point (that's how it got made), so
@@ -142,6 +212,10 @@ export function getPpicPlanningRows(metric: PpicPlanningMetric, orders: Purchase
   switch (metric) {
     case "total-pos":
       return { kind: "po", rows: orders };
+    // One row per product (a PO with 2 products is 2 rows) so a product
+    // search lands on the exact row. The dashboard tile still counts POs.
+    case "not-planned-pos":
+      return { kind: "item", rows: getNotPlannedItemRows(orders) };
     // Product-level — see PpicPlanningDetailPage's dedicated table for
     // this metric: each pending PO's own products, one row per product,
     // with stage + RM/PM material coverage (the "Pending PO Report").
@@ -155,6 +229,13 @@ export function getPpicPlanningRows(metric: PpicPlanningMetric, orders: Purchase
       return { kind: "item", rows: pendingItemRows.filter((r) => hasCalculatedRm(r.item)) };
     case "missing-both":
       return { kind: "item", rows: pendingItemRows.filter((r) => !hasCalculatedBom(r.item) && !hasCalculatedRm(r.item)) };
+    // Products PPIC has on Hold (not yet sent to Production) - wherever they
+    // are: still Not Planned, or fully planned in Material Planning.
+    case "on-hold":
+      return { kind: "item", rows: allItemRows.filter((r) => r.po.status === "APPROVED" && !!r.item.materialHeldAt && !r.item.planSentToProductionAt) };
+    // Products PPIC cancelled for good (the only list that still shows them).
+    case "cancelled":
+      return { kind: "item", rows: orders.filter((po) => po.status === "APPROVED").flatMap((po) => po.items.filter((item) => !!item.cancelledAt).map((item) => ({ po, item }))) };
     case "plan-sent":
       return { kind: "item", rows: allItemRows.filter((r) => !!r.item.planSentToProductionAt) };
     case "plan-not-sent":

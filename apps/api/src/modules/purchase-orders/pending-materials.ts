@@ -2,7 +2,7 @@ import { prisma } from "../../common/lib/prisma";
 import { getTotalAvailableByItemId } from "../inventory/stock";
 import { computeCompletion, poInclude } from "./po-completion";
 import type { RmMasterResult } from "../rm-costing/rm-costing-engine";
-import type { BomResult } from "../packaging-bom/bom-engine";
+import { pmLineName, type BomResult } from "../packaging-bom/bom-engine";
 
 /**
  * Per-product RM/PM material breakdown for the Pending PO Report — one
@@ -53,10 +53,11 @@ export interface PendingPoMaterialRow {
   pmMaterials: PendingMaterialLine[];
 }
 
-export async function getPendingPoMaterials(): Promise<PendingPoMaterialRow[]> {
-  const orders = await prisma.purchaseOrder.findMany({ where: { status: { not: "REJECTED" } }, include: poInclude, orderBy: { createdAt: "asc" } });
+// `onlyItemIds` narrows it to specific products (one page of the Pending POs list).
+export async function getPendingPoMaterials(onlyItemIds?: Set<string>): Promise<PendingPoMaterialRow[]> {
+  const orders = await prisma.purchaseOrder.findMany({ where: { status: "APPROVED" }, include: poInclude, orderBy: { createdAt: "asc" } });
   const pendingOrders = orders.filter((po) => !computeCompletion(po).isCompleted);
-  const pendingItemIds = pendingOrders.flatMap((po) => po.items.map((item) => item.id));
+  const pendingItemIds = pendingOrders.flatMap((po) => po.items.filter((item) => !item.cancelledAt && (!onlyItemIds || onlyItemIds.has(item.id))).map((item) => item.id));
   if (pendingItemIds.length === 0) return [];
 
   const items = await prisma.purchaseOrderItem.findMany({
@@ -98,7 +99,7 @@ export async function getPendingPoMaterials(): Promise<PendingPoMaterialRow[]> {
     const bomSnapshot = item.bomPlans[0]?.resultSnapshot as unknown as BomResult | undefined;
     const pmNeeds: Need[] = (bomSnapshot?.lines ?? [])
       .filter((l) => l.totalQty > 0)
-      .map((l) => ({ category: "PM" as const, name: l.component.trim(), qty: l.totalQty }));
+      .map((l) => ({ category: "PM" as const, name: pmLineName(l), qty: l.totalQty }));
     if (pmNeeds.length) pmNeedsByItem.set(item.id, pmNeeds);
     for (const n of pmNeeds) namesByCategory.get("PM")!.add(n.name);
   }

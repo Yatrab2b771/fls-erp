@@ -37,7 +37,7 @@ export function SystemHealthPage() {
           >
             {health.status === "ok" ? <CheckCircle2 className="h-4 w-4 shrink-0" strokeWidth={2.5} /> : <AlertTriangle className="h-4 w-4 shrink-0" strokeWidth={2.5} />}
             {health.status === "ok" ? "Database reachable and responding." : `Database problem: ${health.error ?? "unknown error"}`}
-            <span className="ml-auto text-[10px] font-semibold uppercase tracking-wide text-current/70">Checked {new Date(health.checkedAt).toLocaleTimeString()}</span>
+            <span className="ml-auto text-micro font-semibold uppercase tracking-wide text-current/70">Checked {new Date(health.checkedAt).toLocaleTimeString()}</span>
           </div>
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

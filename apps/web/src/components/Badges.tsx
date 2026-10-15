@@ -23,6 +23,7 @@ const STAGE_COLOR: Record<AnyStageId, string> = {
   FG_QC_RELEASE: "bg-violet-50 text-violet-700 border-violet-200",
   BILLING_EWAY_BILL: "bg-emerald-50 text-emerald-700 border-emerald-200",
   DISPATCH_PLAN: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  FG_HANDOVER: "bg-emerald-50 text-emerald-700 border-emerald-200",
 };
 
 const STAGE_DOT: Record<AnyStageId, string> = {
@@ -39,6 +40,7 @@ const STAGE_DOT: Record<AnyStageId, string> = {
   FG_QC_RELEASE: "bg-violet-500",
   BILLING_EWAY_BILL: "bg-emerald-500",
   DISPATCH_PLAN: "bg-emerald-500",
+  FG_HANDOVER: "bg-emerald-500",
 };
 
 export function StageBadge({ stage }: { stage: AnyStageId }) {

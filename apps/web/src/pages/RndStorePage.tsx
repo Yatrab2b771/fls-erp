@@ -4,6 +4,7 @@ import { useAuth } from "../lib/auth";
 import { ApiError } from "../lib/api";
 import { EmptyState } from "../components/EmptyState";
 import { ItemPicker } from "../components/ItemPicker";
+import { ListTable } from "../components/ListTable";
 import { StatTile } from "../components/StatTile";
 import { useToast } from "../components/Toast";
 import {
@@ -18,7 +19,6 @@ import {
   useImportRndSampleRequests,
   useInventoryItems,
   useRejectRndSampleRequest,
-  useRndDirectPurchase,
   useRndSampleRequests,
   useRndStoreReport,
   useRndStoreStock,
@@ -28,6 +28,8 @@ import {
 import { parseRndSampleRequestWorkbook } from "../lib/inventoryImport";
 import { downloadRndSampleRequestImportTemplate } from "../lib/inventoryExport";
 import type { InventoryCategory, RndConsumeReason, RndSampleRequest, RndTransfer } from "../lib/types";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
 
 const REASON_LABEL: Record<RndConsumeReason, string> = { TESTING: "Testing", FORMULATION_TRIAL: "Formulation Trial", WASTAGE: "Wastage", REJECTED: "Rejected" };
 const REASON_STYLE: Record<RndConsumeReason, string> = {
@@ -131,6 +133,9 @@ export function RndStorePage() {
   const wastageByUnit = sumByUnit((report ?? []).map((r) => ({ quantity: r.wastageQty, unit: r.unit })));
   const rejectedByUnit = sumByUnit((report ?? []).map((r) => ({ quantity: r.rejectedQty, unit: r.unit })));
 
+  const stockPg = useClientPaging(stock);
+  const reportPg = useClientPaging(report);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3.5">
@@ -153,90 +158,81 @@ export function RndStorePage() {
 
       {myPending.length > 0 && (
         <div>
-          <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
             <Clock className="h-3.5 w-3.5" /> Awaiting Your Confirmation ({myPending.length})
           </h2>
-          <div className="space-y-2">
-            {myPending.map((t) => (
-              <div key={t.id} className="card flex flex-wrap items-center justify-between gap-3 p-3.5">
-                <div>
-                  <p className="text-xs font-bold text-slate-700">
-                    {t.itemName} <span className="font-mono text-slate-500">— {t.quantity} {t.unit}</span>
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    {t.direction === "TO_RND" ? "From Warehouse" : "Returned from R&D Store"} · sent by {t.sentByName}
-                    {t.note && <> · {t.note}</>}
-                  </p>
-                </div>
-                <button type="button" className="btn-primary btn-sm" disabled={confirmTransfer.isPending} onClick={() => handleConfirm(t)}>
-                  {confirmTransfer.isPending ? "Confirming…" : "Confirm Receipt"}
-                </button>
-              </div>
-            ))}
-          </div>
+          <ListTable
+            rows={myPending}
+            rowKey={(t) => t.id}
+            columns={[
+              { header: "Item", cell: (t) => t.itemName, className: "font-bold text-slate-800" },
+              { header: "Qty", cell: (t) => `${t.quantity} ${t.unit}`, align: "right", className: "font-mono text-slate-700" },
+              { header: "From", cell: (t) => (t.direction === "TO_RND" ? "Warehouse" : "R&D Store (returned)") },
+              { header: "Sent By", cell: (t) => t.sentByName },
+              { header: "Note", cell: (t) => t.note ?? "-", className: "max-w-[16rem] truncate" },
+            ]}
+            actions={(t) => (
+              <button type="button" className="btn-primary btn-sm" disabled={confirmTransfer.isPending} onClick={() => handleConfirm(t)}>
+                {confirmTransfer.isPending ? "Confirming…" : "Confirm Receipt"}
+              </button>
+            )}
+          />
         </div>
       )}
 
       {isStore && pendingRequests.length > 0 && (
         <div>
-          <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
             <Inbox className="h-3.5 w-3.5" /> R&D Requests Awaiting Fulfillment ({pendingRequests.length})
           </h2>
-          <div className="space-y-2">
-            {pendingRequests.map((r) => (
-              <div key={r.id} className="card flex flex-wrap items-center justify-between gap-3 p-3.5">
-                <div>
-                  <p className="text-xs font-bold text-slate-700">
-                    {r.itemName} <span className="font-mono text-slate-500">— {r.quantity} {r.unit}</span>
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    Requested by {r.requestedByName}
-                    {r.note && <> · {r.note}</>}
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  <button type="button" className="btn-ghost btn-sm" disabled={rejectRequest.isPending} onClick={() => handleReject(r)}>
-                    Reject
-                  </button>
-                  <button type="button" className="btn-primary btn-sm" disabled={fulfillRequest.isPending} onClick={() => handleFulfill(r)}>
-                    {fulfillRequest.isPending ? "Sending…" : "Fulfill — Send to R&D"}
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <ListTable
+            rows={pendingRequests}
+            rowKey={(r) => r.id}
+            columns={[
+              { header: "Item", cell: (r) => r.itemName, className: "font-bold text-slate-800" },
+              { header: "Qty", cell: (r) => `${r.quantity} ${r.unit}`, align: "right", className: "font-mono text-slate-700" },
+              { header: "Requested By", cell: (r) => r.requestedByName },
+              { header: "Note", cell: (r) => r.note ?? "-", className: "max-w-[16rem] truncate" },
+            ]}
+            actions={(r) => (
+              <>
+                <button type="button" className="btn-ghost btn-sm" disabled={rejectRequest.isPending} onClick={() => handleReject(r)}>
+                  Reject
+                </button>
+                <button type="button" className="btn-primary btn-sm" disabled={fulfillRequest.isPending} onClick={() => handleFulfill(r)}>
+                  {fulfillRequest.isPending ? "Sending…" : "Fulfill — Send to R&D"}
+                </button>
+              </>
+            )}
+          />
         </div>
       )}
 
       {isRnd && pendingRequests.length > 0 && (
         <div>
-          <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
             <Clock className="h-3.5 w-3.5" /> Your Requests — Awaiting Store ({pendingRequests.length})
           </h2>
-          <div className="space-y-2">
-            {pendingRequests.map((r) => (
-              <div key={r.id} className="card flex flex-wrap items-center justify-between gap-3 p-3.5">
-                <div>
-                  <p className="text-xs font-bold text-slate-700">
-                    {r.itemName} <span className="font-mono text-slate-500">— {r.quantity} {r.unit}</span>
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    Requested by {r.requestedByName}
-                    {r.note && <> · {r.note}</>}
-                  </p>
-                </div>
-                <button type="button" className="btn-ghost btn-sm" disabled={cancelRequest.isPending} onClick={() => handleCancel(r)}>
-                  <X className="h-3.5 w-3.5" /> Withdraw
-                </button>
-              </div>
-            ))}
-          </div>
+          <ListTable
+            rows={pendingRequests}
+            rowKey={(r) => r.id}
+            columns={[
+              { header: "Item", cell: (r) => r.itemName, className: "font-bold text-slate-800" },
+              { header: "Qty", cell: (r) => `${r.quantity} ${r.unit}`, align: "right", className: "font-mono text-slate-700" },
+              { header: "Requested By", cell: (r) => r.requestedByName },
+              { header: "Note", cell: (r) => r.note ?? "-", className: "max-w-[16rem] truncate" },
+            ]}
+            actions={(r) => (
+              <button type="button" className="btn-ghost btn-sm" disabled={cancelRequest.isPending} onClick={() => handleCancel(r)}>
+                <X className="h-3.5 w-3.5" /> Withdraw
+              </button>
+            )}
+          />
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {isRnd && <RequestSampleForm />}
-        {isRnd && <DirectPurchaseForm />}
         {isRnd && <ReturnToWarehouseForm />}
         {isRnd && <ConsumeForm />}
         {isRnd && <DispatchToCustomerForm />}
@@ -244,35 +240,31 @@ export function RndStorePage() {
 
       {isRnd && myRequestHistory.length > 0 && (
         <div>
-          <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
             <Inbox className="h-3.5 w-3.5" /> Recent Requests
           </h2>
-          <div className="space-y-1.5">
-            {myRequestHistory.map((r) => (
-              <div key={r.id} className="card flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5">
-                <div className="min-w-0">
-                  <p className="truncate text-xs font-bold text-slate-700">
-                    {r.itemName} <span className="font-mono text-slate-500">{r.quantity} {r.unit}</span>
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    {r.status === "REJECTED" && r.rejectionReason ? r.rejectionReason : r.note}
-                  </p>
-                </div>
-                <span
-                  className={`pill shrink-0 ${
-                    r.status === "FULFILLED" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : r.status === "REJECTED" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-slate-200 bg-slate-100 text-slate-600"
-                  }`}
-                >
-                  {r.status === "FULFILLED" ? "Sent" : r.status === "REJECTED" ? "Rejected" : "Withdrawn"}
-                </span>
-              </div>
-            ))}
-          </div>
+          <ListTable
+            rows={myRequestHistory}
+            rowKey={(r) => r.id}
+            columns={[
+              { header: "Item", cell: (r) => r.itemName, className: "font-bold text-slate-800" },
+              { header: "Qty", cell: (r) => `${r.quantity} ${r.unit}`, align: "right", className: "font-mono text-slate-700" },
+              {
+                header: "Status",
+                cell: (r) => (
+                  <span className={`pill ${r.status === "FULFILLED" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : r.status === "REJECTED" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-slate-200 bg-slate-100 text-slate-600"}`}>
+                    {r.status === "FULFILLED" ? "Sent" : r.status === "REJECTED" ? "Rejected" : "Withdrawn"}
+                  </span>
+                ),
+              },
+              { header: "Reason / Note", cell: (r) => (r.status === "REJECTED" && r.rejectionReason ? r.rejectionReason : (r.note ?? "-")), className: "max-w-[20rem] truncate" },
+            ]}
+          />
         </div>
       )}
 
       <div>
-        <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <Beaker className="h-3.5 w-3.5" /> R&D Store — Current Stock
         </h2>
         {!stock || stock.length === 0 ? (
@@ -289,7 +281,7 @@ export function RndStorePage() {
                 </tr>
               </thead>
               <tbody>
-                {stock.map((r) => (
+                {stockPg.rows.map((r) => (
                   <tr key={r.item.id}>
                     <td className="font-semibold text-slate-700">{r.item.name}</td>
                     <td className="text-slate-500">{r.item.category}</td>
@@ -299,12 +291,13 @@ export function RndStorePage() {
                 ))}
               </tbody>
             </table>
+            <ClientPager pg={stockPg} />
           </div>
         )}
       </div>
 
       <div>
-        <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <ArrowLeftRight className="h-3.5 w-3.5" /> Where the Raw Material Went — Per Item
         </h2>
         {!report || report.length === 0 ? (
@@ -327,7 +320,7 @@ export function RndStorePage() {
                 </tr>
               </thead>
               <tbody>
-                {report.map((r) => (
+                {reportPg.rows.map((r) => (
                   <tr key={r.itemId}>
                     <td className="font-semibold text-slate-700">{r.itemName}</td>
                     <td className="text-slate-500">{r.unit || "—"}</td>
@@ -343,66 +336,56 @@ export function RndStorePage() {
                 ))}
               </tbody>
             </table>
+            <ClientPager pg={reportPg} />
           </div>
         )}
       </div>
 
       <div>
-        <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <Clock className="h-3.5 w-3.5" /> Recent Activity
         </h2>
         {!transactions || transactions.length === 0 ? (
           <EmptyState icon={Clock} title="Nothing logged yet" accent="slate" />
         ) : (
-          <div className="space-y-1.5">
-            {transactions.slice(0, 30).map((t) => (
-              <div key={t.id} className="card flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5">
-                <div className="min-w-0">
-                  <p className="truncate text-xs font-bold text-slate-700">
-                    {t.itemName} <span className="font-mono text-slate-500">{t.quantity} {t.unit}</span>
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    {t.customerName && <>to {t.customerName}{t.brandName && <> ({t.brandName})</>} · </>}
-                    {t.courierDetails && <>via {t.courierDetails} · </>}
-                    {t.vendorName && <>from {t.vendorName}{t.invoiceNo && <> (Inv. {t.invoiceNo})</>} · </>}
-                    {t.projectName && <>{t.projectName} · </>}
-                    {t.formulationRef && <>Ref {t.formulationRef} · </>}
-                    {t.batchNo && <>Batch {t.batchNo} · </>}
-                    {t.expiryDate && <>Exp {new Date(t.expiryDate).toLocaleDateString()} · </>}
-                    {t.note && <>{t.note} · </>}
-                    {t.createdByName} · {new Date(t.date ?? t.createdAt).toLocaleString()}
-                  </p>
-                </div>
-                <span
-                  className={`pill shrink-0 ${
-                    t.isDirectPurchase
-                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                      : t.type === "INBOUND"
-                        ? "border-brand-200 bg-brand-50 text-brand-700"
-                        : t.type === "DISPATCHED"
-                          ? "border-violet-200 bg-violet-50 text-violet-700"
-                          : t.type === "RETURNED"
-                            ? "border-slate-200 bg-slate-100 text-slate-600"
-                            : t.consumeReason
-                              ? REASON_STYLE[t.consumeReason]
-                              : "border-slate-200 bg-slate-100 text-slate-600"
-                  }`}
-                >
-                  {t.isDirectPurchase
-                    ? "Direct Purchase"
-                    : t.type === "INBOUND"
-                      ? "Received (Transfer)"
-                      : t.type === "DISPATCHED"
-                        ? "To Customer"
-                        : t.type === "RETURNED"
-                          ? "Returned"
-                          : t.consumeReason
-                            ? REASON_LABEL[t.consumeReason]
-                            : "Consumed"}
-                </span>
-              </div>
-            ))}
-          </div>
+          <ListTable
+            rows={transactions.slice(0, 30)}
+            rowKey={(t) => t.id}
+            columns={[
+              { header: "Item", cell: (t) => t.itemName, className: "font-bold text-slate-800" },
+              { header: "Qty", cell: (t) => `${t.quantity} ${t.unit}`, align: "right", className: "font-mono text-slate-700" },
+              {
+                header: "Type",
+                cell: (t) => (
+                  <span
+                    className={`pill ${
+                      t.isDirectPurchase
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                        : t.type === "INBOUND"
+                          ? "border-brand-200 bg-brand-50 text-brand-700"
+                          : t.type === "DISPATCHED"
+                            ? "border-violet-200 bg-violet-50 text-violet-700"
+                            : t.type === "RETURNED"
+                              ? "border-slate-200 bg-slate-100 text-slate-600"
+                              : t.consumeReason
+                                ? REASON_STYLE[t.consumeReason]
+                                : "border-slate-200 bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    {t.isDirectPurchase ? "Direct Purchase" : t.type === "INBOUND" ? "Received (Transfer)" : t.type === "DISPATCHED" ? "To Customer" : t.type === "RETURNED" ? "Returned" : t.consumeReason ? REASON_LABEL[t.consumeReason] : "Consumed"}
+                  </span>
+                ),
+              },
+              { header: "Customer", cell: (t) => (t.customerName ? `${t.customerName}${t.brandName ? ` (${t.brandName})` : ""}` : "-") },
+              { header: "Vendor", cell: (t) => (t.vendorName ? `${t.vendorName}${t.invoiceNo ? ` (Inv. ${t.invoiceNo})` : ""}` : "-") },
+              { header: "Project / Ref", cell: (t) => [t.projectName, t.formulationRef && `Ref ${t.formulationRef}`, t.courierDetails && `via ${t.courierDetails}`].filter(Boolean).join(" · ") || "-" },
+              { header: "Batch", cell: (t) => t.batchNo ?? "-" },
+              { header: "Expiry", cell: (t) => (t.expiryDate ? new Date(t.expiryDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-") },
+              { header: "Note", cell: (t) => t.note ?? "-", className: "max-w-[16rem] truncate" },
+              { header: "By", cell: (t) => t.createdByName },
+              { header: "Date", cell: (t) => new Date(t.date ?? t.createdAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) },
+            ]}
+          />
         )}
       </div>
 
@@ -430,7 +413,7 @@ function blankDraftRow(): RequestDraftRow {
 // rows in one submission covers the everyday "need a handful of
 // materials for this trial" case; the Excel import next to it covers a
 // genuinely long list someone already has in a spreadsheet.
-function RequestSampleForm() {
+export function RequestSampleForm() {
   const toast = useToast();
   const { data: allItems } = useInventoryItems();
   const [rows, setRows] = useState<RequestDraftRow[]>([blankDraftRow()]);
@@ -564,7 +547,7 @@ function RequestSampleForm() {
   );
 }
 
-function ReturnToWarehouseForm() {
+export function ReturnToWarehouseForm() {
   const toast = useToast();
   const { data: stock } = useRndStoreStock();
   const [itemId, setItemId] = useState("");
@@ -599,95 +582,6 @@ function ReturnToWarehouseForm() {
       {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
       <button type="button" className="btn-primary w-full" disabled={createTransfer.isPending} onClick={handleSubmit}>
         {createTransfer.isPending ? "Sending…" : "Send Back to Warehouse"}
-      </button>
-    </div>
-  );
-}
-
-// R&D buying and receiving material entirely on its own — never through
-// the Warehouse/Store ledger. Resolve-or-create by name (typing an
-// existing item's exact name matches it; anything else creates a new
-// catalog entry), same as the bulk sample-request import elsewhere on
-// this page — R&D naming something the catalog hasn't seen yet is the
-// normal case here.
-function DirectPurchaseForm() {
-  const toast = useToast();
-  const directPurchase = useRndDirectPurchase();
-  const [category, setCategory] = useState<InventoryCategory>("RM");
-  const [itemName, setItemName] = useState("");
-  const [quantity, setQuantity] = useState("");
-  const [unit, setUnit] = useState("Kg");
-  const [vendorName, setVendorName] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [invoiceNo, setInvoiceNo] = useState("");
-  const [batchNo, setBatchNo] = useState("");
-  const [expiryDate, setExpiryDate] = useState("");
-  const [note, setNote] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSubmit() {
-    setError(null);
-    if (!itemName.trim()) return setError("Enter an item name.");
-    if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
-    if (!vendorName.trim()) return setError("Enter the vendor name.");
-    try {
-      await directPurchase.mutateAsync({
-        category,
-        itemName: itemName.trim(),
-        quantity: Number(quantity),
-        unit,
-        vendorName: vendorName.trim(),
-        date: date || undefined,
-        invoiceNo: invoiceNo.trim() || undefined,
-        batchNo: batchNo.trim() || undefined,
-        expiryDate: expiryDate || undefined,
-        note: note.trim() || undefined,
-      });
-      toast.success(`Received — Store has been notified.`);
-      setItemName("");
-      setQuantity("");
-      setVendorName("");
-      setInvoiceNo("");
-      setBatchNo("");
-      setExpiryDate("");
-      setNote("");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not log this purchase");
-    }
-  }
-
-  return (
-    <div className="card space-y-3 p-4">
-      <p className="label flex items-center gap-1.5">
-        <PackageCheck className="h-3.5 w-3.5" /> Direct Purchase — Buy &amp; Receive
-      </p>
-      <div className="grid grid-cols-2 gap-2">
-        <select className="field" value={category} onChange={(e) => setCategory(e.target.value as InventoryCategory)}>
-          <option value="RM">Raw Material</option>
-          <option value="PM">Packaging Material</option>
-        </select>
-        <input className="field" placeholder="Item name (existing or new)" value={itemName} onChange={(e) => setItemName(e.target.value)} />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <input className="field font-mono" type="number" min="0" step="any" placeholder="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-        <input className="field" placeholder="Unit (Kg, Ltr, Count…)" value={unit} onChange={(e) => setUnit(e.target.value)} />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <input className="field" placeholder="Vendor Name" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
-        <input type="date" className="field" value={date} onChange={(e) => setDate(e.target.value)} />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <input className="field" placeholder="Invoice / Bill No. (optional)" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
-        <input className="field" placeholder="Batch No. (optional)" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
-      </div>
-      <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-        Expiry Date (optional)
-        <input type="date" className="field" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
-      </label>
-      <input className="field" placeholder="Note — which project/formulation (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-      {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
-      <button type="button" className="btn-primary w-full" disabled={directPurchase.isPending} onClick={handleSubmit}>
-        {directPurchase.isPending ? "Saving…" : "Receive into R&D Store"}
       </button>
     </div>
   );
@@ -770,7 +664,7 @@ function ConsumeForm() {
   );
 }
 
-function DispatchToCustomerForm() {
+export function DispatchToCustomerForm() {
   const toast = useToast();
   const { data: stock } = useRndStoreStock();
   const { data: customers } = useCustomers();

@@ -22,6 +22,8 @@ export const poInclude = {
       // PPIC's own planning call — see PurchaseOrderItem.plannedPlantId's
       // own schema comment and PATCH /:id/items/:itemId/planned-plant.
       plannedPlant: { select: { id: true, name: true } },
+      // BD's open Hold / Cancel request for the product, if any (PPIC decides).
+      changeRequests: { where: { status: "PENDING" }, select: { id: true, kind: true, reason: true, requestedAt: true }, take: 1 },
       // Just enough to compute completion below (and to know whether
       // production has started at all, for the delete guard further
       // down) — not the run's full record, that's what GET
@@ -33,7 +35,8 @@ export const poInclude = {
         select: {
           id: true,
           combinedLot: { select: { currentStageId: true, dispatchDate: true, dispatchedQty: true } },
-          productionBatches: { select: { currentStageId: true, dispatchDate: true, dispatchedQty: true } },
+          // fgShipments: what Dispatch has sent to the customer from this batch's finished goods (the Warehouse transfers are not a sale).
+          productionBatches: { select: { currentStageId: true, prepStageId: true, dispatchDate: true, dispatchedQty: true, handedOverToDispatchAt: true, fgShipments: { where: { type: "CUSTOMER", status: "DISPATCHED", deletedAt: null }, select: { quantity: true, dispatchDate: true } } } },
         },
       },
     },
@@ -63,32 +66,48 @@ export type PoWithBatches = Prisma.PurchaseOrderGetPayload<{ include: typeof poI
 // ship date at that stage, not a technical row-update timestamp), and
 // daysTaken is the whole-day span from the PO's own orderDate (falling
 // back to when it was entered, if BD never filled one in).
+type PoItemWithBatches = PoWithBatches["items"][number];
+
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+/**
+ * One product's own dispatch: how much has gone out the door (to the customer, by either path above) and whether that covers the
+ * ordered quantity. This is what "Completed Products" counts, so a product shows as complete as soon as ITS quantity is sent, even
+ * while another product of the same PO is still being made.
+ */
+export function computeItemDispatch(item: PoItemWithBatches): { dispatchedQty: number; isDone: boolean; dispatchDates: Date[] } {
+  const preProduction = item.preProduction;
+  if (!preProduction) return { dispatchedQty: 0, isDone: false, dispatchDates: [] };
+
+  let dispatchedQty = 0;
+  const dispatchDates: Date[] = [];
+
+  const lot = preProduction.combinedLot;
+  if (lot?.currentStageId === "DISPATCH_PLAN") {
+    dispatchedQty += lot.dispatchedQty ?? 0;
+    if (lot.dispatchDate) dispatchDates.push(lot.dispatchDate);
+  }
+  for (const batch of preProduction.productionBatches) {
+    if (batch.currentStageId === "DISPATCH_PLAN") {
+      dispatchedQty += batch.dispatchedQty ?? 0;
+      if (batch.dispatchDate) dispatchDates.push(batch.dispatchDate);
+    }
+    for (const s of batch.fgShipments) {
+      dispatchedQty += s.quantity;
+      if (s.dispatchDate) dispatchDates.push(s.dispatchDate);
+    }
+  }
+
+  return { dispatchedQty: round3(dispatchedQty), isDone: round3(dispatchedQty) >= round3(item.quantity) - 1e-6, dispatchDates };
+}
+
 export function computeCompletion(po: PoWithBatches): { isCompleted: boolean; completionDate: string | null; daysTaken: number | null } {
-  if (po.items.length === 0) return { isCompleted: false, completionDate: null, daysTaken: null };
+  // A cancelled product is out of the PO for good - it must not hold the PO
+  // open forever. If every product is cancelled the PO simply isn't completed.
+  const activeItems = po.items.filter((item) => !item.cancelledAt);
+  if (activeItems.length === 0) return { isCompleted: false, completionDate: null, daysTaken: null };
 
-  const round = (n: number) => Math.round(n * 1000) / 1000;
-
-  const itemResults = po.items.map((item) => {
-    const preProduction = item.preProduction;
-    if (!preProduction) return { isDone: false, dispatchDates: [] as Date[] };
-
-    let dispatchedQty = 0;
-    const dispatchDates: Date[] = [];
-
-    const lot = preProduction.combinedLot;
-    if (lot?.currentStageId === "DISPATCH_PLAN") {
-      dispatchedQty += lot.dispatchedQty ?? 0;
-      if (lot.dispatchDate) dispatchDates.push(lot.dispatchDate);
-    }
-    for (const batch of preProduction.productionBatches) {
-      if (batch.currentStageId === "DISPATCH_PLAN") {
-        dispatchedQty += batch.dispatchedQty ?? 0;
-        if (batch.dispatchDate) dispatchDates.push(batch.dispatchDate);
-      }
-    }
-
-    return { isDone: round(dispatchedQty) >= round(item.quantity) - 1e-6, dispatchDates };
-  });
+  const itemResults = activeItems.map((item) => computeItemDispatch(item));
 
   const isCompleted = itemResults.every((r) => r.isDone);
   if (!isCompleted) return { isCompleted: false, completionDate: null, daysTaken: null };

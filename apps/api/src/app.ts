@@ -13,14 +13,28 @@ import { customersRouter } from "./modules/customers/customers.routes";
 import { vendorsRouter } from "./modules/vendors/vendors.routes";
 import { vendorPurchaseOrdersRouter } from "./modules/vendor-purchase-orders/vendor-purchase-orders.routes";
 import { purchaseOrdersRouter } from "./modules/purchase-orders/purchase-orders.routes";
+import { ppicRouter } from "./modules/ppic/ppic.routes";
 import { preProductionRouter } from "./modules/batches/pre-production.routes";
 import { productionBatchesRouter } from "./modules/batches/production-batches.routes";
+import { batchPrepRouter } from "./modules/batches/batch-prep.routes";
+import { plantStockRouter } from "./modules/plant-consumption/plant-stock.routes";
 import { combinedLotRouter } from "./modules/batches/combined-lot.routes";
+import { financeRouter } from "./modules/finance/finance.routes";
+import { alertsRouter } from "./modules/alerts/alerts.routes";
+import { fgRouter } from "./modules/batches/fg.routes";
 import { catalogRouter } from "./modules/packaging-bom/catalog.routes";
+import { bomVersionsRouter } from "./modules/packaging-bom/bom-versions";
+import { bomDocsRouter } from "./modules/packaging-bom/bom-docs";
+import { bomBoardRouter } from "./modules/packaging-bom/bom-board";
+import { sampleRequestsRouter } from "./modules/sample-requests/sample-requests.routes";
+import { businessCardsRouter } from "./modules/business-cards/business-cards.routes";
+import { leadsRouter } from "./modules/leads/leads.routes";
+import { itemChangeRequestsRouter } from "./modules/purchase-orders/item-change-requests.routes";
 import { bomPlanRouter } from "./modules/packaging-bom/bom-plan.routes";
 import { recipeCatalogRouter } from "./modules/rm-costing/recipe-catalog.routes";
 import { rmPlanRouter } from "./modules/rm-costing/rm-plan.routes";
 import { inventoryRouter } from "./modules/inventory/inventory.routes";
+import { newMaterialRouter } from "./modules/inventory/new-material.routes";
 import { preInventoryRouter } from "./modules/inventory/pre-inventory.routes";
 import { stockTransfersRouter } from "./modules/inventory/stock-transfers.routes";
 import { plantConsumptionRouter } from "./modules/plant-consumption/plant-consumption.routes";
@@ -31,6 +45,7 @@ import { poReadinessRouter } from "./modules/po-readiness/po-readiness.routes";
 import { recycleBinRouter } from "./modules/recycle-bin/recycle-bin.routes";
 import { systemRouter } from "./modules/system/system.routes";
 import { qcRouter } from "./modules/qc/qc.routes";
+import { qcBoardRouter } from "./modules/qc/qc-board";
 import { recipeRequestRouter } from "./modules/recipe-requests/recipe-request.routes";
 import { rndStoreRouter } from "./modules/rnd-store/rnd-store.routes";
 import { qcSampleRouter } from "./modules/batches/qc-sample.routes";
@@ -82,21 +97,36 @@ export function createApp() {
   app.use("/api/vendors", vendorsRouter);
   app.use("/api/vendor-purchase-orders", vendorPurchaseOrdersRouter);
   app.use("/api/purchase-orders", purchaseOrdersRouter);
+  app.use("/api/ppic", ppicRouter);
   // Three-tier pipeline — see schema.prisma's own comment blocks above
   // PreProduction/ProductionBatch/CombinedLot. productionBatchesRouter
   // carries both a "/pre-productions/:id/production-batches" collection
   // path and its own "/production-batches/:id" resource path, so it's
   // mounted at the bare "/api" prefix rather than nested under one tier.
   app.use("/api/pre-productions", preProductionRouter);
+  app.use("/api", batchPrepRouter); // before productionBatchesRouter: its /production-batches/:id would swallow the board routes
   app.use("/api", productionBatchesRouter);
   app.use("/api/combined-lots", combinedLotRouter);
+  app.use("/api/fg", fgRouter);
+  app.use("/api/alerts", alertsRouter);
+  app.use("/api/finance", financeRouter);
   app.use("/api/catalog", catalogRouter);
+  app.use("/api/bom-versions", bomVersionsRouter);
+  app.use("/api/bom-docs", bomDocsRouter);
+  app.use("/api/bom-board", bomBoardRouter);
+  app.use("/api/sample-requests", sampleRequestsRouter);
+  app.use("/api/business-cards", businessCardsRouter);
+  app.use("/api/leads", leadsRouter);
+  app.use("/api/item-change-requests", itemChangeRequestsRouter);
   app.use("/api/bom", bomPlanRouter);
   app.use("/api/rm-costing", recipeCatalogRouter);
   app.use("/api/rm-costing", rmPlanRouter);
+  // Before the general /api/inventory router, which would otherwise swallow it
+  app.use("/api/inventory/new-material", newMaterialRouter);
   app.use("/api/inventory", inventoryRouter);
   app.use("/api/stock-transfers", stockTransfersRouter);
   app.use("/api/plant-consumption", plantConsumptionRouter);
+  app.use("/api/plant-stock", plantStockRouter);
   app.use("/api/inventory/requirements", preInventoryRouter);
   app.use("/api/inventory/day-stores", dayStoresRouter);
   app.use("/api/inventory/plants", plantsRouter);
@@ -106,6 +136,7 @@ export function createApp() {
   app.use("/api/recycle-bin", recycleBinRouter);
   app.use("/api/system", systemRouter);
   app.use("/api/qc", qcRouter);
+  app.use("/api/qc", qcBoardRouter);
   app.use("/api/recipe-requests", recipeRequestRouter);
   app.use("/api/rnd-store", rndStoreRouter);
   app.use("/api/qc-sample", qcSampleRouter);

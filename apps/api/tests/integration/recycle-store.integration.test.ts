@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, BATCH_START } from "./helpers";
 
 const app = createApp();
 
@@ -10,7 +10,7 @@ async function createApprovedPoItem(bdToken: string) {
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, poNumber: "PO-RECYCLE-1001", items: [{ productName: "Recycle Product", quantity: 100, unit: "Kg" }] });
+    .send({ customerId: customer.body.id, poNumber: "PO-RECYCLE-1001", items: [{ productName: "Recycle Product", productCategory: "Powder", quantity: 100, unit: "Kg" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }
@@ -84,7 +84,7 @@ describe("Recycle Store", () => {
 
     await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
 
-    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ plannedQty: 100 })).body;
+    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(productionToken)).send({ outputQty: 100 });
     const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
     const lotId = completed.body.combinedLot.id as string;

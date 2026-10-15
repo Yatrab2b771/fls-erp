@@ -3,6 +3,9 @@ import { ArrowLeft, Download, Warehouse } from "lucide-react";
 import { useDayStoreStock, useFgStock, useInventoryStock, useQuarantineStock, useStoreDashboardSummary } from "../lib/hooks";
 import { EmptyState } from "../components/EmptyState";
 import { exportDayStoreStockReport, exportFgStockReport, exportStockReport, exportTransactionReport } from "../lib/inventoryExport";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
+import { CustomerName } from "../components/CustomerName";
 
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
@@ -64,6 +67,7 @@ function TileHeader({ label, count, unitLabel, onDownload, disabled }: { label: 
 function CategoryStockTable({ category, label }: { category: "RM" | "PM"; label: string }) {
   const { data: rows, isLoading } = useInventoryStock(category);
   const onHandRows = (rows ?? []).filter((r) => r.onHand > 1e-6);
+  const pg = useClientPaging(onHandRows);
 
   if (isLoading || !rows) return <div className="skeleton h-64 w-full" />;
 
@@ -76,7 +80,7 @@ function CategoryStockTable({ category, label }: { category: "RM" | "PM"; label:
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">Item</th>
                 <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3">Received</th>
@@ -85,7 +89,7 @@ function CategoryStockTable({ category, label }: { category: "RM" | "PM"; label:
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {onHandRows.map((r) => (
+              {pg.rows.map((r) => (
                 <tr key={r.item.id} className="transition hover:bg-slate-50">
                   <td className="px-4 py-3 font-bold text-slate-700">{r.item.name}</td>
                   <td className="px-4 py-3 text-slate-500">{CATEGORY_LABEL[r.item.category] ?? r.item.category}</td>
@@ -102,6 +106,7 @@ function CategoryStockTable({ category, label }: { category: "RM" | "PM"; label:
               ))}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </>
@@ -111,6 +116,7 @@ function CategoryStockTable({ category, label }: { category: "RM" | "PM"; label:
 function FgTable() {
   const { data: rows, isLoading } = useFgStock();
   const onHandRows = (rows ?? []).filter((r) => r.onHandQty > 1e-6);
+  const pg = useClientPaging(onHandRows);
 
   if (isLoading || !rows) return <div className="skeleton h-64 w-full" />;
 
@@ -123,7 +129,7 @@ function FgTable() {
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">Customer</th>
                 <th className="px-4 py-3">Product</th>
                 <th className="px-4 py-3">Batch / Lot</th>
@@ -132,9 +138,9 @@ function FgTable() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {onHandRows.map((r) => (
+              {pg.rows.map((r) => (
                 <tr key={r.id} className="transition hover:bg-slate-50">
-                  <td className="px-4 py-3 font-bold text-slate-700">{r.customerName}</td>
+                  <td className="px-4 py-3 font-bold text-slate-700"><CustomerName name={r.customerName} /></td>
                   <td className="px-4 py-3 text-slate-500">{r.productName}</td>
                   <td className="px-4 py-3 text-slate-500">{r.label}</td>
                   <td className="px-4 py-3 text-slate-500">{r.poNumber ?? "—"}</td>
@@ -145,6 +151,7 @@ function FgTable() {
               ))}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </>
@@ -153,10 +160,11 @@ function FgTable() {
 
 function QuarantineTable() {
   const { data: rows, isLoading } = useQuarantineStock();
+  const pg = useClientPaging(rows);
 
   if (isLoading || !rows) return <div className="skeleton h-64 w-full" />;
 
-  const REASON_LABEL: Record<string, string> = { PENDING_QC: "Awaiting QC", ON_HOLD: "On Hold", EXPIRED: "Expired" };
+  const REASON_LABEL: Record<string, string> = { PENDING_QC: "Awaiting QC", ON_HOLD: "On Hold", EXPIRED: "Lab Test" };
 
   return (
     <>
@@ -173,7 +181,7 @@ function QuarantineTable() {
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">Item</th>
                 <th className="px-4 py-3">Reason</th>
                 <th className="px-4 py-3">Quantity</th>
@@ -182,7 +190,7 @@ function QuarantineTable() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => (
+              {pg.rows.map((r) => (
                 <tr key={r.id} className="transition hover:bg-slate-50">
                   <td className="px-4 py-3 font-bold text-slate-700">{r.item.name}</td>
                   <td className="px-4 py-3 text-slate-500">{REASON_LABEL[r.quarantineReason] ?? r.quarantineReason}</td>
@@ -195,9 +203,10 @@ function QuarantineTable() {
               ))}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
-      <p className="text-xs text-slate-400">Releasing expired stock is done from Inventory → Quarantine Store.</p>
+      <p className="text-xs text-slate-400">Releasing stock held for a lab test is done from Inventory → Quarantine Store.</p>
     </>
   );
 }
@@ -205,6 +214,7 @@ function QuarantineTable() {
 function DayStoreTable({ dayStoreId, dayStoreName }: { dayStoreId: string; dayStoreName: string }) {
   const { data, isLoading } = useDayStoreStock(dayStoreId);
   const rows = (data?.stock ?? []).filter((r) => r.onHand > 1e-6);
+  const pg = useClientPaging(rows);
   const name = data?.dayStore.name ?? dayStoreName;
 
   if (isLoading || !data) return <div className="skeleton h-64 w-full" />;
@@ -218,7 +228,7 @@ function DayStoreTable({ dayStoreId, dayStoreName }: { dayStoreId: string; daySt
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">Item</th>
                 <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3">Received</th>
@@ -227,7 +237,7 @@ function DayStoreTable({ dayStoreId, dayStoreName }: { dayStoreId: string; daySt
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => (
+              {pg.rows.map((r) => (
                 <tr key={r.item.id} className="transition hover:bg-slate-50">
                   <td className="px-4 py-3 font-bold text-slate-700">{r.item.name}</td>
                   <td className="px-4 py-3 text-slate-500">{CATEGORY_LABEL[r.item.category] ?? r.item.category}</td>
@@ -244,6 +254,7 @@ function DayStoreTable({ dayStoreId, dayStoreName }: { dayStoreId: string; daySt
               ))}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </>

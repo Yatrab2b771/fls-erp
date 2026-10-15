@@ -221,9 +221,11 @@ dayStoresRouter.get("/store-users", requireRole("STORE"), async (_req, res, next
   }
 });
 
-plantsRouter.get("/", async (_req, res, next) => {
+// The list every picker uses: a Plant is always one Day Store's own Plant, so only those are offered
+// (?all=true also returns a Plant that is not paired with a store).
+plantsRouter.get("/", async (req, res, next) => {
   try {
-    res.json(await prisma.plant.findMany({ orderBy: { name: "asc" } }));
+    res.json(await prisma.plant.findMany({ where: req.query.all === "true" ? {} : { dayStoreId: { not: null } }, orderBy: { name: "asc" } }));
   } catch (err) {
     next(err);
   }

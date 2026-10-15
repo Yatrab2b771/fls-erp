@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import type { PoBdPpicReportRow, PoWastageRejectionRow, PurchaseOrder } from "./types";
+import { customerTypeLabel } from "./customerTags";
 
 function download(sheetName: string, rows: Record<string, unknown>[], filename: string) {
   const sheet = XLSX.utils.json_to_sheet(rows);
@@ -23,10 +24,11 @@ export function exportPurchaseOrdersReport(orders: PurchaseOrder[]) {
     "Purchase Orders",
     orders.map((po) => ({
       "PO Number": po.poNumber ?? po.id.slice(0, 8),
+      Status: po.status,
       Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
       "Order Date": po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "",
       "Expected Delivery Date": po.expectedDeliveryDate ? new Date(po.expectedDeliveryDate).toLocaleDateString() : "",
-      Status: po.status,
       Products: po.items.length,
       Completed: po.completion.isCompleted ? "Yes" : "No",
       "Completion Date": po.completion.completionDate ? new Date(po.completion.completionDate).toLocaleDateString() : "",
@@ -59,9 +61,10 @@ export function exportPendingPoAgingReport(orders: PurchaseOrder[]) {
     "Pending PO Aging",
     pending.map(({ po, agingDays }) => ({
       Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
+      Status: po.status,
       "PO Number": po.poNumber ?? po.id.slice(0, 8),
       "Order Date": po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "",
-      Status: po.status,
       Products: po.items.length,
       "Aging (Days)": agingDays,
     })),
@@ -89,7 +92,6 @@ export function exportBdPpicReport(rows: PoBdPpicReportRow[]) {
       "QTY.": r.quantity,
       "DISPATCH QTY.": r.dispatchedQty,
       "DISPATCH DATE": r.dispatchDate ? new Date(r.dispatchDate).toLocaleDateString() : "",
-      VALUE: r.value ?? "",
       AGEING: r.ageingDays,
       REMARKS: "",
     })),
@@ -102,6 +104,7 @@ export function exportWastageRejectionReport(rows: PoWastageRejectionRow[]) {
     "Wastage & Rejection",
     rows.map((r) => ({
       Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
       "PO Number": r.poNumber,
       Product: r.productName,
       "Batch No": r.batchNo ?? "",

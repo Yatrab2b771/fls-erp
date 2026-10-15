@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { ClipboardList, History } from "lucide-react";
-import { useAuditLog } from "../lib/hooks";
+import { usePagedList } from "../lib/usePagedList";
+import { useDebounced } from "../lib/useDebounced";
+import type { AuditLogEntry } from "../lib/types";
+import { Pagination } from "../components/Pagination";
 import { formatEmployeeId } from "../lib/format";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -25,18 +28,27 @@ function timeAgo(iso: string): string {
 export function AuditLogPage() {
   const [action, setAction] = useState("");
   const [entityType, setEntityType] = useState("");
-  const { data: entries, isLoading } = useAuditLog({ action: action.trim() || undefined, entityType: entityType.trim() || undefined });
+  const actionFilter = useDebounced(action.trim());
+  const entityFilter = useDebounced(entityType.trim());
+  // Server-side paginated: the log grows without limit, so it pages instead of showing "the latest 200".
+  const paged = usePagedList<AuditLogEntry>({
+    key: ["system", "audit-log"],
+    path: "/api/system/audit-log",
+    params: { action: actionFilter || undefined, entityType: entityFilter || undefined },
+  });
+  const entries = paged.rows;
+  const isLoading = paged.isLoading;
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-black tracking-tight text-slate-900">Audit Log</h1>
-        <p className="text-sm text-slate-500">Append-only — who did what, when, across every module. The 200 most recent matches; narrow with the filters to reach further back.</p>
+        <p className="text-sm text-slate-500">Append-only — who did what, when, across every module, newest first. Page through it, or narrow with the filters.</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatTile icon={History} label="Showing" value={entries?.length ?? 0} accent="brand" />
-        <StatTile icon={ClipboardList} label="Newest" value={entries?.[0] ? timeAgo(entries[0].createdAt) : "—"} accent="slate" />
+        <StatTile icon={History} label={actionFilter || entityFilter ? "Matching Entries" : "Total Entries"} value={paged.total} accent="brand" />
+        <StatTile icon={ClipboardList} label="Newest" value={paged.page === 1 && entries[0] ? timeAgo(entries[0].createdAt) : "—"} accent="slate" />
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -46,7 +58,7 @@ export function AuditLogPage() {
 
       {isLoading ? (
         <SkeletonRows rows={6} cols={5} />
-      ) : !entries?.length ? (
+      ) : !entries.length ? (
         <EmptyState icon={History} title="No matching entries" hint="Try a different action/entity filter, or clear both to see the most recent activity." accent="slate" />
       ) : (
         <div className="card overflow-hidden">
@@ -68,12 +80,12 @@ export function AuditLogPage() {
                       {timeAgo(e.createdAt)}
                     </td>
                     <td className="text-slate-600">{e.actor ? `${e.actor.fullName} (${formatEmployeeId(e.actor.employeeId)})` : "System"}</td>
-                    <td className="font-mono text-[11px] font-bold text-slate-800">{e.action}</td>
+                    <td className="font-mono text-tiny font-bold text-slate-800">{e.action}</td>
                     <td className="text-slate-500">
                       {e.entityType}
-                      {e.entityId && <span className="ml-1 font-mono text-[10px] text-slate-400">{e.entityId.slice(0, 8)}</span>}
+                      {e.entityId && <span className="ml-1 font-mono text-micro text-slate-400">{e.entityId.slice(0, 8)}</span>}
                     </td>
-                    <td className="max-w-xs truncate font-mono text-[10.5px] text-slate-400" title={e.metadata ? JSON.stringify(e.metadata) : ""}>
+                    <td className="max-w-xs truncate font-mono text-micro text-slate-400" title={e.metadata ? JSON.stringify(e.metadata) : ""}>
                       {e.metadata ? JSON.stringify(e.metadata) : "—"}
                     </td>
                   </tr>
@@ -81,6 +93,7 @@ export function AuditLogPage() {
               </tbody>
             </table>
           </div>
+          <Pagination page={paged.page} pageSize={paged.pageSize} total={paged.total} onPage={paged.setPage} onPageSize={paged.setPageSize} isFetching={paged.isFetching} />
         </div>
       )}
     </div>

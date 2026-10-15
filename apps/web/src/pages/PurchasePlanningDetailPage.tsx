@@ -1,38 +1,36 @@
 import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, ClipboardList, Download, Truck } from "lucide-react";
+import { ArrowLeft, ChevronDown, ClipboardList, Download, Truck } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { usePreInventoryRequirements, useSetRequirementPurchase, useInventoryVendors } from "../lib/hooks";
+import { usePreInventoryRequirements } from "../lib/hooks";
 import { EmptyState } from "../components/EmptyState";
 import { exportRequirementsReport } from "../lib/inventoryExport";
-import { useToast } from "../components/Toast";
-import { ApiError } from "../lib/api";
 import {
   filterPurchasePlanningRows,
   getPurchasePlanningRows,
+  needsPi,
+  nextEta,
+  purchaseSinceAt,
   PURCHASE_PLANNING_METRIC_LABEL,
   REQUIREMENT_STATUS_LABEL,
   requirementStatus,
   type PurchasePlanningMetric,
 } from "../lib/purchasePlanning";
-import type { PreInventoryRequirement } from "../lib/types";
+import { PiLogForm, PurchaseLineList, fmtDate } from "../components/PurchaseLines";
+import { useClientPaging } from "../lib/useClientPaging";
+import { AGING_FIELD, TileFilterBar, type FilterField } from "../components/TileFilterBar";
+import { AgingCell, agingDays, inAgingBuckets } from "../components/AgingCell";
+import { useTileFilters } from "../lib/tileFilters";
+import { ClientPager } from "../components/Pagination";
 
 const VALID_METRICS = new Set(Object.keys(PURCHASE_PLANNING_METRIC_LABEL));
 
 const STATUS_PILL_CLASS: Record<string, string> = {
   COVERED: "border-emerald-200 bg-emerald-50 text-emerald-700",
   SHORTFALL: "border-amber-200 bg-amber-50 text-amber-700",
+  PARTIAL: "border-orange-200 bg-orange-50 text-orange-700",
   ORDERED: "border-brand-200 bg-brand-50 text-brand-700",
 };
-
-// A starting point, not a real numbering scheme — same as
-// PreInventoryPage's own suggestPoNumber, duplicated here rather than
-// exported since it's a one-line convenience, not shared logic.
-function suggestPoNumber(r: PreInventoryRequirement): string {
-  const datePart = new Date().toISOString().slice(2, 10).replace(/-/g, "");
-  const suffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `PO-${r.category}-${datePart}-${suffix}`;
-}
 
 // The drill-down behind every Purchase dashboard tile — clicking a tile
 // lands here with the exact list of Pre-Inventory requirements behind
@@ -79,17 +77,53 @@ function PurchasePlanningTable({
   const canPurchase = hasRole("PURCHASE");
   const fullRows = getPurchasePlanningRows(metric, requirements);
 
-  const [search, setSearch] = useState("");
-  const [category, setCategory] = useState<"" | "RM" | "PM">("");
-  const [etaFrom, setEtaFrom] = useState("");
-  const [etaTo, setEtaTo] = useState("");
-  const rows = filterPurchasePlanningRows(fullRows, { search, category: category || undefined, etaFrom, etaTo });
-  const isFiltered = search.trim().length > 0 || !!category || !!etaFrom || !!etaTo;
+  // The shared filter bar: the date range counts against the requirement's ETA, the rest are picks
+  // from what this tile's own rows contain.
+  const tileFilters = useTileFilters();
+  const { applied } = tileFilters;
+  const picked = (key: string) => applied.picks[key] ?? [];
+  const distinct = (pick: (r: (typeof fullRows)[number]) => string | null | undefined) => [...new Set(fullRows.map(pick).filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  // One filter per column (Short / On Order are numbers, so they get the Yes / No "Still to order" instead).
+  // Status only where the list mixes statuses; the PI Logged tile has none.
+  const filterFields: FilterField[] = [
+    { key: "item", label: "Item", options: distinct((r) => r.item.name) },
+    { key: "customerPo", label: "Customer PO", options: distinct((r) => r.sourcePo?.poNumber) },
+    { key: "product", label: "Product", options: distinct((r) => r.sourcePo?.productName) },
+    { key: "category", label: "Category", options: ["RM", "PM"] },
+    { key: "stillToOrder", label: "Still to order", options: ["Yes", "No"] },
+    { key: "po", label: "PI Number", options: [...new Set(fullRows.flatMap((r) => r.purchaseLines.map((l) => l.piNumber)))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })) },
+    { key: "vendor", label: "Vendor", options: [...new Set(fullRows.flatMap((r) => r.purchaseLines.map((l) => l.vendorName)))].sort((a, b) => a.localeCompare(b)) },
+    ...(metric === "ordered" ? [] : [{ key: "status", label: "Status", options: Object.values(REQUIREMENT_STATUS_LABEL) } as FilterField]),
+    AGING_FIELD,
+  ];
+  const rows = filterPurchasePlanningRows(fullRows, { etaFrom: applied.dateFrom, etaTo: applied.dateTo }).filter(
+    (r) =>
+      (!picked("customerPo").length || (r.sourcePo?.poNumber != null && picked("customerPo").includes(r.sourcePo.poNumber))) &&
+      (!picked("product").length || (r.sourcePo?.productName != null && picked("product").includes(r.sourcePo.productName))) &&
+      (!picked("po").length || r.purchaseLines.some((l) => picked("po").includes(l.piNumber))) &&
+      (!picked("vendor").length || r.purchaseLines.some((l) => picked("vendor").includes(l.vendorName))) &&
+      (!picked("item").length || picked("item").includes(r.item.name)) &&
+      (!picked("category").length || picked("category").includes(r.category)) &&
+      (!picked("stillToOrder").length || picked("stillToOrder").includes(needsPi(r) ? "Yes" : "No")) &&
+      (!picked("status").length || picked("status").includes(REQUIREMENT_STATUS_LABEL[requirementStatus(r)])) &&
+      inAgingBuckets(agingDays(purchaseSinceAt(metric, r)), picked("aging")),
+  );
+  const pg = useClientPaging(rows);
+  const isFiltered = tileFilters.activeCount > 0;
 
   // Which row's Log/Edit PO form is currently open — at most one at a
   // time, same "click to expand, click Cancel/Save to close" shape as
   // PreInventoryPage's own RequirementCard.
   const [openRowId, setOpenRowId] = useState<string | null>(null);
+  // Rows whose PI lines are shown underneath (click the PI / Vendor cell).
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   return (
     <>
@@ -111,44 +145,7 @@ function PurchasePlanningTable({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-end gap-3">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by Item, PO Number or Vendor…"
-          className="field w-full max-w-sm text-xs"
-        />
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-          Category
-          <select value={category} onChange={(e) => setCategory(e.target.value as "" | "RM" | "PM")} className="field text-xs">
-            <option value="">All</option>
-            <option value="RM">Raw Material</option>
-            <option value="PM">Packaging Material</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-          ETA From
-          <input type="date" value={etaFrom} onChange={(e) => setEtaFrom(e.target.value)} className="field text-xs" />
-        </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-          ETA To
-          <input type="date" value={etaTo} onChange={(e) => setEtaTo(e.target.value)} className="field text-xs" />
-        </label>
-        {(category || etaFrom || etaTo) && (
-          <button
-            type="button"
-            className="btn-ghost btn-sm"
-            onClick={() => {
-              setCategory("");
-              setEtaFrom("");
-              setEtaTo("");
-            }}
-          >
-            Clear Filters
-          </button>
-        )}
-      </div>
+      <TileFilterBar filters={tileFilters} tileKey={`purchase-${metric}`} fields={filterFields} dateLabel="ETA" />
 
       {fullRows.length === 0 ? (
         <EmptyState icon={ClipboardList} title="Nothing here" hint="No records match this tile right now." accent="brand" />
@@ -156,72 +153,110 @@ function PurchasePlanningTable({
         <EmptyState icon={ClipboardList} title="No matches" hint="Nothing matches these filters." accent="brand" />
       ) : (
         <div className="card overflow-x-auto">
-          <table className="w-full text-xs">
+          <table className="w-full whitespace-nowrap text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-                <th className="px-4 py-3">Item</th>
+              <tr className="border-b border-slate-200 bg-slate-50 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
+                <th className="sticky left-0 z-10 min-w-[210px] bg-slate-50 px-4 py-3">Item</th>
+                <th className="px-4 py-3">Customer PO</th>
+                <th className="px-4 py-3">Product</th>
                 <th className="px-4 py-3">Category</th>
-                <th className="px-4 py-3">Required</th>
-                <th className="px-4 py-3">On Hand</th>
-                <th className="px-4 py-3">Short By</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">PO / Vendor</th>
+                <th className="px-4 py-3 text-right">Short</th>
+                <th className="px-4 py-3 text-right">On Order</th>
+                <th className="px-4 py-3">PI</th>
+                <th className="px-4 py-3">Vendor</th>
+                {metric === "ordered" ? <th className="px-4 py-3">Aging</th> : <th className="px-4 py-3">Status</th>}
                 <th className="px-4 py-3">ETA</th>
-                <th className="px-4 py-3"></th>
                 {canPurchase && <th className="px-4 py-3">Action</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => {
+              {pg.rows.map((r) => {
                 const status = requirementStatus(r);
                 const isOpen = openRowId === r.id;
+                const isExpanded = expanded.has(r.id);
+                const lines = r.purchaseLines;
+                const eta = nextEta(r);
+                const overdue = !!eta && new Date(eta) < new Date(new Date().toDateString());
+                const vendors = [...new Set(lines.map((l) => l.vendorName))];
                 return (
                   <Fragment key={r.id}>
-                    <tr className="transition hover:bg-slate-50">
-                      <td className="px-4 py-3 font-bold text-slate-700">{r.item.name}</td>
-                      <td className="px-4 py-3 text-slate-500">{r.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
-                      <td className="px-4 py-3 text-slate-500">
-                        {r.requiredQty} {r.unit}
-                      </td>
-                      <td className="px-4 py-3 text-slate-500">{r.currentStock}</td>
-                      <td className="px-4 py-3 text-slate-500">{r.shortQty > 0 ? r.shortQty : "—"}</td>
+                    <tr className="group align-middle transition hover:bg-slate-50">
+                      <td className="sticky left-0 z-10 min-w-[210px] whitespace-normal bg-white px-4 py-3 font-bold text-slate-800 group-hover:bg-slate-50">{r.item.name}</td>
                       <td className="px-4 py-3">
-                        <span className={`pill ${STATUS_PILL_CLASS[status]}`}>{REQUIREMENT_STATUS_LABEL[status]}</span>
-                      </td>
-                      <td className="px-4 py-3 text-slate-500">{r.poNumber ? `${r.poNumber} · ${r.vendorName ?? "—"}` : "—"}</td>
-                      <td className="px-4 py-3">
-                        {r.eta ? (
-                          <span className={new Date(r.eta) < new Date() ? "font-semibold text-rose-700" : "text-slate-500"}>
-                            {new Date(r.eta).toLocaleDateString()}
-                            {new Date(r.eta) < new Date() ? " (Overdue)" : ""}
-                          </span>
+                        {r.sourcePo ? (
+                          <Link to={`/purchase-orders/${r.sourcePo.poId}`} className="font-semibold text-slate-700 hover:text-brand-600 hover:underline">
+                            {r.sourcePo.poNumber ?? r.sourcePo.poId.slice(0, 8)}
+                          </Link>
                         ) : (
-                          <span className="text-slate-400">—</span>
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="max-w-[200px] whitespace-normal px-4 py-3 text-slate-600">{r.sourcePo?.productName ?? <span className="text-slate-300">—</span>}</td>
+                      <td className="px-4 py-3 text-slate-500">{r.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                      <td className={`px-4 py-3 text-right font-mono tabular-nums ${r.shortQty > 0 ? "font-bold text-rose-600" : "text-slate-300"}`}>{r.shortQty > 0 ? `${r.shortQty} ${r.unit}` : "—"}</td>
+                      <td className="px-4 py-3 text-right">
+                        <span className={`font-mono tabular-nums ${r.onOrderQty > 0 ? "font-bold text-emerald-700" : "text-slate-300"}`}>{r.onOrderQty > 0 ? `${r.onOrderQty} ${r.unit}` : "—"}</span>
+                        {r.remainingToLog > 0 && (
+                          <span className="block text-micro font-bold text-amber-700">
+                            {r.remainingToLog} {r.unit} still to order
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        {r.purchaseCorrectedAt && (
-                          <span className="pill border-blue-200 bg-blue-50 text-blue-700" title={`Corrected ${new Date(r.purchaseCorrectedAt).toLocaleString()}`}>
-                            Updated
+                        {lines.length === 0 ? (
+                          <span className="text-slate-300">—</span>
+                        ) : (
+                          <button type="button" onClick={() => toggleExpanded(r.id)} aria-expanded={isExpanded} className="group/pi inline-flex items-center gap-1.5 font-bold text-brand-700 hover:underline" title="Show the PI details">
+                            {lines.length === 1 ? lines[0].piNumber : `${lines.length} PIs`}
+                            <ChevronDown className={`h-3.5 w-3.5 text-slate-400 transition group-hover/pi:text-brand-600 ${isExpanded ? "rotate-180" : ""}`} strokeWidth={2.5} />
+                          </button>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">{lines.length === 0 ? <span className="text-slate-300">—</span> : vendors.length === 1 ? vendors[0] : `${vendors.length} vendors`}</td>
+                      <td className="px-4 py-3">
+                        {metric === "ordered" ? (
+                          <AgingCell since={purchaseSinceAt(metric, r)} />
+                        ) : (
+                          <span className="inline-flex items-center gap-2">
+                            <span className={`pill ${STATUS_PILL_CLASS[status]}`}>{REQUIREMENT_STATUS_LABEL[status]}</span>
+                            <AgingCell since={purchaseSinceAt(metric, r)} />
                           </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {eta ? (
+                          <span className={overdue ? "font-semibold text-rose-700" : "text-slate-600"}>
+                            {lines.length > 1 ? "Next: " : ""}
+                            {fmtDate(eta)}
+                            {overdue ? " (Overdue)" : ""}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300">—</span>
                         )}
                       </td>
                       {canPurchase && (
                         <td className="px-4 py-3">
-                          {status === "SHORTFALL" || r.poNumber ? (
+                          {needsPi(r) ? (
                             <button type="button" className="btn-ghost btn-sm" onClick={() => setOpenRowId(isOpen ? null : r.id)}>
-                              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> {r.poNumber ? "Edit PO" : "Log PO"}
+                              <Truck className="h-3.5 w-3.5" strokeWidth={2.5} /> {lines.length > 0 ? "Log another PI" : "Log PI"}
                             </button>
                           ) : (
-                            <span className="text-slate-400">—</span>
+                            <span className="text-slate-300">—</span>
                           )}
                         </td>
                       )}
                     </tr>
+                    {isExpanded && lines.length > 0 && (
+                      <tr>
+                        <td colSpan={canPurchase ? 11 : 10} className="whitespace-normal border-l-2 border-brand-200 bg-slate-50/60 px-6 py-2">
+                          <PurchaseLineList requirement={r} canPurchase={canPurchase} variant="table" />
+                        </td>
+                      </tr>
+                    )}
                     {isOpen && (
                       <tr>
-                        <td colSpan={canPurchase ? 10 : 9} className="bg-slate-50/60 px-4 py-3">
-                          <LogPoForm requirement={r} onDone={() => setOpenRowId(null)} />
+                        <td colSpan={canPurchase ? 11 : 10} className="whitespace-normal bg-slate-50/60 px-4 py-3">
+                          <PiLogForm requirement={r} onDone={() => setOpenRowId(null)} />
                         </td>
                       </tr>
                     )}
@@ -230,66 +265,9 @@ function PurchasePlanningTable({
               })}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </>
-  );
-}
-
-// Same Log/Edit PO form as PreInventoryPage's RequirementCard, laid out
-// for a table row instead of a card — same mutation, same validation,
-// so Purchase never has to leave this filtered list to act on it.
-function LogPoForm({ requirement, onDone }: { requirement: PreInventoryRequirement; onDone: () => void }) {
-  const toast = useToast();
-  const setPurchase = useSetRequirementPurchase();
-  const { data: vendors } = useInventoryVendors();
-  const isEditing = !!requirement.poNumber;
-
-  const [poNumber, setPoNumber] = useState(requirement.poNumber ?? suggestPoNumber(requirement));
-  const [vendorName, setVendorName] = useState(requirement.vendorName ?? "");
-  const [eta, setEta] = useState(requirement.eta ? requirement.eta.slice(0, 10) : "");
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSave() {
-    setError(null);
-    if (!poNumber.trim() || !vendorName.trim() || !eta) return setError("PO Number, Vendor Name, and ETA are all required.");
-    try {
-      await setPurchase.mutateAsync({ id: requirement.id, poNumber: poNumber.trim(), vendorName: vendorName.trim(), eta });
-      toast.success(isEditing ? "PO details updated." : "PO logged — Finance has been notified.");
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save the PO");
-    }
-  }
-
-  return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-      <div>
-        <label className="label">PO Number</label>
-        <input className="field font-mono" value={poNumber} onChange={(e) => setPoNumber(e.target.value)} />
-      </div>
-      <div>
-        <label className="label">Vendor Name</label>
-        <input className="field" list={`po-vendor-options-${requirement.id}`} placeholder="Pick a known vendor or type a new one" value={vendorName} onChange={(e) => setVendorName(e.target.value)} />
-        <datalist id={`po-vendor-options-${requirement.id}`}>
-          {vendors?.vendors.map((v) => (
-            <option key={v} value={v} />
-          ))}
-        </datalist>
-      </div>
-      <div>
-        <label className="label">ETA</label>
-        <input type="date" className="field" value={eta} onChange={(e) => setEta(e.target.value)} />
-      </div>
-      {error && <p className="text-xs font-bold text-rose-600 sm:col-span-3">{error}</p>}
-      <div className="flex justify-end gap-2 sm:col-span-3">
-        <button type="button" className="btn-ghost btn-sm" onClick={onDone}>
-          Cancel
-        </button>
-        <button type="button" className="btn-primary btn-sm" disabled={setPurchase.isPending} onClick={handleSave}>
-          {setPurchase.isPending ? "Saving…" : isEditing ? "Update PO" : "Save PO"}
-        </button>
-      </div>
-    </div>
   );
 }

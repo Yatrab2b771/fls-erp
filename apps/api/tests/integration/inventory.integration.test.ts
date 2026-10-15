@@ -70,10 +70,10 @@ describe("Inventory module", () => {
     // the dedicated "Inward QC gate" describe block (Approve now accepts
     // it into stock in the same step, no separate Store Accept any more).
     const r1 = await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100 });
-    await request(app).patch(`/api/inventory/transactions/${r1.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${r1.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
     const r2 = await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "RECEIVED", date: "2026-08-02", unit: "Kg", quantity: 50 });
-    await request(app).patch(`/api/inventory/transactions/${r2.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${r2.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-03", unit: "Kg", quantity: 30 });
 
@@ -102,7 +102,7 @@ describe("Inventory module", () => {
       // either write lands and let both through; the SERIALIZABLE
       // transaction (see runSerializable) must let only one commit.
       const r = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
-      await request(app).patch(`/api/inventory/transactions/${r.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      await request(app).patch(`/api/inventory/transactions/${r.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
       const issue = () =>
         request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-02", unit: "Kg", quantity: 10 });
@@ -124,7 +124,11 @@ describe("Inventory module", () => {
       const itemId = item.body.id;
 
       const r = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
-      await request(app).patch(`/api/inventory/transactions/${r.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      await request(app).patch(`/api/inventory/transactions/${r.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
+
+      // Production is only ever filled out of a Day Store: stock it first.
+      const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Concurrent Store" });
+      await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
 
       const reqRow = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
       await request(app).patch(`/api/inventory/requests/${reqRow.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
@@ -133,7 +137,7 @@ describe("Inventory module", () => {
         request(app)
           .post(`/api/inventory/requests/${reqRow.body.id}/issue`)
           .set(authHeader(storeToken))
-          .send({ date: "2026-08-02", unit: "Kg", quantity: 10, dayStoreId: null });
+          .send({ date: "2026-08-02", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
       const [a, b] = await Promise.all([issue(), issue()]);
 
       const statuses = [a.status, b.status].sort();
@@ -251,13 +255,22 @@ describe("Inventory module", () => {
         .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10 });
       expect(direct.status).toBe(400);
 
-      // ADMIN can still bypass, same override pattern as the Batch pipeline's JUMP action.
+      // ADMIN can still bypass the request gate, same override pattern as the Batch pipeline's JUMP action -
+      // but never the Day Store rule: the Warehouse does not issue to a Plant, only a Day Store does, to its own Plant.
       const { token: adminToken } = await createUser(["ADMIN"]);
-      const asAdmin = await request(app)
+      const noStore = await request(app)
         .post("/api/inventory/transactions")
         .set(authHeader(adminToken))
         .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10 });
+      expect(noStore.status).toBe(400);
+
+      const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(adminToken)).send({ name: "Own Plant Store" });
+      const asAdmin = await request(app)
+        .post("/api/inventory/transactions")
+        .set(authHeader(adminToken))
+        .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
       expect(asAdmin.status).toBe(201);
+      expect(asAdmin.body.plantId).toBeTruthy(); // landed in the Day Store's own paired Plant
     });
 
     it("only PPIC can raise a request; only Store can review or issue it", async () => {
@@ -503,7 +516,7 @@ describe("Inventory module", () => {
       const acceptBeforeQc = await request(app).post(`/api/inventory/transactions/${created.body.id}/accept`).set(authHeader(storeToken));
       expect(acceptBeforeQc.status).toBe(409);
 
-      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(approved.status).toBe(200);
       expect(approved.body.receiptStatus).toBe("ACCEPTED");
       expect(approved.body.acceptedBy.id).toBeTruthy();
@@ -526,8 +539,8 @@ describe("Inventory module", () => {
       const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
 
       const [a, b] = await Promise.all([
-        request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken1)).send({ action: "APPROVE" }),
-        request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken2)).send({ action: "APPROVE" }),
+        request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken1)).send({ samplingDate: "2026-10-07", action: "APPROVE" }),
+        request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken2)).send({ samplingDate: "2026-10-07", action: "APPROVE" }),
       ]);
       expect([a.status, b.status].sort()).toEqual([200, 409]);
 
@@ -542,12 +555,12 @@ describe("Inventory module", () => {
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
       const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
 
-      const deniedStore = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(storeToken)).send({ action: "APPROVE" });
+      const deniedStore = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(storeToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(deniedStore.status).toBe(403);
-      const deniedQa = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ action: "APPROVE" });
+      const deniedQa = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(qaToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(deniedQa.status).toBe(403);
 
-      const reviewed = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      const reviewed = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(reviewed.status).toBe(200);
       expect(reviewed.body.receiptStatus).toBe("ACCEPTED");
 
@@ -561,10 +574,10 @@ describe("Inventory module", () => {
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
       const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
 
-      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "REJECT" });
+      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "REJECT" });
       expect(missingNote.status).toBe(400);
 
-      const rejected = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "REJECT", note: "Damaged packaging" });
+      const rejected = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "REJECT", note: "Damaged packaging" });
       expect(rejected.status).toBe(200);
       expect(rejected.body.receiptStatus).toBe("QC_REJECTED");
 
@@ -578,11 +591,11 @@ describe("Inventory module", () => {
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
       const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10 });
 
-      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "HOLD" });
+      const missingNote = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "HOLD" });
       expect(missingNote.status).toBe(400);
 
       // Straight from PENDING_QC to HOLD — skipping Approve/Reject entirely.
-      const held = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "HOLD", note: "Checking the vendor's COA first" });
+      const held = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "HOLD", note: "Checking the vendor's COA first" });
       expect(held.status).toBe(200);
       expect(held.body.receiptStatus).toBe("ON_HOLD");
       expect(held.body.qcNote).toBe("Checking the vendor's COA first");
@@ -591,7 +604,7 @@ describe("Inventory module", () => {
       // review's reviewer/note/timestamp are what the row ends up with —
       // same last-write-wins convention every other mutable status field
       // in this app already has; recordAudit is what preserves the trail.
-      const approvedAfterHold = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      const approvedAfterHold = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(approvedAfterHold.status).toBe(200);
       expect(approvedAfterHold.body.receiptStatus).toBe("ACCEPTED");
     });
@@ -608,7 +621,7 @@ describe("Inventory module", () => {
       const approved = await request(app)
         .patch(`/api/inventory/transactions/${created.body.id}/qc`)
         .set(authHeader(rndToken))
-        .send({ action: "APPROVE", rejectedQty: 5, note: "5 Kg damaged packaging" });
+        .send({ samplingDate: "2026-10-07", action: "APPROVE", rejectedQty: 5, note: "5 Kg damaged packaging" });
       expect(approved.status).toBe(200);
       expect(approved.body.receiptStatus).toBe("ACCEPTED");
       expect(approved.body.rejectedQty).toBeFalsy();
@@ -623,7 +636,7 @@ describe("Inventory module", () => {
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
       const created = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50 });
 
-      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      const approved = await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
       expect(approved.body.rejectedQty).toBeFalsy();
 
       const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
@@ -646,7 +659,7 @@ describe("Inventory module", () => {
         .send({ quantity: 10, unit: "Kg" });
       expect(tooEarly.status).toBe(400);
 
-      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "REJECT", note: "Damaged packaging" });
+      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "REJECT", note: "Damaged packaging" });
 
       // Store can't raise one — this is Accounts' own record.
       const deniedStore = await request(app)
@@ -711,7 +724,7 @@ describe("Inventory module", () => {
 
       // Approve first (now accepts it in the same step) — editing
       // afterward should still work.
-      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
       const edited = await request(app)
         .patch(`/api/inventory/transactions/${created.body.id}`)

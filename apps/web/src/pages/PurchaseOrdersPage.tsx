@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Download, FileSpreadsheet, FileText, Package, Plus, ShoppingCart, Truck, Upload, UserPlus, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import {
@@ -9,18 +9,21 @@ import {
   useCreateSku,
   useCustomers,
   useImportPurchaseOrders,
-  usePurchaseOrders,
+  usePoSummary,
   useReportCatalogMismatch,
   useSkus,
 } from "../lib/hooks";
 import { api } from "../lib/api";
 import type { CreatePurchaseOrderPayload } from "../lib/hooks";
 import { ApiError, downloadFile } from "../lib/api";
-import type { PoBdPpicReportRow, ProductType } from "../lib/types";
+import type { PoBdPpicReportRow, ProductType, PurchaseOrder } from "../lib/types";
 import { exportBdPpicReport } from "../lib/purchaseOrdersExport";
 import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
 import { findSimilarName } from "../lib/similarName";
+import { usePagedList } from "../lib/usePagedList";
+import { Pagination } from "../components/Pagination";
 import { ItemPicker } from "../components/ItemPicker";
+import { ProductCategoryPicker } from "../components/ProductCategoryPicker";
 import { PickerWithAdd } from "../components/PickerWithAdd";
 import { StatTile } from "../components/StatTile";
 import { EmptyState } from "../components/EmptyState";
@@ -28,13 +31,18 @@ import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
 import { PoStatusBadge } from "../components/Badges";
+import { CustomerName } from "../components/CustomerName";
+import { CUSTOMER_TYPES, tagOf, useCustomerTags, useSetCustomerType, type CustomerType } from "../lib/customerTags";
 
-const UNIT_OPTIONS = ["KG", "SKU", "Litres", "Other"];
+// An order is in Kg or in SKU (packs). The packaging BOM works in packs and the RM BOM in Kg; the pack size turns one into the other.
+const UNIT_OPTIONS = ["KG", "SKU"];
 const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
 
 interface LineItemDraft {
   productName: string;
-  dosageForm: string;
+  // Mandatory — Powder / Gummies / Bars / ... (replaces the old free-text
+  // Dosage Form box). See ProductCategoryPicker.
+  productCategory: string;
   quantity: string;
   unit: string;
   volume: string;
@@ -47,7 +55,7 @@ interface LineItemDraft {
 }
 
 function blankItem(): LineItemDraft {
-  return { productName: "", dosageForm: "", quantity: "", unit: "KG", volume: "", packSize: "", productType: "EXISTING" };
+  return { productName: "", productCategory: "", quantity: "", unit: "KG", volume: "", packSize: "", productType: "EXISTING" };
 }
 
 // Same picker-with-"+ New" behavior as PickerWithAdd, minus its own
@@ -109,28 +117,32 @@ function ProductPicker({
 
 export function PurchaseOrdersPage() {
   const { hasRole } = useAuth();
-  const { data: orders, isLoading } = usePurchaseOrders();
+  // Server-side paginated + searched list; the tiles come from a summary call
+  // over every PO, so neither depends on how many POs exist.
+  const paged = usePagedList<PurchaseOrder>({ key: ["purchase-orders", "paged"], path: "/api/purchase-orders" });
+  const { data: poSummary } = usePoSummary();
+  const orders = paged.rows;
+  const isLoading = paged.isLoading;
   const canCreate = hasRole("BD");
+  // Approve/Draft/Rejected is BD's own review status — every other
+  // department only ever sees Approved POs, so a Status column would just
+  // repeat "Approved" on every row and confuse it with their own progress.
+  const showStatus = hasRole("BD");
   // BD & PPIC's own download report, matching their shared Excel
   // template — not the company-wide export every department used to see
   // (removed entirely for everyone else).
   const canDownloadBdPpicReport = hasRole("BD", "PPIC");
   const toast = useToast();
 
-  const [showForm, setShowForm] = useState(false);
-  const [search, setSearch] = useState("");
+  // Opened from a converted lead (?newFor=<customerId>): the form is open with that customer chosen
+  const [searchParams] = useSearchParams();
+  const newFor = searchParams.get("newFor") ?? undefined;
+  const [showForm, setShowForm] = useState(!!newFor);
   const [bdPpicReportLoading, setBdPpicReportLoading] = useState(false);
   const importFileRef = useRef<HTMLInputElement>(null);
   const importOrders = useImportPurchaseOrders();
 
-  const totalProducts = orders?.reduce((sum, po) => sum + po.items.length, 0) ?? 0;
-  // Approved but not yet fully shipped — same "in flight" idea the old
-  // per-item batch count stood in for, just at the PO level now that
-  // production detail isn't fetched as part of the list.
-  const inProductionCount = orders?.filter((po) => po.status === "APPROVED" && !po.completion.isCompleted).length ?? 0;
-
-  const q = search.trim().toLowerCase();
-  const filteredOrders = orders?.filter((po) => !q || (po.poNumber ?? "").toLowerCase().includes(q) || po.customer.companyName.toLowerCase().includes(q));
+  const filteredOrders = orders;
 
   async function handleDownloadBdPpicReport() {
     setBdPpicReportLoading(true);
@@ -162,13 +174,13 @@ export function PurchaseOrdersPage() {
         console.error("[Purchase Order import] No usable rows.", { fileName: file.name, sheetNames, detectedHeaders, skipped });
         return toast.error(
           detectedHeaders.length
-            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid PO Number + Customer + Product + Quantity + Unit together.`
+            ? `No usable rows in "${file.name}" — found columns [${detectedHeaders.join(", ")}], but none had a valid PO Number + Customer + Product + Product Category + Quantity + Unit together.`
             : `"${file.name}" has no data rows on any sheet (${sheetNames.join(", ") || "no sheets"}).`,
         );
       }
 
       const result = await importOrders.mutateAsync(rows);
-      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
+      const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field such as Product Category)` : "";
       const existingNote = result.skippedExisting.length
         ? ` — ${result.skippedExisting.length} PO number${result.skippedExisting.length === 1 ? "" : "s"} already existed and ${result.skippedExisting.length === 1 ? "was" : "were"} skipped: ${result.skippedExisting.slice(0, 5).join(", ")}${result.skippedExisting.length > 5 ? ", …" : ""}`
         : "";
@@ -217,20 +229,20 @@ export function PurchaseOrdersPage() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatTile icon={ShoppingCart} label="Purchase Orders" value={orders?.length ?? 0} accent="rose" />
-        <StatTile icon={Package} label="Products Queued" value={totalProducts} accent="brand" />
-        <StatTile icon={Truck} label="Orders In Production" value={inProductionCount} accent="emerald" />
+        <StatTile icon={ShoppingCart} label="Purchase Orders" value={poSummary?.purchaseOrders ?? 0} accent="rose" />
+        <StatTile icon={Package} label="Products Queued" value={poSummary?.products ?? 0} accent="brand" />
+        <StatTile icon={Truck} label="Orders In Production" value={poSummary?.inProduction ?? 0} accent="emerald" />
       </div>
 
-      {showForm && <NewPurchaseOrderForm onDone={() => setShowForm(false)} />}
+      {showForm && <NewPurchaseOrderForm initialCustomerId={newFor} onDone={() => setShowForm(false)} />}
 
-      {!isLoading && !!orders?.length && <SearchBar value={search} onChange={setSearch} placeholder="Search by PO number or customer…" />}
+      {(paged.total > 0 || paged.isFiltered) && <SearchBar value={paged.search} onChange={paged.setSearch} placeholder="Search by PO number, customer or product…" />}
 
       {isLoading ? (
         <SkeletonRows rows={4} cols={5} />
-      ) : !orders?.length ? (
+      ) : paged.total === 0 && !paged.isFiltered ? (
         <EmptyState icon={ShoppingCart} title="No purchase orders yet" hint={canCreate ? "Create one above to get started." : "Ask BD to create the first one."} accent="rose" />
-      ) : !filteredOrders?.length ? (
+      ) : !filteredOrders.length ? (
         <EmptyState icon={ShoppingCart} title="No matching purchase orders" hint="Try a different search." accent="slate" />
       ) : (
         <div className="card overflow-hidden">
@@ -243,7 +255,7 @@ export function PurchaseOrdersPage() {
                   <th className="text-center">Products</th>
                   <th className="text-center" title="Calculated Packaging BOM / RM BOM plans, out of this PO's product count">BOM / Recipe</th>
                   <th>Order Date</th>
-                  <th>Status</th>
+                  {showStatus && <th>Status</th>}
                   <th>Completion</th>
                   <th />
                 </tr>
@@ -256,15 +268,17 @@ export function PurchaseOrdersPage() {
                         {po.poNumber ?? po.id.slice(0, 8)}
                       </Link>
                     </td>
-                    <td className="text-slate-600">{po.customer.companyName}</td>
+                    <td className="text-slate-600"><CustomerName name={po.customer.companyName} /></td>
                     <td className="text-center font-mono font-bold text-slate-700">{po.items.length}</td>
                     <td className="text-center">
                       <PoBomRecipeStatus items={po.items} />
                     </td>
                     <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
-                    <td>
-                      <PoStatusBadge status={po.status} />
-                    </td>
+                    {showStatus && (
+                      <td>
+                        <PoStatusBadge status={po.status} />
+                      </td>
+                    )}
                     <td>
                       {po.completion.isCompleted ? (
                         <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700" title={po.completion.completionDate ? `Shipped & confirmed ${new Date(po.completion.completionDate).toLocaleDateString()}` : undefined}>
@@ -288,6 +302,7 @@ export function PurchaseOrdersPage() {
               </tbody>
             </table>
           </div>
+          <Pagination page={paged.page} pageSize={paged.pageSize} total={paged.total} onPage={paged.setPage} onPageSize={paged.setPageSize} isFetching={paged.isFetching} />
         </div>
       )}
     </div>
@@ -306,24 +321,32 @@ function PoBomRecipeStatus({ items }: { items: { bomPlans?: { status: string }[]
   const pillClass = (count: number) => (count === items.length ? "border-emerald-200 bg-emerald-50 text-emerald-700" : count === 0 ? "border-slate-200 bg-slate-50 text-slate-400" : "border-amber-200 bg-amber-50 text-amber-700");
   return (
     <div className="flex items-center justify-center gap-1">
-      <span className={`pill text-[10px] ${pillClass(bomCount)}`} title="Products with a calculated Packaging BOM">
+      <span className={`pill text-micro ${pillClass(bomCount)}`} title="Products with a calculated Packaging BOM">
         BOM {bomCount}/{items.length}
       </span>
-      <span className={`pill text-[10px] ${pillClass(rmCount)}`} title="Products with a calculated RM BOM (Recipe)">
+      <span className={`pill text-micro ${pillClass(rmCount)}`} title="Products with a calculated RM BOM (Recipe)">
         Recipe {rmCount}/{items.length}
       </span>
     </div>
   );
 }
 
-function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
+function NewPurchaseOrderForm({ onDone, initialCustomerId }: { onDone: () => void; initialCustomerId?: string }) {
   const toast = useToast();
+  const canTagCustomer = useAuth().hasRole("BD");
   const { data: customers } = useCustomers();
   const createCustomer = useCreateCustomer();
   const createOrder = useCreatePurchaseOrder();
 
-  const [customerId, setCustomerId] = useState("");
+  const [customerId, setCustomerId] = useState(initialCustomerId ?? "");
   const [showNewCustomer, setShowNewCustomer] = useState(false);
+  // The customer's type (New / Top 10 / Others): BD tags it right here. An existing customer is saved as soon as it is picked;
+  // a customer created on this form gets its type when the PO is created.
+  const { data: customerTags } = useCustomerTags();
+  const setCustomerType = useSetCustomerType();
+  const [newCustomerType, setNewCustomerType] = useState<CustomerType>("New");
+  const customerTag = customerTags?.find((c) => c.id === customerId);
+  const currentType: CustomerType = customerTag?.isTop10 ? "Top 10" : customerTag?.isNew ? "New" : "Others";
   const [newCustomerName, setNewCustomerName] = useState("");
 
   const [poNumber, setPoNumber] = useState("");
@@ -373,9 +396,13 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
   // clicked expecting it to "just work").
   const hasCustomer = showNewCustomer ? !!newCustomerName.trim() : !!customerId;
   const hasProduct = items.some((item) => item.productName.trim() && item.quantity);
+  // A line the user has started (name or quantity typed) but not given a
+  // Product Category — surfaced live, same as the customer/product checks.
+  const missingCategory = items.some((item) => (item.productName.trim() || item.quantity) && !item.productCategory);
   const missing: string[] = [];
   if (!hasCustomer) missing.push("a customer");
   if (!hasProduct) missing.push("at least one product with a name and quantity");
+  if (missingCategory) missing.push("a Product Category on every product");
   const canSubmit = missing.length === 0;
 
   function updateItem(index: number, patch: Partial<LineItemDraft>) {
@@ -395,6 +422,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
       try {
         const created = await createCustomer.mutateAsync({ companyName: newCustomerName.trim() });
         finalCustomerId = created.id;
+      await setCustomerType.mutateAsync({ id: created.id, type: newCustomerType }).catch(() => {});
       } catch (err) {
         return setError(err instanceof ApiError ? err.message : "Could not create customer");
       }
@@ -405,9 +433,11 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
     const cleanItems: CreatePurchaseOrderPayload["items"] = [];
     for (const item of items) {
       if (!item.productName.trim() || !item.quantity) continue;
+      if (!item.productCategory) return setError(`Select a Product Category for "${item.productName.trim()}".`);
+      if (item.unit === "SKU" && !item.packSize.trim()) return setError(`Enter the pack size of "${item.productName.trim()}" (for example 120 g or 1 kg): a SKU order needs it to work out the Kg.`);
       cleanItems.push({
         productName: item.productName.trim(),
-        dosageForm: item.dosageForm.trim() || undefined,
+        productCategory: item.productCategory,
         quantity: Number(item.quantity),
         unit: item.unit,
         volume: item.volume ? Number(item.volume) : undefined,
@@ -489,6 +519,26 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
               </button>
             </div>
           )}
+          {(showNewCustomer || customerId) && (
+            <div className="mt-2 flex items-center gap-2">
+              <label className="text-micro font-bold uppercase tracking-wide text-slate-400">Customer type</label>
+              <select
+                className="field !h-8 !w-auto !py-0 text-xs"
+                value={showNewCustomer ? newCustomerType : currentType}
+                disabled={!canTagCustomer || setCustomerType.isPending}
+                onChange={(e) => {
+                  const type = e.target.value as CustomerType;
+                  if (showNewCustomer) return setNewCustomerType(type);
+                  setCustomerType.mutate({ id: customerId, type }, { onSuccess: () => toast.success(`${customerTag?.companyName ?? "Customer"} is now tagged ${type}.`), onError: () => toast.error("Could not save the customer type") });
+                }}
+              >
+                {CUSTOMER_TYPES.map((t) => (
+                  <option key={t}>{t}</option>
+                ))}
+              </select>
+              {!showNewCustomer && customerTag && <span className="text-micro text-slate-400">{tagOf(customerTag.companyName)?.isNew && tagOf(customerTag.companyName)?.isTop10 ? "New and Top 10" : ""}</span>}
+            </div>
+          )}
         </div>
         <div>
           <label className="label">PO Number</label>
@@ -565,7 +615,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
                   }}
                 />
               </div>
-              <input className="field" placeholder="Dosage form (opt.)" value={item.dosageForm} onChange={(e) => updateItem(i, { dosageForm: e.target.value })} />
+              <ProductCategoryPicker value={item.productCategory} onChange={(name) => updateItem(i, { productCategory: name })} />
               <input
                 className="field font-mono"
                 type="number"
@@ -594,7 +644,7 @@ function NewPurchaseOrderForm({ onDone }: { onDone: () => void }) {
               </div>
               <input
                 className="field sm:col-span-2"
-                placeholder="Pack size (opt., e.g. 1kg)"
+                placeholder={item.unit === "SKU" ? "Pack size (required for SKU, e.g. 120 g or 1 kg)" : "Pack size (e.g. 120 g or 1 kg)"}
                 value={item.packSize}
                 onChange={(e) => updateItem(i, { packSize: e.target.value })}
               />

@@ -1,10 +1,12 @@
 import { prisma } from "../../common/lib/prisma";
+import { getMaterialCoverage } from "./material-coverage";
+import { productionBlockedByHoldOrCancel } from "../purchase-orders/hold-guards";
 import { logger } from "../../common/lib/logger";
 import { recordAudit } from "../../common/lib/audit";
 import { notifyRoles } from "../../common/lib/notify";
 import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
-import { getOnHandByPlantAndItem } from "../inventory/stock";
+import { getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "../inventory/stock";
 import { getScaledRequiredDispensingItems, type DispensingRequirementStatus } from "./dispensing-requirements";
 import { preProductionInclude, type PreProductionWithRelations } from "./batch-include";
 import { actorCanActOnStage, PRE_PRODUCTION_STAGE_LABEL, PRE_PRODUCTION_STAGE_ROLE, getForwardTarget, getRejectTarget, type PreProductionStageId } from "./pre-production-stage";
@@ -44,6 +46,11 @@ export async function transitionPreProductionStage(params: {
     return { ok: false, status: 403, error: `This stage requires sign-off from the ${currentStage} department's role` };
   }
 
+  if (action === "FORWARD") {
+    const blocked = await productionBlockedByHoldOrCancel(run.purchaseOrderItemId);
+    if (blocked) return { ok: false, status: 409, error: blocked };
+  }
+
   const target = action === "FORWARD" ? getForwardTarget(currentStage) : getRejectTarget(currentStage);
   if (!target) {
     return {
@@ -54,6 +61,22 @@ export async function transitionPreProductionStage(params: {
   }
   if (action === "REJECT" && !note?.trim()) {
     return { ok: false, status: 400, error: "A note is required when sending a run back." };
+  }
+
+  // Material Received & GRN is recorded only once the material the released quantity needs has reached the Plant (a partial
+  // release needs only its own share). Admin may step in.
+  if (action === "FORWARD" && currentStage === "MATERIAL_RECEIVED" && !actorRoles.includes("ADMIN")) {
+    const coverage = await getMaterialCoverage(run.purchaseOrderItemId);
+    if (coverage && !coverage.allCovered) {
+      const missing = coverage.lines.filter((l) => !l.covered);
+      const shown = missing.slice(0, 4).map((l) => `${l.material} (needs ${l.requiredQty}, have ${Math.round((l.receivedQty + l.atDayStoreQty) * 1000) / 1000} ${l.unit})`).join(", ");
+      return {
+        ok: false,
+        status: 409,
+        error: `The material for ${coverage.releasedQty} ${coverage.unit} has not all reached the Day Store yet: ${shown}${missing.length > 4 ? ` and ${missing.length - 4} more` : ""}.`,
+        details: { materialShortfall: missing },
+      };
+    }
   }
 
   // Field validation is separate from the envelope because which fields
@@ -90,7 +113,9 @@ export async function transitionPreProductionStage(params: {
   // free-text sign-off as the only record of the ask.
   const parsedIndentLines = indentRequestLinesSchema.safeParse(rawBody.indentLines);
   if (!parsedIndentLines.success) return { ok: false, status: 400, error: "Validation failed", details: parsedIndentLines.error.flatten() };
-  const indentLines = currentStage === "INDENT_ISSUE" ? (parsedIndentLines.data ?? []) : [];
+  // The indent follows the plan (the Day Store already holds a request for every plan material), so no extra request lines are
+  // created here; indentLines in a body are ignored.
+  const indentLines: NonNullable<typeof parsedIndentLines.data> = [];
   if (indentLines.length > 0) {
     const indentItemIds = [...new Set(indentLines.map((l) => l.itemId))];
     const foundIndentItems = await prisma.inventoryItem.findMany({ where: { id: { in: indentItemIds } }, select: { id: true, category: true } });
@@ -154,14 +179,50 @@ export async function transitionPreProductionStage(params: {
       const onHand = await getOnHandByPlantAndItem(run.plantId!, [...requestedByItem.keys()], tx);
       const shortfalls = [...requestedByItem.entries()]
         .map(([itemId, requestedQty]) => ({ itemId, requestedQty, available: onHand.get(itemId) ?? 0 }))
-        .filter((s) => s.requestedQty > s.available);
+        .filter((s) => s.requestedQty > s.available + 1e-9);
       if (shortfalls.length > 0) {
+        // What the Plant does not hold yet comes from its Day Store in this same step (Dispensing is the hand-over of material to
+        // Production), so the store does not issue to the Plant separately first.
         const items = await tx.inventoryItem.findMany({ where: { id: { in: shortfalls.map((s) => s.itemId) } }, select: { id: true, name: true } });
         const nameById = new Map(items.map((i) => [i.id, i.name]));
-        throw new RouteError(
-          409,
-          `This Plant hasn't received enough to cover that: ${shortfalls.map((s) => `${nameById.get(s.itemId)} (needs ${s.requestedQty}, only ${s.available} on hand)`).join("; ")}`,
-        );
+        const plant = await tx.plant.findUnique({ where: { id: run.plantId! }, select: { dayStoreId: true } });
+        const shelf = plant?.dayStoreId ? await getOnHandByDayStoreAndItem(plant.dayStoreId, shortfalls.map((s) => s.itemId), tx) : new Map<string, { onHand: number }>();
+        const stillShort = shortfalls.filter((s) => s.requestedQty - s.available > (shelf.get(s.itemId)?.onHand ?? 0) + 1e-9);
+        if (stillShort.length > 0) {
+          throw new RouteError(
+            409,
+            `The Plant and its Day Store together don't hold enough: ${stillShort.map((s) => `${nameById.get(s.itemId)} (needs ${s.requestedQty}, Plant has ${s.available}, Day Store has ${Math.round((shelf.get(s.itemId)?.onHand ?? 0) * 1000) / 1000})`).join("; ")}`,
+          );
+        }
+        for (const s of shortfalls) {
+          const need = Math.round((s.requestedQty - s.available) * 1000) / 1000;
+          const unit = consumption.find((c) => c.itemId === s.itemId)!.unit;
+          const open = await tx.inventoryRequest.findFirst({
+            where: { purchaseOrderItemId: run.purchaseOrderItemId, itemId: s.itemId, purpose: "ISSUED_PRODUCTION", preProductionId: null, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } },
+            include: { fulfillments: { where: { deletedAt: null }, select: { quantity: true } } },
+            orderBy: { createdAt: "asc" },
+          });
+          await tx.inventoryTransaction.create({
+            data: {
+              itemId: s.itemId,
+              type: "ISSUED_PRODUCTION",
+              date: new Date(),
+              unit,
+              quantity: need,
+              createdById: actorId,
+              dayStoreId: plant!.dayStoreId,
+              plantId: run.plantId,
+              fulfillsRequestId: open?.id ?? null,
+              deliveredAt: new Date(),
+              deliveredById: actorId,
+              remark: "Issued to the Plant at Dispensing",
+            },
+          });
+          if (open) {
+            const issued = open.fulfillments.reduce((x, f) => x + f.quantity, 0) + need;
+            await tx.inventoryRequest.update({ where: { id: open.id }, data: { status: issued >= open.requestedQty - 1e-9 ? "ISSUED" : "PARTIALLY_ISSUED" } });
+          }
+        }
       }
     }
 
@@ -246,6 +307,7 @@ export async function transitionPreProductionStage(params: {
           requestedQty: l.requestedQty,
           purpose: "ISSUED_PRODUCTION",
           plantId: run.plantId ?? undefined,
+          purchaseOrderItemId: run.purchaseOrderItemId,
           preProductionId: run.id,
           requestedById: actorId,
           neededBy: l.neededBy,

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, apiCount } from "./api";
+import { api, apiAll, apiCount } from "./api";
 import type {
+  BatchPrepStageId,
   AppNotification,
   AuditLogEntry,
   BatchImportSummary,
@@ -39,14 +40,16 @@ import type {
   ManagedUser,
   MaterialReconciliationRow,
   Plant,
-  PoBilling,
   PoReadinessRow,
   PoFullReport,
   PoReconciliation,
   PoWastageRejectionRow,
   PendingPoMaterialRow,
-  AddOnPlanCandidate,
+  MaterialPlanningResult,
+  PpicSummary,
   AddOnPlanDetail,
+  AddOnProduct,
+  AddOnResult,
   PreInventoryRequirement,
   ProductType,
   PurchaseOrder,
@@ -58,6 +61,8 @@ import type {
   RecipeRequestStatus,
   RecipeDetail,
   RecipeSummary,
+  BomVersionSummary,
+  PoProduct,
   RecycleBinEntityType,
   RecycleBinRow,
   RecycleStoreByBatchRow,
@@ -99,7 +104,9 @@ import type { ImportVendorRow } from "./vendorsImport";
 // silently truncated at the default 50, same class of bug usePurchaseOrders
 // already had to work around below.
 export function useCustomers() {
-  return useQuery({ queryKey: ["customers"], queryFn: () => api<Customer[]>("/api/customers?pageSize=200") });
+  // The whole directory (every page) for dropdown pickers; the Customers table
+  // pages through /api/customers with usePagedList.
+  return useQuery({ queryKey: ["customers", "all"], queryFn: () => apiAll<Customer>("/api/customers") });
 }
 
 export function useCreateCustomer() {
@@ -129,7 +136,9 @@ export function useImportCustomerUpdates() {
 // --- Vendors ---
 
 export function useVendors() {
-  return useQuery({ queryKey: ["vendors"], queryFn: () => api<Vendor[]>("/api/vendors?pageSize=200") });
+  // The whole directory (every page) - dropdown pickers need all of it. The
+  // Vendors table itself pages through /api/vendors with usePagedList.
+  return useQuery({ queryKey: ["vendors", "all"], queryFn: () => apiAll<Vendor>("/api/vendors") });
 }
 
 export function useCreateVendor() {
@@ -160,7 +169,7 @@ export function useImportVendors() {
 // with the customer PurchaseOrder above) ---
 
 export function useVendorPurchaseOrders() {
-  return useQuery({ queryKey: ["vendor-purchase-orders"], queryFn: () => api<VendorPurchaseOrder[]>("/api/vendor-purchase-orders?pageSize=200") });
+  return useQuery({ queryKey: ["vendor-purchase-orders"], queryFn: () => apiAll<VendorPurchaseOrder>("/api/vendor-purchase-orders") });
 }
 
 export function useVendorPurchaseOrder(id: string | undefined) {
@@ -268,8 +277,24 @@ export function useAddVendorPurchaseOrderFreight(poId: string) {
 // silently truncated at the default 50, which the page's own "Download
 // Report" button (and now the pending-PO-aging report) both rely on
 // being the complete list, not a first page of it.
-export function usePurchaseOrders() {
-  return useQuery({ queryKey: ["purchase-orders"], queryFn: () => api<PurchaseOrder[]>("/api/purchase-orders?pageSize=200") });
+// PPIC's tiles: one server call over every PO instead of loading them all into the browser.
+export function usePpicSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["purchase-orders", "ppic", "summary"],
+    queryFn: () => api<PpicSummary>("/api/ppic/summary"),
+    enabled: options?.enabled,
+    // Tiles drift behind actions made on other pages; keep them fresh without a manual refresh.
+    staleTime: 15_000,
+  });
+}
+
+// The five newest POs for the dashboard's "Recent Orders" box - not the whole list.
+export function useRecentOrders() {
+  return useQuery({ queryKey: ["purchase-orders", "recent"], queryFn: () => api<PurchaseOrder[]>("/api/purchase-orders?page=1&pageSize=5") });
+}
+
+export function usePurchaseOrders(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["purchase-orders"], queryFn: () => apiAll<PurchaseOrder>("/api/purchase-orders"), enabled: options?.enabled });
 }
 
 export function usePoWastageRejectionReport(options?: { enabled?: boolean }) {
@@ -291,22 +316,113 @@ export function usePendingPoMaterials(options?: { enabled?: boolean }) {
   });
 }
 
-// Add on Plan — PPIC's PO-independent material search. Debounced by the
-// caller (AddOnPlanPage), not here — the query key changing on every
-// keystroke would otherwise fire a request per character.
-export function useAddOnPlanSearch(query: string) {
+// Material Planning — every planned product's materials, covered vs short,
+// FIFO-allocated across products (see apps/api material-planning.ts).
+export function useMaterialPlanning(options?: { enabled?: boolean }) {
   return useQuery({
-    queryKey: ["add-on-plan", "search", query],
-    queryFn: () => api<AddOnPlanCandidate[]>(`/api/add-on-plan/search?q=${encodeURIComponent(query)}`),
-    enabled: query.trim().length >= 2,
+    queryKey: ["purchase-orders", "reports", "material-planning"],
+    queryFn: () => api<MaterialPlanningResult>("/api/purchase-orders/reports/material-planning"),
+    enabled: options?.enabled,
   });
 }
 
-export function useAddOnPlanDetail(candidate: AddOnPlanCandidate | null) {
+// PPIC's Hold / Release on one product's materials, or on a whole PO's.
+export function useSetItemMaterialHold() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ poId, itemId, held }: { poId: string; itemId: string; held: boolean }) =>
+      api(`/api/purchase-orders/${poId}/items/${itemId}/material-hold`, { method: "PATCH", body: { held } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+// Material Planning's "Send short material to Purchase" for one product.
+export function useSendShortToPurchase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ poId, itemId }: { poId: string; itemId: string }) =>
+      api<{ sent: number; updated: number; skipped: number }>(`/api/purchase-orders/${poId}/items/${itemId}/send-short-to-purchase`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["purchase-orders"] });
+      qc.invalidateQueries({ queryKey: ["pre-inventory"] });
+    },
+  });
+}
+
+// PPIC's Cancel on one product - permanent, reason required (see the API's
+// PATCH /:id/items/:itemId/cancel).
+export function useCancelPoItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ poId, itemId, reason }: { poId: string; itemId: string; reason: string }) =>
+      api(`/api/purchase-orders/${poId}/items/${itemId}/cancel`, { method: "PATCH", body: { reason } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useSetPoMaterialHold() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ poId, held }: { poId: string; held: boolean }) => api<{ updated: number }>(`/api/purchase-orders/${poId}/material-hold`, { method: "PATCH", body: { held } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+// Add on Plan — "can we get this product urgently?": PPIC picks a product, types the quantity, and sees the RM and PM it needs against stock.
+/** Every product the check can work out: the Add on Plan dropdown. */
+export function useAddOnPlanProducts() {
+  return useQuery({ queryKey: ["add-on-plan", "products"], queryFn: () => api<AddOnProduct[]>("/api/add-on-plan/products") });
+}
+
+/** Works the material out for one product and quantity (a calculation, nothing is saved). */
+export function useCalculateAddOn() {
+  return useMutation({
+    mutationFn: (body: { customerId: string; name: string; quantity: number; unit: "KG" | "PACKS" }) => api<AddOnResult>("/api/add-on-plan/calculate", { method: "POST", body }),
+  });
+}
+
+// PPIC plan-sent list's "View" — same Add on Plan material read, resolved
+// from a specific PO line item instead of a Sku/Recipe search. Only
+// fetched once the panel for that row is actually opened (see poItemId).
+// How far a product's run preparation has got, for the plan view: GRN, Indent, Dispensing and Line Clearance.
+export interface PlanPreparation {
+  stage: string;
+  grnNo: string | null;
+  grnDate: string | null;
+  indentSlip: string | null;
+  indentDate: string | null;
+  rmDispensingDate: string | null;
+  pmIssuedDate: string | null;
+  lineClearance: string | null;
+}
+
+export function usePoItemPlan(poId: string, itemId: string | null, options?: { released?: boolean }) {
+  const released = !!options?.released;
   return useQuery({
-    queryKey: ["add-on-plan", "detail", candidate?.type, candidate?.id],
-    queryFn: () => api<AddOnPlanDetail>(`/api/add-on-plan/${candidate!.type === "SKU" ? "sku" : "recipe"}/${candidate!.id}`),
-    enabled: !!candidate,
+    queryKey: ["purchase-orders", poId, "items", itemId, "plan", released ? "released" : "full"],
+    queryFn: () =>
+      api<{ bom: AddOnPlanDetail | null; rm: AddOnPlanDetail | null; preparation?: PlanPreparation | null; release?: { orderQty: number; releasedQty: number; unit: string } }>(
+        `/api/purchase-orders/${poId}/items/${itemId}/plan${released ? "?released=1" : ""}`,
+      ),
+    enabled: !!itemId,
+  });
+}
+
+// PPIC's "Send partial" dialog: what is left to release, and a suggestion of how much the material in hand covers.
+export interface ReleaseInfo {
+  orderQty: number;
+  releasedQty: number;
+  remainingQty: number;
+  unit: string;
+  suggestedQty: number | null;
+  limitedBy: string | null;
+}
+
+export function useReleaseInfo(poId: string, itemId: string | null) {
+  return useQuery({
+    queryKey: ["purchase-orders", poId, "items", itemId, "release-info"],
+    queryFn: () => api<ReleaseInfo>(`/api/purchase-orders/${poId}/items/${itemId}/release-info`),
+    enabled: !!itemId,
   });
 }
 
@@ -316,6 +432,21 @@ export function useItemStockByLocation(itemId: string | undefined) {
     queryFn: () => api<ItemStockByLocation>(`/api/inventory/items/${itemId}/stock-by-location`),
     enabled: !!itemId,
   });
+}
+
+export interface OrderConversion {
+  packs: number | null;
+  kg: number | null;
+  packSizeText: string | null;
+  packSizeSource: "PO line" | "Packaging BOM" | null;
+  note: string | null;
+  packsProblem: string | null;
+  kgProblem: string | null;
+}
+
+// How a PO line's quantity is turned into packs (Packaging BOM) and Kg (RM BOM). `inputs` only changes the key, so it refreshes after a correction.
+export function usePoItemConversion(poId: string, itemId: string, inputs: string) {
+  return useQuery({ queryKey: ["purchase-orders", poId, "conversion", itemId, inputs], queryFn: () => api<OrderConversion>(`/api/purchase-orders/${poId}/items/${itemId}/conversion`) });
 }
 
 export function usePurchaseOrder(id: string | undefined) {
@@ -350,22 +481,6 @@ export function usePoFullReport(id: string | undefined) {
 // PO-level consolidated Billing — see purchase-orders.routes.ts's
 // GET/POST /:id/billing. Preview (GET) is Purchase+Accounts; generating
 // the saved invoice (POST) is Accounts-only.
-export function usePoBilling(id: string | undefined, options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: ["purchase-orders", id, "billing"],
-    queryFn: () => api<PoBilling>(`/api/purchase-orders/${id}/billing`),
-    enabled: !!id && (options?.enabled ?? true),
-  });
-}
-
-export function useGeneratePoInvoice(poId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { invoiceNo?: string; invoiceDate?: string }) => api<PoBilling>(`/api/purchase-orders/${poId}/billing`, { method: "POST", body }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId, "billing"] }),
-  });
-}
-
 export interface CreatePurchaseOrderPayload {
   customerId: string;
   poNumber?: string;
@@ -375,6 +490,7 @@ export interface CreatePurchaseOrderPayload {
   regulatoryStatus?: string;
   items: {
     productName: string;
+    productCategory: string;
     dosageForm?: string;
     quantity: number;
     unit: string;
@@ -386,11 +502,42 @@ export interface CreatePurchaseOrderPayload {
   }[];
 }
 
+// Master list behind the PO forms' Product Category dropdown (Powder,
+// Gummies, Bars, ...). "+ New" on the forms adds to it for everyone.
+export interface ProductCategoryOption {
+  id: string;
+  name: string;
+}
+
+export function useProductCategories() {
+  return useQuery({
+    queryKey: ["product-categories"],
+    queryFn: () => api<ProductCategoryOption[]>("/api/purchase-orders/product-categories"),
+    staleTime: 5 * 60 * 1000,
+  });
+}
+
+export function useCreateProductCategory() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api<ProductCategoryOption>("/api/purchase-orders/product-categories", { method: "POST", body: { name } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["product-categories"] }),
+  });
+}
+
 export function useCreatePurchaseOrder() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: CreatePurchaseOrderPayload) => api<PurchaseOrder>("/api/purchase-orders", { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+// Order Tracking's tiles, counted on the server over every PO (not the page on screen).
+export function usePoSummary() {
+  return useQuery({
+    queryKey: ["purchase-orders", "summary"],
+    queryFn: () => api<{ purchaseOrders: number; products: number; inProduction: number }>("/api/purchase-orders/summary"),
   });
 }
 
@@ -499,8 +646,14 @@ export function useRegulatoryReview(poId: string) {
 export function useSendPlanToProduction(poId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (itemId: string) => api(`/api/purchase-orders/${poId}/items/${itemId}/send-plan-to-production`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders", poId] }),
+    // Pass an item id for a full release, or { itemId, quantity } to release only part of the order.
+    mutationFn: (arg: string | { itemId: string; quantity?: number }) => {
+      const { itemId, quantity } = typeof arg === "string" ? { itemId: arg, quantity: undefined } : arg;
+      return api(`/api/purchase-orders/${poId}/items/${itemId}/send-plan-to-production`, { method: "POST", body: quantity === undefined ? undefined : { quantity } });
+    },
+    // The whole purchase-orders family: also refreshes the Material Planning /
+    // PO Readiness lists, which a sent product leaves.
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
   });
 }
 
@@ -513,7 +666,7 @@ export function useSendPlanToProduction(poId: string) {
 export function usePoReadiness(readyOnly?: boolean, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["po-readiness", readyOnly ?? false],
-    queryFn: () => api<PoReadinessRow[]>(`/api/po-readiness?pageSize=200${readyOnly ? "&ready=true" : ""}`),
+    queryFn: () => apiAll<PoReadinessRow>(`/api/po-readiness${readyOnly ? "?ready=true" : ""}`),
     enabled: options?.enabled,
   });
 }
@@ -598,7 +751,7 @@ export function useUploadPoDocument(poId: string) {
 export function usePreProductions(purchaseOrderItemId?: string) {
   return useQuery({
     queryKey: ["pre-productions", { purchaseOrderItemId }],
-    queryFn: () => api<PreProduction[]>(`/api/pre-productions${purchaseOrderItemId ? `?purchaseOrderItemId=${purchaseOrderItemId}` : ""}`),
+    queryFn: () => apiAll<PreProduction>(`/api/pre-productions${purchaseOrderItemId ? `?purchaseOrderItemId=${purchaseOrderItemId}` : ""}`),
   });
 }
 
@@ -618,10 +771,38 @@ export function useDispensingRequirements(preProductionId: string | undefined) {
   });
 }
 
+// Stage 1's panel: what the released quantity needs, what has reached the Plant, what is on its way.
+export interface MaterialCoverageLine {
+  material: string;
+  category: "RM" | "PM";
+  unit: string;
+  requiredQty: number;
+  receivedQty: number;
+  atDayStoreQty: number;
+  inTransitQty: number;
+  shortQty: number;
+  covered: boolean;
+}
+export interface MaterialCoverage {
+  releasedQty: number;
+  orderQty: number;
+  unit: string;
+  lines: MaterialCoverageLine[];
+  allCovered: boolean;
+}
+export function useMaterialCoverage(preProductionId: string | undefined, options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-productions", "material-coverage", preProductionId],
+    queryFn: () => api<MaterialCoverage | null>(`/api/pre-productions/${preProductionId}/material-coverage`),
+    enabled: !!preProductionId && (options?.enabled ?? true),
+    staleTime: 10_000,
+  });
+}
+
 export function useCreatePreProduction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { purchaseOrderItemId: string; plantId?: string; confirmNotReady?: boolean }) => api<PreProduction>("/api/pre-productions", { method: "POST", body }),
+    mutationFn: (body: { purchaseOrderItemId: string; plantId?: string; confirmNotReady?: boolean; batchFlow?: boolean }) => api<PreProduction>("/api/pre-productions", { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["pre-productions"] }),
   });
 }
@@ -720,6 +901,7 @@ export function useCreateProductionBatch(preProductionId: string) {
     mutationFn: (body: { batchNo?: string; plannedQty: number }) => api<ProductionBatch>(`/api/pre-productions/${preProductionId}/production-batches`, { method: "POST", body }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions", "plans-board"] });
       qc.invalidateQueries({ queryKey: ["pre-productions", "detail", preProductionId] });
     },
   });
@@ -732,7 +914,10 @@ export function useUpdateProductionBatch(preProductionId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string } & Record<string, unknown>) => api<ProductionBatch>(`/api/production-batches/${id}`, { method: "PATCH", body }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions", "plans-board"] });
+    },
   });
 }
 
@@ -746,6 +931,7 @@ export function useCompleteProductionBatch(preProductionId: string) {
     mutationFn: (id: string) => api<{ productionBatch: ProductionBatch }>(`/api/production-batches/${id}/complete`, { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions", "plans-board"] });
       qc.invalidateQueries({ queryKey: ["pre-productions", "detail", preProductionId] });
       qc.invalidateQueries({ queryKey: ["production-batches"] });
     },
@@ -878,7 +1064,7 @@ export function useSkus(customerId?: string) {
     // SKUs (see the real Packaging Material import), and every caller of
     // this hook wants the whole list at once (a suggestion dropdown, a
     // Generate match), never a paged table.
-    queryFn: () => api<CatalogSku[]>(`/api/catalog/skus?pageSize=200${customerId ? `&customerId=${customerId}` : ""}`),
+    queryFn: () => apiAll<CatalogSku>(`/api/catalog/skus${customerId ? `?customerId=${customerId}` : ""}`),
     enabled: !!customerId,
   });
 }
@@ -918,12 +1104,58 @@ export function useUpdateSku(customerId: string | undefined) {
   });
 }
 
+export interface PmComponentPayload {
+  type: string;
+  quantity: number | null;
+  unit: string;
+  pmCode?: string;
+  pmItemId?: string | null;
+  overagePct?: number | null;
+  spec?: string | null;
+  make?: string | null;
+  packingLevel?: "Primary" | "Secondary" | "Tertiary" | null;
+}
+export interface PmHeaderPayload {
+  productCode?: string | null;
+  packSize?: string | null;
+  packingConfig?: string | null;
+  batchPacks?: number | null;
+}
+
+// Product names BD has put on POs (names only), so R&D sees which products still need a BOM.
+export function usePoProducts(enabled = true) {
+  return useQuery({ queryKey: ["catalog", "po-products"], queryFn: () => api<PoProduct[]>("/api/catalog/po-products"), enabled });
+}
+
+export function useBomVersions(kind: "PM" | "RM", entityId: string | undefined) {
+  return useQuery({ queryKey: ["bom-versions", kind, entityId], queryFn: () => api<BomVersionSummary[]>(`/api/bom-versions/${kind}/${entityId}`), enabled: !!entityId });
+}
+
+export function fetchBomVersion<T>(kind: "PM" | "RM", entityId: string, version: number) {
+  return api<{ version: number; note: string | null; createdAt: string; snapshot: T }>(`/api/bom-versions/${kind}/${entityId}/${version}`);
+}
+
+export function useRestoreBomVersion(kind: "PM" | "RM", entityId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (version: number) => api<{ version: number }>(`/api/bom-versions/${kind}/${entityId}/${version}/restore`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["bom-versions"] });
+      qc.invalidateQueries({ queryKey: ["catalog", "skus"] });
+      qc.invalidateQueries({ queryKey: ["rm-costing", "recipes"] });
+    },
+  });
+}
+
 export function useUpdateSkuPackagingComponents(customerId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, components }: { id: string; components: { type: string; quantity: number | null; unit: string; pmCode?: string }[] }) =>
-      api<CatalogSku>(`/api/catalog/skus/${id}/packaging-components`, { method: "PUT", body: { components } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["catalog", "skus", customerId] }),
+    mutationFn: ({ id, components, header, note }: { id: string; components: PmComponentPayload[]; header?: PmHeaderPayload; note?: string }) =>
+      api<CatalogSku>(`/api/catalog/skus/${id}/packaging-components`, { method: "PUT", body: { components, header, note } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["catalog", "skus", customerId] });
+      qc.invalidateQueries({ queryKey: ["bom-versions"] });
+    },
   });
 }
 
@@ -940,7 +1172,7 @@ export function useImportCatalog() {
 }
 
 export function useBomPlans() {
-  return useQuery({ queryKey: ["bom-plans"], queryFn: () => api<BomPlan[]>("/api/bom/plans") });
+  return useQuery({ queryKey: ["bom-plans"], queryFn: () => apiAll<BomPlan>("/api/bom/plans") });
 }
 
 export function useBomPlan(id: string | undefined) {
@@ -984,15 +1216,6 @@ export function useCalculateBomPlan(planId: string) {
 
 // Turns a calculated plan straight into Pre-Inventory requirements (S1)
 // — one PM requirement per component/spec line.
-export function useSendBomPlanToPreInventory(planId: string) {
-  return useMutation({
-    mutationFn: () =>
-      api<{ requirementsCreated: number; itemsCreated: number; materialRequests: { rowsCreated: number } | null }>(`/api/bom/plans/${planId}/send-to-pre-inventory`, {
-        method: "POST",
-      }),
-  });
-}
-
 // --- Recipe Requests (R&D) — PPIC's "we don't have a Recipe/SKU for
 // this product yet" ask, see recipe-request.routes.ts. ---
 
@@ -1030,7 +1253,7 @@ export function useGiveRecipeRequestEta() {
 export function useRecipes(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["rm-costing", "recipes"],
-    queryFn: () => api<RecipeSummary[]>("/api/rm-costing/recipes"),
+    queryFn: () => apiAll<RecipeSummary>("/api/rm-costing/recipes"),
     enabled: options?.enabled ?? true,
   });
 }
@@ -1047,15 +1270,30 @@ export function useCatalogSkuCount(options?: { enabled?: boolean }) {
   });
 }
 
+export interface RecipeImportPayload {
+  name: string;
+  customerId?: string | null;
+  kind?: "PER_KG" | "PER_UNIT";
+  productCode?: string | null;
+  versionLabel?: string | null;
+  batchSize?: number | null;
+  avgUnitWeightMg?: number | null;
+  note?: string;
+  ingredients: { name: string; brand: string; itemCode?: string; gPerServing: number; proteinPct: number; uom?: string }[];
+}
+
 export function useImportRecipes() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (recipes: { name: string; ingredients: { name: string; brand: string; itemCode?: string; costPerKg: number; gPerServing: number; proteinPct: number }[] }[]) =>
+    mutationFn: (recipes: RecipeImportPayload[]) =>
       api<{ recipesUpserted: number; ingredientsUpserted: number }>("/api/rm-costing/recipes/import", { method: "POST", body: { recipes } }),
     // Prefix match — also catches any cached single-recipe detail (see
     // useRecipe below), since the manual editor (RecipeEditor) saves
     // through this same mutation and needs its own detail view refreshed.
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rm-costing", "recipes"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["rm-costing", "recipes"] });
+      qc.invalidateQueries({ queryKey: ["bom-versions"] });
+    },
   });
 }
 
@@ -1067,7 +1305,7 @@ export function useRecipe(id: string | undefined) {
 }
 
 export function useRmPlans() {
-  return useQuery({ queryKey: ["rm-plans"], queryFn: () => api<RmPlan[]>("/api/rm-costing/plans") });
+  return useQuery({ queryKey: ["rm-plans"], queryFn: () => apiAll<RmPlan>("/api/rm-costing/plans") });
 }
 
 export function useRmPlan(id: string | undefined) {
@@ -1082,14 +1320,6 @@ export function useCreateRmPlan() {
       qc.invalidateQueries({ queryKey: ["rm-plans"] });
       qc.invalidateQueries({ queryKey: ["purchase-orders"] });
     },
-  });
-}
-
-export function useUpdateRmCosting(planId: string) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (costingParams: Record<string, number>) => api<RmPlan>(`/api/rm-costing/plans/${planId}/costing`, { method: "PATCH", body: { costingParams } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rm-plans", planId] }),
   });
 }
 
@@ -1119,15 +1349,6 @@ export function useCalculateRmPlan(planId: string) {
 
 // Turns a calculated plan's procurement rollup straight into
 // Pre-Inventory requirements (S1) — one RM requirement per ingredient.
-export function useSendRmPlanToPreInventory(planId: string) {
-  return useMutation({
-    mutationFn: () =>
-      api<{ requirementsCreated: number; itemsCreated: number; materialRequests: { rowsCreated: number } | null }>(`/api/rm-costing/plans/${planId}/send-to-pre-inventory`, {
-        method: "POST",
-      }),
-  });
-}
-
 // The old separate "MPS Pipeline" hooks have been retired along with the
 // module — see useTransitionPreProductionStage/useTransitionCombinedLotStage above.
 
@@ -1171,6 +1392,15 @@ export function useInventoryStock(category?: InventoryCategory, options?: { enab
   });
 }
 
+// The Stock on Hand tiles over every item (not just the page on screen).
+export function useInventoryStockSummary(category?: InventoryCategory, options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "stock-summary", category],
+    queryFn: () => api<{ itemsTracked: number; negativeStock: number }>(`/api/inventory/stock/summary${category ? `?category=${category}` : ""}`),
+    enabled: options?.enabled,
+  });
+}
+
 export function useFgStock(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["inventory", "fg-stock"],
@@ -1196,15 +1426,13 @@ export function useInventoryTransactions(
   if (filters?.category) params.set("category", filters.category);
   if (filters?.itemId) params.set("itemId", filters.itemId);
   if (filters?.receiptStatus) params.set("receiptStatus", filters.receiptStatus);
-  // Server max (see pagination.ts) — without it this silently truncated
-  // at the default 50, same gap as every other list hook fixed earlier —
-  // an item's full history (the item detail page) especially needs to
-  // see everything, not a first page of it.
-  params.set("pageSize", "200");
+  // Every page - an item's full history (the item detail page) must see
+  // everything, not the first 200. The Material ledger tables page through
+  // usePagedList instead.
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "transactions", filters],
-    queryFn: () => api<InventoryTransaction[]>(`/api/inventory/transactions?${qs}`),
+    queryFn: () => apiAll<InventoryTransaction>(`/api/inventory/transactions${qs ? `?${qs}` : ""}`),
     enabled: options?.enabled,
   });
 }
@@ -1240,6 +1468,8 @@ export function useCreateInventoryTransaction() {
       qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
       qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
       qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
+      // The Store dashboard's lists / tiles that read the ledger
+      for (const key of ["stock-received", "stock-issued", "quarantine-list", "available-stock", "my-store"]) qc.invalidateQueries({ queryKey: ["inventory", key] });
     },
   });
 }
@@ -1333,6 +1563,11 @@ function invalidateInventoryLedger(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
   qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
   qc.invalidateQueries({ queryKey: ["inventory", "quarantine"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "quarantine-list"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "stock-received"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "stock-issued"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "my-store"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "available-stock"] });
   // The QC Dashboard's counts/worklist are a live aggregate over this
   // same data — a review made from either place has to refresh both.
   qc.invalidateQueries({ queryKey: ["qc", "dashboard"] });
@@ -1341,7 +1576,8 @@ function invalidateInventoryLedger(qc: ReturnType<typeof useQueryClient>) {
 export function useQcReviewTransaction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT" | "HOLD"; note?: string }) =>
+    // samplingDate (yyyy-mm-dd) is required: R&D records when the material was sampled with every inward QC decision.
+    mutationFn: ({ id, ...body }: { id: string; action: "APPROVE" | "REJECT" | "HOLD" | "TEST"; samplingDate: string; note?: string }) =>
       api<InventoryTransaction>(`/api/inventory/transactions/${id}/qc`, { method: "PATCH", body }),
     onSuccess: () => invalidateInventoryLedger(qc),
   });
@@ -1402,7 +1638,7 @@ export function useRaiseDebitNote() {
 export function useInventoryRequests(status?: InventoryRequestStatus, options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["inventory", "requests", status],
-    queryFn: () => api<InventoryRequest[]>(`/api/inventory/requests${status ? `?status=${status}` : ""}`),
+    queryFn: () => apiAll<InventoryRequest>(`/api/inventory/requests${status ? `?status=${status}` : ""}`),
     enabled: options?.enabled,
   });
 }
@@ -1516,14 +1752,11 @@ export function useDispatchTransfers(filters?: { type?: DispatchTransferType; cu
   if (filters?.type) params.set("type", filters.type);
   if (filters?.customerId) params.set("customerId", filters.customerId);
   if (filters?.qcStatus) params.set("qcStatus", filters.qcStatus);
-  // Server max (see pagination.ts) — without it this silently truncated
-  // at the default 50, same gap as usePurchaseOrders/
-  // usePreInventoryRequirements had before those were fixed.
-  params.set("pageSize", "200");
+  // Every page, not just the first 200.
   const qs = params.toString();
   return useQuery({
     queryKey: ["inventory", "dispatch-transfers", filters],
-    queryFn: () => api<DispatchTransfer[]>(`/api/inventory/dispatch-transfers?${qs}`),
+    queryFn: () => apiAll<DispatchTransfer>(`/api/inventory/dispatch-transfers${qs ? `?${qs}` : ""}`),
     enabled: options?.enabled,
   });
 }
@@ -1617,8 +1850,8 @@ export function useInvoiceDispatchTransfer() {
 // --- Day Stores / Plants — named, growable identities Store/Admin can
 // add to. See locations.routes.ts. ---
 
-export function useDayStores() {
-  return useQuery({ queryKey: ["inventory", "day-stores"], queryFn: () => api<DayStore[]>("/api/inventory/day-stores") });
+export function useDayStores(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["inventory", "day-stores"], queryFn: () => api<DayStore[]>("/api/inventory/day-stores"), enabled: options?.enabled });
 }
 
 export function useCreateDayStore() {
@@ -1749,15 +1982,12 @@ export function usePreInventoryRequirements(filters?: { category?: InventoryCate
   const params = new URLSearchParams();
   if (filters?.category) params.set("category", filters.category);
   if (filters?.short) params.set("short", "true");
-  // Server max (see pagination.ts) — without it this silently truncated
-  // at the default 50, which both the existing "Download Report" button
-  // and the new PO-aging report (#7) need to see the full list, not a
-  // first page of it.
-  params.set("pageSize", "200");
+  // Every page - the Download Report button and the PO-aging report need the
+  // whole list, not the first 200.
   const qs = params.toString();
   return useQuery({
     queryKey: ["pre-inventory", "requirements", filters],
-    queryFn: () => api<PreInventoryRequirement[]>(`/api/inventory/requirements?${qs}`),
+    queryFn: () => apiAll<PreInventoryRequirement>(`/api/inventory/requirements${qs ? `?${qs}` : ""}`),
     enabled: options?.enabled,
   });
 }
@@ -1770,6 +2000,8 @@ export interface CreateRequirementPayload {
   requiredQty: number;
   size?: string;
   note?: string;
+  // The customer PO product this requirement is for (optional).
+  purchaseOrderItemId?: string;
 }
 
 function invalidateRequirements(qc: ReturnType<typeof useQueryClient>) {
@@ -1807,12 +2039,606 @@ export function useImportRequirements() {
 export function useSetRequirementPurchase() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; poNumber: string; vendorName: string; eta: string }) =>
+    // `quantity` adds a PI line for that much of the shortfall; without it the PI covers everything
+    // still to log (or corrects the latest line when the requirement already has some).
+    mutationFn: ({ id, ...body }: { id: string; poNumber: string; vendorName: string; eta: string; quantity?: number }) =>
       api<PreInventoryRequirement>(`/api/inventory/requirements/${id}/purchase`, { method: "PATCH", body }),
     onSuccess: () => {
       invalidateRequirements(qc);
       qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
     },
+  });
+}
+
+// The receipts (batch, GRN, mfg / expiry date, qty received) behind one item - the Available Stock row's expand.
+// With `period`, only the deliveries QC accepted between those receipt dates (the stock report Received column).
+export function useItemBatches(itemId: string | null, period?: { from?: string; to?: string }) {
+  return useQuery({
+    queryKey: ["inventory", "available-stock", "batches", itemId, period?.from ?? "", period?.to ?? ""],
+    queryFn: () => api<import("./inventoryExport").ItemBatch[]>(`/api/inventory/available-stock/batches?itemId=${itemId}${period ? `&accepted=1${period.from ? `&from=${period.from}` : ""}${period.to ? `&to=${period.to}` : ""}` : ""}`),
+    enabled: !!itemId,
+    staleTime: 30_000,
+  });
+}
+
+// The Store dashboard's first tile: how many RM / PM items have stock somewhere.
+export function useAvailableStockSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "available-stock", "summary"],
+    queryFn: () => api<{ itemsInStock: number; rmItems: number; pmItems: number; locations: number }>("/api/inventory/available-stock/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// --- Material requests: Day Stores / R&D asking the Warehouse, and the short -> PPIC -> Purchase trail. ---
+
+export function useMaterialRequestsSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "material-requests", "summary"],
+    queryFn: () => api<{ open: number; dayStore: number; rnd: number; plan: number; planOverdue: number }>("/api/inventory/material-requests/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+export function useEscalateMaterialRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ source, id }: { source: "store" | "rnd"; id: string }) => api<{ requirementId: string }>(`/api/inventory/material-requests/${source}/${id}/escalate`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "material-requests"] });
+      qc.invalidateQueries({ queryKey: ["pre-inventory"] });
+    },
+  });
+}
+
+export function useCreateStoreRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { itemId: string; requestedQty: number; neededBy?: string; note?: string; dayStoreId?: string }) => api<{ id: string }>("/api/inventory/my-store/requests", { method: "POST", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inventory", "my-store"] });
+      qc.invalidateQueries({ queryKey: ["inventory", "material-requests"] });
+    },
+  });
+}
+
+// A Day Store login: which store(s) it is limited to (scoped=false for the Warehouse-side Store seat).
+export function useMyStoreInfo(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "my-store", "info"],
+    queryFn: () => api<{ scoped: boolean; stores: { id: string; name: string; plantId: string | null; plantName: string | null }[] }>("/api/inventory/my-store/info"),
+    enabled: options?.enabled,
+    staleTime: 60_000,
+  });
+}
+
+// A Day Store dashboard's tiles: entries received from the Warehouse, entries issued on to its Plant.
+export function useMyStoreSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "my-store", "summary"],
+    queryFn: () => api<{ received: number; issuedToPlant: number; requests: number; productionRequests: number; productsCovered: number; productsShort: number }>("/api/inventory/my-store/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// New Plans: products PPIC sent to Production whose run has not started - ready-filled from the PO.
+export interface NewPlan {
+  itemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  productType: "EXISTING" | "NEW";
+  quantity: number;
+  unit: string;
+  volume: number | null;
+  packSize: string | null;
+  plant: { id: string; name: string } | null;
+  sentAt: string;
+  // How much of the order PPIC has released to Production (less than `quantity` = a partial release).
+  releasedQty: number;
+  // Set once Production has started the run (status "running").
+  run: { id: string; currentStageId: string; plannedQty: number; combinedQty: number } | null;
+}
+
+export function useNewPlans(options?: { enabled?: boolean; status?: "new" | "running" }) {
+  const status = options?.status ?? "new";
+  return useQuery({
+    queryKey: ["pre-productions", "new-plans", status],
+    queryFn: () => api<NewPlan[]>(`/api/pre-productions/new-plans${status === "running" ? "?status=running" : ""}`),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// The New Plan page's list: every plan PPIC sent to Production (run started or not), with the run, its batches (shift / manpower /
+// times) and, per batch, the Material Utilization: A used in production, B wastage, C rejected, D sample, E returned to store.
+export interface BoardMaterial {
+  itemId: string;
+  itemName: string;
+  category: string;
+  unit: string;
+  consumedQty: number;
+  wastedQty: number;
+  rejectedQty: number;
+  sampleQty: number;
+  returnedQty: number;
+}
+
+export interface BoardBatch {
+  id: string;
+  batchNo: string | null;
+  status: "IN_PROGRESS" | "COMPLETED";
+  prepStageId: BatchPrepStageId;
+  plannedQty: number;
+  inputQty: number | null;
+  outputQty: number | null;
+  shift: "Day" | "Night" | null;
+  manpowerCount: number | null;
+  shiftStartAt: string | null;
+  shiftEndAt: string | null;
+  materials: BoardMaterial[];
+}
+
+export interface PlanBoardRow {
+  itemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  productType: "EXISTING" | "NEW";
+  quantity: number;
+  releasedQty: number;
+  unit: string;
+  plant: { id: string; name: string } | null;
+  sentAt: string;
+  run: { id: string; currentStageId: string; sampleQcStatus: string | null; batchFlow: boolean; plannedQty: number; combinedQty: number } | null;
+  batches: BoardBatch[];
+  // Usage logged for the run without a batch (older entries, or logged for the run as a whole)
+  unassigned: BoardMaterial[];
+}
+
+// R&D's Received Material: its requests to the Warehouse and the receipt of what was issued.
+export interface ReceivedMaterialVendor {
+  vendorName: string | null;
+  batchNo: string | null;
+  grnNo: string | null;
+  mfgDate: string | null;
+  expiryDate: string | null;
+  quantity: number;
+  unit: string;
+  receivedAt: string;
+}
+
+export type ReceivedMaterialStatus = "REQUESTED" | "ISSUED" | "RECEIVED" | "REJECTED" | "CANCELLED";
+
+export interface ReceivedMaterialRow {
+  key: string;
+  requestId: string | null;
+  transferId: string | null;
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  quantity: number;
+  unit: string;
+  note: string | null;
+  status: ReceivedMaterialStatus;
+  requestedAt: string;
+  requestedByName: string | null;
+  issuedAt: string | null;
+  issuedByName: string | null;
+  receivedAt: string | null;
+  receivedByName: string | null;
+  rejectionReason: string | null;
+  vendors: ReceivedMaterialVendor[];
+  warehouseOnHand: number;
+}
+
+export function useReceivedMaterial(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["rnd-store", "received-material"],
+    queryFn: () => api<ReceivedMaterialRow[]>("/api/rnd-store/received-material"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useRndItemInfo(itemId: string | null) {
+  return useQuery({
+    queryKey: ["rnd-store", "item-info", itemId],
+    queryFn: () => api<{ id: string; name: string; category: "RM" | "PM"; unit: string | null; warehouseOnHand: number; vendors: ReceivedMaterialVendor[] }>(`/api/rnd-store/item-info/${itemId}`),
+    enabled: !!itemId,
+  });
+}
+
+// R&D's Material Utilization: per material that reached the R&D Store, what became of it.
+export interface RndUtilizationLot {
+  id: string;
+  receivedAt: string;
+  quantity: number;
+  unit: string;
+  source: "Warehouse" | "Direct purchase";
+  vendorName: string | null;
+  invoiceNo: string | null;
+  batchNo: string | null;
+  expiryDate: string | null;
+}
+
+export interface RndUtilizationLog {
+  id: string;
+  kind: "TESTING" | "FORMULATION_TRIAL" | "WASTAGE" | "REJECTED" | "CUSTOMER_SAMPLE" | "RETURN";
+  quantity: number;
+  unit: string;
+  date: string;
+  projectName: string | null;
+  formulationRef: string | null;
+  batchNo: string | null;
+  customerName: string | null;
+  brandName: string | null;
+  note: string | null;
+}
+
+export interface RndUtilizationRow {
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  receivedQty: number;
+  firstReceivedAt: string | null;
+  lastReceivedAt: string | null;
+  lots: RndUtilizationLot[];
+  warehouseVendors: ReceivedMaterialVendor[];
+  testingQty: number;
+  formulationQty: number;
+  customerSampleQty: number;
+  rejectedQty: number;
+  returnedQty: number;
+  wastageQty: number;
+  stockQty: number;
+  log: RndUtilizationLog[];
+}
+
+export function useRndUtilization(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["rnd-store", "utilization"],
+    queryFn: () => api<RndUtilizationRow[]>("/api/rnd-store/utilization"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// R&D's Return Material: what R&D sent back to the Warehouse and whether the Warehouse has confirmed it.
+export type RndReturnStatus = "SENT" | "RETURNED";
+export interface RndReturnRow {
+  id: string;
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  quantity: number;
+  unit: string;
+  reason: string | null;
+  status: RndReturnStatus;
+  sentAt: string;
+  sentByName: string | null;
+  returnedAt: string | null;
+  confirmedByName: string | null;
+  rndOnHand: number;
+  warehouseOnHand: number;
+  vendors: ReceivedMaterialVendor[];
+}
+
+export function useRndReturns(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["rnd-store", "returns"],
+    queryFn: () => api<RndReturnRow[]>("/api/rnd-store/returns"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// R&D's Quarantine: material received that is not usable stock (not approved yet, rejected, or expired).
+export type RndQuarantineReason = "PENDING_QC" | "TESTING" | "ON_HOLD" | "REJECTED" | "EXPIRED";
+export interface RndQuarantineRow {
+  id: string;
+  vendorName: string | null;
+  itemName: string;
+  category: "RM" | "PM";
+  quantity: number;
+  rejectedQty: number | null;
+  unit: string;
+  batchNo: string | null;
+  grnNo: string | null;
+  invoiceNo: string | null;
+  receivedAt: string;
+  samplingDate: string | null;
+  expiryDate: string | null;
+  reason: RndQuarantineReason;
+  statusAt: string | null;
+  note: string | null;
+}
+
+export function useRndQuarantine(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "new-material", "quarantine"],
+    queryFn: () => api<RndQuarantineRow[]>("/api/inventory/new-material/quarantine"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// R&D's New Material list: what the Warehouse received from vendors and where it stands in R&D's inward QC.
+export type NewMaterialStatus = "PENDING_QC" | "TESTING" | "ON_HOLD" | "ACCEPTED" | "QC_REJECTED" | "QC_APPROVED";
+export interface NewMaterialRow {
+  id: string;
+  vendorName: string | null;
+  itemName: string;
+  category: "RM" | "PM";
+  quantity: number;
+  unit: string;
+  batchNo: string | null;
+  grnNo: string | null;
+  invoiceNo: string | null;
+  receivedAt: string;
+  samplingDate: string | null;
+  status: NewMaterialStatus;
+  /** When the status was last set (what Aging runs to). Null while still pending. */
+  statusAt: string | null;
+  note: string | null;
+}
+
+export function useNewMaterial(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "new-material"],
+    queryFn: () => api<NewMaterialRow[]>("/api/inventory/new-material"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// Production's Handover page: batches whose manufacturing is complete, and where each is on its way to Dispatch.
+export interface HandoverRow {
+  batchId: string;
+  batchNo: string | null;
+  itemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  unit: string;
+  plant: { id: string; name: string } | null;
+  currentStageId: string;
+  packagingStatus: string | null;
+  outputQty: number | null;
+  packedQty: number | null;
+  dispatchedQty: number;
+  completedAt: string | null;
+  fgStoreAt: string | null;
+  handedOverAt: string | null;
+}
+
+export function useHandoverBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "handover-board"],
+    queryFn: () => api<HandoverRow[]>("/api/production-batches/handover-board"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useHandOverBatch() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (batchId: string) => api(`/api/production-batches/${batchId}/handover`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+    },
+  });
+}
+
+// Production's "Material Received" page: one row per product and material of its plan.
+// NOT_DISPENSED: the Day Store has not dispensed this material to Production yet (Production sees material only after Dispensing).
+export type MaterialBoardStatus = "NOT_DISPENSED" | "NOT_RECEIVED" | "IN_TRANSIT" | "PARTIAL" | "FULL" | "NOT_IN_CATALOG";
+
+export interface MaterialBoardRow {
+  itemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  plant: { id: string; name: string } | null;
+  releasedQty: number;
+  orderQty: number;
+  productUnit: string;
+  material: string;
+  category: "RM" | "PM";
+  unit: string;
+  requiredQty: number;
+  receivedQty: number;
+  inTransitQty: number;
+  balanceQty: number;
+  usedQty: number;
+  leftQty: number;
+  availableQty: number | null;
+  status: MaterialBoardStatus;
+  sentAt: string;
+}
+
+// Production's Indent Issue tile: runs waiting at Indent Issue, with the plan's materials (nothing is typed per material).
+export interface IndentBoardRow {
+  id: string;
+  purchaseOrderItemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  plantName: string | null;
+  orderQty: number;
+  releasedQty: number;
+  productUnit: string;
+  grnNo: string | null;
+  grnDate: string | null;
+  prodIndentSlipSign: string | null;
+  productionPlanDate: string | null;
+  dispatchPlanDate: string | null;
+  unit: string | null;
+  waitingSince: string;
+  materials: MaterialCoverageLine[];
+  allCovered: boolean;
+}
+
+export function useIndentBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-productions", "indent-board"],
+    queryFn: () => api<IndentBoardRow[]>("/api/pre-productions/indent-board"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useForwardIndent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...fields }: { id: string; prodIndentSlipSign: string; productionPlanDate?: string; dispatchPlanDate?: string; unit?: string }) =>
+      api<PreProduction>(`/api/pre-productions/${id}/stage`, { method: "PATCH", body: { action: "FORWARD", ...fields } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pre-productions"] }),
+  });
+}
+
+// The Day Store's tiles: runs at Material Received & GRN, or at Dispensing, at the logged-in Day Store's Plant.
+export interface StoreBoardRequired {
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  requiredQty: number;
+  consumedQty: number;
+  covered: boolean;
+  dayStoreQty: number;
+  plantQty: number;
+}
+export interface StoreBoardRow {
+  id: string;
+  purchaseOrderItemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  plantName: string | null;
+  orderQty: number;
+  releasedQty: number;
+  productUnit: string;
+  grnNo: string | null;
+  grnDate: string | null;
+  materialReceivedRemarks: string | null;
+  prodIndentSlipSign: string | null;
+  rmDispensingDate: string | null;
+  pmIssuedDate: string | null;
+  rmDispensingRemarks: string | null;
+  pmDispensingRemarks: string | null;
+  waitingSince: string;
+  materials: MaterialCoverageLine[];
+  allCovered: boolean;
+  required: StoreBoardRequired[];
+}
+export type StoreBoardStage = "MATERIAL_RECEIVED" | "DISPENSING";
+
+export function useStoreBoard(stage: StoreBoardStage, options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-productions", "store-board", stage],
+    queryFn: () => api<StoreBoardRow[]>(`/api/pre-productions/store-board?stage=${stage}`),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// Moves a run one stage forward with that stage's fields (GRN, or the dispensing lines). A short Dispensing saves what was logged and
+// stays put; `dispensingShortfall` lists what is still to dispense.
+export function useStoreStageForward() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string } & Record<string, unknown>) =>
+      api<PreProduction & { dispensingShortfall?: { itemName: string; requiredQty: number; consumedQty: number; unit: string }[] }>(`/api/pre-productions/${id}/stage`, { method: "PATCH", body: { action: "FORWARD", ...body } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pre-productions"] }),
+  });
+}
+
+export function useMaterialBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-productions", "material-board"],
+    queryFn: () => api<MaterialBoardRow[]>("/api/pre-productions/material-board"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+export function usePlansBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-productions", "plans-board"],
+    queryFn: () => api<PlanBoardRow[]>("/api/pre-productions/plans-board"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+// The Store dashboard's Stock Issued tile: how many issue entries the Warehouse has made.
+export function useStockIssuedSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "stock-issued", "summary"],
+    queryFn: () => api<{ total: number }>("/api/inventory/stock-issued/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// The Store dashboard's Stock Received tile: how many vendor deliveries the Warehouse has taken in.
+export function useStockReceivedSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["inventory", "stock-received", "summary"],
+    queryFn: () => api<{ total: number }>("/api/inventory/stock-received/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// The Incoming Material tile: PI lines still to arrive, how many are late / due within a week.
+export function useIncomingSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["pre-inventory", "requirements", "incoming-summary"],
+    queryFn: () => api<{ lines: number; materials: number; overdue: number; dueThisWeek: number }>("/api/inventory/requirements/incoming/summary"),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+// Edit one logged PI line (PI Number / Vendor / ETA, and its quantity within the shortfall).
+export function useUpdatePurchaseLine() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ requirementId, lineId, ...body }: { requirementId: string; lineId: string; poNumber: string; vendorName: string; eta: string; quantity?: number }) =>
+      api<PreInventoryRequirement>(`/api/inventory/requirements/${requirementId}/lines/${lineId}`, { method: "PATCH", body }),
+    onSuccess: () => {
+      invalidateRequirements(qc);
+      qc.invalidateQueries({ queryKey: ["inventory", "vendors"] });
+    },
+  });
+}
+
+// Remove a PI line (only while nothing of it has arrived).
+export function useDeletePurchaseLine() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ requirementId, lineId }: { requirementId: string; lineId: string }) => api<PreInventoryRequirement>(`/api/inventory/requirements/${requirementId}/lines/${lineId}`, { method: "DELETE" }),
+    onSuccess: () => invalidateRequirements(qc),
   });
 }
 
@@ -1838,21 +2664,15 @@ export function useDeleteRequirement() {
 // --- User management (admin only) ---
 
 export function useUsers() {
-  return useQuery({ queryKey: ["users"], queryFn: () => api<ManagedUser[]>("/api/users") });
+  return useQuery({ queryKey: ["users"], queryFn: () => apiAll<ManagedUser>("/api/users") });
 }
 
-/** Creates a roleless account via the public register endpoint, then (optionally) grants it a role — the two-step flow the API actually exposes, done in one admin action. */
+/** Creates a login. The department admin gets it in his own department; the System Admin picks the department. */
 export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { email: string; password: string; fullName: string; role?: RoleName }) => {
-      const user = await api<{ id: string; email: string; fullName: string }>("/api/auth/register", {
-        method: "POST",
-        body: { email: body.email, password: body.password, fullName: body.fullName },
-      });
-      if (body.role) await api(`/api/users/${user.id}/roles`, { method: "POST", body: { role: body.role } });
-      return user;
-    },
+    // The admin types the login ID and the password; the server makes the account (in the admin's own department, or any for the System Admin).
+    mutationFn: (body: { fullName: string; loginId: string; password: string; email?: string; role?: RoleName }) => api<ManagedUser>("/api/users", { method: "POST", body }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
   });
 }
@@ -1881,15 +2701,22 @@ export function useSetUserActive() {
   });
 }
 
-// fullName and/or email — same PATCH /:userId either edit goes through
-// (see users.routes.ts's updateUserSchema). An email change bumps the
-// target's tokenVersion server-side, so their existing session (if any)
-// stops working immediately — same "why doesn't my change apply" gap
-// deactivate/role-revoke already close.
+// fullName, login ID and/or email — same PATCH /:userId (see users.routes.ts).
+// A login ID or email change bumps the target's tokenVersion server-side, so
+// their existing session (if any) stops working immediately.
 export function useRenameUser() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ userId, fullName, email }: { userId: string; fullName?: string; email?: string }) => api(`/api/users/${userId}`, { method: "PATCH", body: { fullName, email } }),
+    mutationFn: ({ userId, fullName, email, loginId }: { userId: string; fullName?: string; email?: string; loginId?: string }) => api(`/api/users/${userId}`, { method: "PATCH", body: { fullName, email, loginId } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
+  });
+}
+
+/** System Admin only: makes a person the one admin of a department (the earlier one is replaced), or takes it away. */
+export function useSetDeptAdmin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ userId, role, isDeptAdmin }: { userId: string; role: RoleName; isDeptAdmin: boolean }) => api(`/api/users/${userId}/dept-admin`, { method: "PATCH", body: { role, isDeptAdmin } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
   });
 }
@@ -1922,8 +2749,10 @@ export function useAuditLog(filters?: { action?: string; entityType?: string; ac
 }
 
 export function useResetPassword() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) => api(`/api/users/${userId}/reset-password`, { method: "POST", body: { newPassword } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["users"] }),
   });
 }
 
@@ -2034,7 +2863,7 @@ export function useImportRndSampleRequests() {
 export function useCreateRndSampleRequest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { itemId: string; quantity: number; unit: string; note?: string }) => api<RndSampleRequest>("/api/rnd-store/requests", { method: "POST", body }),
+    mutationFn: (body: { itemId: string; quantity: number; unit: string; note?: string; sampleRequestId?: string }) => api<RndSampleRequest>("/api/rnd-store/requests", { method: "POST", body }),
     onSuccess: () => invalidateRndStore(qc),
   });
 }
@@ -2071,25 +2900,6 @@ export function useConfirmRndTransfer() {
   });
 }
 
-export function useRndDirectPurchase() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: {
-      category: InventoryCategory;
-      itemName: string;
-      quantity: number;
-      unit: string;
-      vendorName: string;
-      date?: string;
-      invoiceNo?: string;
-      batchNo?: string;
-      expiryDate?: string;
-      note?: string;
-    }) => api<RndStoreTransaction>("/api/rnd-store/direct-purchase", { method: "POST", body }),
-    onSuccess: () => invalidateRndStore(qc),
-  });
-}
-
 export function useConsumeAtRnd() {
   const qc = useQueryClient();
   return useMutation({
@@ -2112,12 +2922,24 @@ export function useRndStoreStock() {
   return useQuery({ queryKey: ["rnd-store", "stock"], queryFn: () => api<RndStoreStockRow[]>("/api/rnd-store/stock") });
 }
 
-export function useRndStoreTransactions() {
-  return useQuery({ queryKey: ["rnd-store", "transactions"], queryFn: () => api<RndStoreTransaction[]>("/api/rnd-store/transactions") });
+export function useRndStoreTransactions(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["rnd-store", "transactions"],
+    queryFn: () => api<RndStoreTransaction[]>("/api/rnd-store/transactions"),
+    enabled: options?.enabled ?? true,
+  });
 }
 
-export function useRndStoreReport() {
-  return useQuery({ queryKey: ["rnd-store", "report"], queryFn: () => api<RndStoreReportRow[]>("/api/rnd-store/report") });
+export function useRndStoreReport(filters?: { dateFrom?: string; dateTo?: string }, options?: { enabled?: boolean }) {
+  const params = new URLSearchParams();
+  if (filters?.dateFrom) params.set("dateFrom", filters.dateFrom);
+  if (filters?.dateTo) params.set("dateTo", filters.dateTo);
+  const qs = params.toString();
+  return useQuery({
+    queryKey: ["rnd-store", "report", filters ?? {}],
+    queryFn: () => api<RndStoreReportRow[]>(`/api/rnd-store/report${qs ? `?${qs}` : ""}`),
+    enabled: options?.enabled,
+  });
 }
 
 // --- Stock Transfers — Day Store -> Day Store / Warehouse / Plant, see
@@ -2183,7 +3005,7 @@ export function useCancelStockTransfer() {
 export function usePreProductionsByPlant(plantId: string | undefined) {
   return useQuery({
     queryKey: ["pre-productions", { plantId }],
-    queryFn: () => api<PreProduction[]>(`/api/pre-productions?plantId=${plantId}`),
+    queryFn: () => apiAll<PreProduction>(`/api/pre-productions?plantId=${plantId}`),
     enabled: !!plantId,
   });
 }
@@ -2220,6 +3042,8 @@ export interface RecordPlantConsumptionPayload {
   wastedQty?: number;
   rejectedQty?: number;
   returnedQty?: number;
+  sampleQty?: number;
+  productionBatchId?: string;
   unit: string;
   destinationType?: "DAY_STORE" | "WAREHOUSE";
   destDayStoreId?: string;
@@ -2299,5 +3123,217 @@ export function useReturnQcSample(preProductionId: string) {
   return useMutation({
     mutationFn: (body: { itemId: string; quantity: number; unit: string; note?: string }) => api<QcSampleTransfer>(`/api/qc-sample/pre-productions/${preProductionId}/return`, { method: "POST", body }),
     onSuccess: () => invalidateQcSample(qc, preProductionId),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The per-batch flow: Indent (Production) -> Batch No (R&D) -> Dispensing (Day Store) -> Line Clearance (QA) -> production -> Packaging.
+// ---------------------------------------------------------------------------
+
+export interface BatchPrepRow {
+  id: string;
+  batchNo: string | null;
+  plannedQty: number;
+  unit: string;
+  prepStageId: BatchPrepStageId;
+  batchStatus: "IN_PROGRESS" | "COMPLETED";
+  runId: string;
+  itemId: string;
+  poId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  plant: { id: string; name: string } | null;
+  createdAt: string;
+  prodIndentSlipSign: string | null;
+  productionPlanDate: string | null;
+  indentSignedAt: string | null;
+  batchNoAllocatedAt: string | null;
+  rmDispensingDate: string | null;
+  pmIssuedDate: string | null;
+  dispensingRemarks: string | null;
+  dispensedAt: string | null;
+  grnNo: string | null;
+  lineClearanceStatus: string | null;
+  lineClearanceRemarks: string | null;
+  /** QA's BMR 4.0 checklist for this batch: every item must be ticked before the line can be Approved. */
+  lineClearanceChecklist: { key: string; label: string; ok: boolean }[];
+  lineClearanceAt: string | null;
+  /** Dispensing only: this batch's materials and whether the Plant and its Day Store hold them. */
+  requirements?: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean }[];
+}
+
+export function usePrepBoard(stage: BatchPrepStageId, options?: { enabled?: boolean; all?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "prep-board", stage, options?.all ? "all" : "waiting"],
+    queryFn: () => api<BatchPrepRow[]>(`/api/production-batches/prep-board?stage=${stage}${options?.all ? "&all=1" : ""}`),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function usePrepSummary(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "prep-summary"],
+    queryFn: () => api<Record<BatchPrepStageId, number>>("/api/production-batches/prep-summary"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+/** One step of a batch's preparation (indent, batch-no/allocate, dispense, line-clearance). */
+export function useBatchPrepAction(step: "indent" | "batch-no/allocate" | "dispense" | "line-clearance") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string } & Record<string, unknown>) => api<BatchPrepRow>(`/api/production-batches/${id}/${step}`, { method: "POST", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+      qc.invalidateQueries({ queryKey: ["inventory"] });
+    },
+  });
+}
+
+export function usePackagingBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "packaging-board"],
+    queryFn: () => api<ProductionBatch[]>("/api/production-batches/packaging-board"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useUpdatePackaging() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string } & Record<string, unknown>) => api<ProductionBatch>(`/api/production-batches/${id}/packaging`, { method: "PATCH", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+    },
+  });
+}
+
+/** R&D corrects a batch number (until the batch is dispensed). */
+export function useCorrectBatchNo() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, batchNo }: { id: string; batchNo: string }) => api<ProductionBatch>(`/api/production-batches/${id}/batch-no`, { method: "PATCH", body: { batchNo } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["production-batches"] }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Plant Stock: what a Plant holds, what is reserved for batches, what is free, and the leftover to send back to the Day Store.
+// ---------------------------------------------------------------------------
+
+export interface PlantStockRow {
+  plantId: string;
+  plantName: string;
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  onHand: number;
+  reserved: number;
+  free: number;
+  pendingReturn: number;
+  batches: { batchId: string; batchNo: string | null; given: number; used: number; leftover: number; reserved: number }[];
+}
+
+export function usePlantStockBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["plant-stock"],
+    queryFn: () => api<{ plants: { id: string; name: string }[]; rows: PlantStockRow[] }>("/api/plant-stock"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
+  });
+}
+
+export function useReturnFromPlant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { plantId: string; itemId: string; quantity: number; note?: string }) => api<{ id: string }>("/api/plant-stock/return", { method: "POST", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["plant-stock"] });
+      qc.invalidateQueries({ queryKey: ["stock-transfers"] });
+      qc.invalidateQueries({ queryKey: ["inventory"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Production Report, batch level: a batch's timeline, Packaging's own sheet and the RM / PM Utilization (what the plan needs, what the Day
+// Store gave, A used, B wastage, C rejected, D sample, E leftover). Material used outside the plan comes back with inPlan false.
+// ---------------------------------------------------------------------------
+
+export interface BatchReportMaterial extends BoardMaterial {
+  category: "RM" | "PM";
+  inPlan: boolean;
+  requiredQty: number;
+  givenQty: number;
+  /** Extra material asked from the Day Store for this product (not per batch), and how much of it was issued. */
+  extraRequestedQty: number;
+  extraIssuedQty: number;
+}
+
+export interface BatchReportDetail {
+  batchId: string;
+  batchNo: string | null;
+  plannedQty: number;
+  status: "IN_PROGRESS" | "COMPLETED";
+  prepStageId: BatchPrepStageId;
+  currentStageId: string;
+  createdAt: string;
+  productionPlanDate: string | null;
+  indentSignedAt: string | null;
+  batchNoAllocatedAt: string | null;
+  rmDispensingDate: string | null;
+  pmIssuedDate: string | null;
+  dispensedAt: string | null;
+  grnNo: string | null;
+  lineClearanceStatus: string | null;
+  lineClearanceAt: string | null;
+  lineClearanceChecks: Record<string, boolean> | null;
+  shift: "Day" | "Night" | null;
+  manpowerCount: number | null;
+  shiftStartAt: string | null;
+  shiftEndAt: string | null;
+  manufacturingStatus: string | null;
+  manufacturingRemarks: string | null;
+  inputQty: number | null;
+  outputQty: number | null;
+  completedAt: string | null;
+  ipqcStatus: string | null;
+  mfgQaStatus: string | null;
+  mfgApprovedQty: number | null;
+  mfgRejectedQty: number | null;
+  mfgWastageQty: number | null;
+  bulkQcStatus: string | null;
+  packagingShift: "Day" | "Night" | null;
+  packagingManpowerCount: number | null;
+  packagingStartAt: string | null;
+  packagingEndAt: string | null;
+  packagingStatus: string | null;
+  packagingRemarks: string | null;
+  packApprovedQty: number | null;
+  packRejectedQty: number | null;
+  packWastageQty: number | null;
+  fgStoreReceivedDate: string | null;
+  fgQaStatus: string | null;
+  handedOverToDispatchAt: string | null;
+  invoiceDate: string | null;
+  dispatchDate: string | null;
+  dispatchedQty: number | null;
+  materials: BatchReportMaterial[];
+}
+
+export function useBatchReportBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "report-board"],
+    queryFn: () => api<BatchReportDetail[]>("/api/production-batches/report-board"),
+    enabled: options?.enabled,
+    staleTime: 10_000,
   });
 }

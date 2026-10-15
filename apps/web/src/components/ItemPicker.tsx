@@ -124,7 +124,7 @@ export function ItemPicker({
               {matches.map((item, i) => (
                 <div key={item.id}>
                   {item.group && item.group !== matches[i - 1]?.group && (
-                    <p className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-wide text-slate-400 first:pt-1">{item.group}</p>
+                    <p className="px-3 pb-1 pt-2 text-micro font-bold uppercase tracking-wide text-slate-400 first:pt-1">{item.group}</p>
                   )}
                   <button
                     type="button"
@@ -133,13 +133,13 @@ export function ItemPicker({
                     title={displayName(item)}
                   >
                     {Icon && <Icon className="h-3.5 w-3.5 shrink-0 text-slate-400" strokeWidth={2.25} />}
-                    {item.code && <span className="shrink-0 font-mono text-[10px] text-slate-400">{item.code}</span>}
+                    {item.code && <span className="shrink-0 font-mono text-micro text-slate-400">{item.code}</span>}
                     <span className="truncate">{item.name}</span>
                   </button>
                 </div>
               ))}
               {totalMatchCount > matches.length && (
-                <p className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-400">
+                <p className="border-t border-slate-100 px-3 py-1.5 text-micro text-slate-400">
                   {totalMatchCount - matches.length} more — keep typing to narrow it down
                 </p>
               )}

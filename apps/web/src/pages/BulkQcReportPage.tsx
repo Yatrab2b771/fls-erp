@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, Download, FlaskConical, Lock } from "lucide-react";
@@ -6,6 +5,12 @@ import { useAuth } from "../lib/auth";
 import { useCombinedLots, useAllProductionBatches } from "../lib/hooks";
 import { EmptyState } from "../components/EmptyState";
 import type { CombinedLot } from "../lib/types";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
+import { useTileFilters } from "../lib/tileFilters";
+import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
+import { CustomerName } from "../components/CustomerName";
+import { customerTypeLabel } from "../lib/customerTags";
 
 type CoaStatus = "Not Started" | "Analyzed" | "Reviewed" | "Approved";
 
@@ -36,10 +41,11 @@ interface Row {
 function toDownloadRows(rows: Row[]) {
   return rows.map((r) => ({
     Type: r.kind,
+    "COA Status": r.coa ?? "N/A (Production Batch)",
     Product: r.productName,
     Customer: r.customerName,
+    "Customer Type": customerTypeLabel(r.customerName),
     "Batch No": r.batchNo ?? "",
-    "COA Status": r.coa ?? "N/A (Production Batch)",
   }));
 }
 
@@ -56,8 +62,7 @@ export function BulkQcReportPage() {
   const { data: lots, isLoading: lotsLoading } = useCombinedLots();
   const { data: batches, isLoading: batchesLoading } = useAllProductionBatches();
 
-  const [search, setSearch] = useState("");
-  const [coaFilter, setCoaFilter] = useState<CoaStatus | "">("");
+  const filters = useTileFilters();
 
   if (!canView) {
     return <EmptyState icon={Lock} title="Restricted to R&D" hint="Bulk QC / COA belongs to R&D — ask them if you need something here." accent="slate" />;
@@ -89,13 +94,18 @@ export function BulkQcReportPage() {
       })),
   ];
 
-  const q = search.trim().toLowerCase();
-  const rows = allRows.filter((r) => {
-    if (q && !r.productName.toLowerCase().includes(q) && !r.customerName.toLowerCase().includes(q) && !(r.batchNo ?? "").toLowerCase().includes(q)) return false;
-    if (coaFilter && r.coa !== coaFilter) return false;
-    return true;
-  });
-  const isFiltered = !!q || !!coaFilter;
+  const picked = (key: string) => filters.applied.picks[key] ?? [];
+  const has = (key: string, value: string) => !picked(key).length || picked(key).includes(value);
+  const rows = allRows.filter((r) => has("type", r.kind) && has("product", r.productName) && has("customer", r.customerName) && has("batch", r.batchNo ?? "") && has("coa", r.coa ?? "N/A"));
+  const isFiltered = filters.activeCount > 0;
+  const distinct = (get: (r: Row) => string) => [...new Set(allRows.map(get).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const fields: FilterField[] = [
+    { key: "type", label: "Type", options: ["Combined Lot", "Production Batch"] },
+    { key: "product", label: "Product", options: distinct((r) => r.productName) },
+    { key: "customer", label: "Customer", options: distinct((r) => r.customerName) },
+    { key: "batch", label: "Batch No", options: distinct((r) => r.batchNo ?? "") },
+    { key: "coa", label: "COA Status", options: ["Not Started", "Analyzed", "Reviewed", "Approved", "N/A"] },
+  ];
 
   function handleDownload() {
     const sheet = XLSX.utils.json_to_sheet(toDownloadRows(rows));
@@ -103,6 +113,8 @@ export function BulkQcReportPage() {
     XLSX.utils.book_append_sheet(workbook, sheet, "Bulk QC");
     XLSX.writeFile(workbook, `FLS_Bulk_QC_COA_${new Date().toISOString().slice(0, 10)}.xlsx`);
   }
+
+  const pg = useClientPaging(rows);
 
   return (
     <div className="space-y-5">
@@ -128,24 +140,7 @@ export function BulkQcReportPage() {
         </button>
       </div>
 
-      <div className="flex flex-wrap items-end gap-3">
-        <input type="text" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by Product, Customer or Batch No…" className="field w-full max-w-sm text-xs" />
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
-          COA Status
-          <select value={coaFilter} onChange={(e) => setCoaFilter(e.target.value as CoaStatus | "")} className="field text-xs">
-            <option value="">All</option>
-            <option value="Not Started">Not Started</option>
-            <option value="Analyzed">Analyzed</option>
-            <option value="Reviewed">Reviewed</option>
-            <option value="Approved">Approved</option>
-          </select>
-        </label>
-        {coaFilter && (
-          <button type="button" className="btn-ghost btn-sm" onClick={() => setCoaFilter("")}>
-            Clear Filter
-          </button>
-        )}
-      </div>
+      <TileFilterBar filters={filters} tileKey="bulk-qc" fields={fields} hideDates />
 
       {isLoading ? (
         <div className="skeleton h-64 w-full" />
@@ -155,30 +150,37 @@ export function BulkQcReportPage() {
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">Type</th>
+                <th className="px-4 py-3">COA Status</th>
                 <th className="px-4 py-3">Product</th>
                 <th className="px-4 py-3">Customer</th>
                 <th className="px-4 py-3">Batch No</th>
-                <th className="px-4 py-3">COA Status</th>
+                <th className="px-4 py-3 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map((r) => (
+              {pg.rows.map((r) => (
                 <tr key={r.key} className="transition hover:bg-slate-50">
                   <td className="px-4 py-3 text-slate-500">{r.kind}</td>
+                  <td className="px-4 py-3">{r.coa ? <span className={`pill ${COA_PILL_CLASS[r.coa]}`}>{r.coa}</span> : <span className="text-slate-400">N/A</span>}</td>
                   <td className="px-4 py-3 font-bold text-slate-700">
                     <Link to={r.to} className="hover:text-brand-600 hover:underline">
                       {r.productName}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 text-slate-600">{r.customerName}</td>
+                  <td className="px-4 py-3 text-slate-600"><CustomerName name={r.customerName} /></td>
                   <td className="px-4 py-3 text-slate-500">{r.batchNo ?? "—"}</td>
-                  <td className="px-4 py-3">{r.coa ? <span className={`pill ${COA_PILL_CLASS[r.coa]}`}>{r.coa}</span> : <span className="text-slate-400">N/A</span>}</td>
+                  <td className="px-4 py-3 text-right">
+                    <Link to={r.to} className="btn-primary btn-sm">
+                      Open Bulk QC
+                    </Link>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </div>

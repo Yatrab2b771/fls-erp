@@ -4,6 +4,35 @@ import { AppLayout } from "./layout/AppLayout";
 import { LoadingScreen } from "./components/LoadingScreen";
 import { LoginPage } from "./pages/LoginPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { IncomingMaterialPage } from "./pages/IncomingMaterialPage";
+import { AvailableStockPage } from "./pages/AvailableStockPage";
+import { StockReceivedPage } from "./pages/StockReceivedPage";
+import { QuarantinePage } from "./pages/QuarantinePage";
+import { FinishedGoodsPage } from "./pages/FinishedGoodsPage";
+import { StockIssuedPage } from "./pages/StockIssuedPage";
+import { MyStoreMovementsPage } from "./pages/MyStoreMovementsPage";
+import { MaterialRequestsPage } from "./pages/MaterialRequestsPage";
+import { PlanBundlesPage } from "./pages/PlanBundlesPage";
+import { NewPlansPage } from "./pages/NewPlansPage";
+import { BatchPrepPage } from "./pages/BatchPrepPage";
+import { PackagingPage } from "./pages/PackagingPage";
+import { PlantStockPage } from "./pages/PlantStockPage";
+import { MaterialReceivedPage } from "./pages/MaterialReceivedPage";
+import { IndentIssuePage } from "./pages/IndentIssuePage";
+import { DayStoreStagePage } from "./pages/DayStoreStagePage";
+import { FgStorePage } from "./pages/FgStorePage";
+import { ExtraMaterialPage } from "./pages/ExtraMaterialPage";
+import { FgDispatchPage, FgWarehouseRequestsPage } from "./pages/FgDispatchPage";
+import { HandoverPage } from "./pages/HandoverPage";
+import { ProductionReportPage } from "./pages/ProductionReportPage";
+import { BatchReportPage } from "./pages/BatchReportPage";
+import { NewMaterialPage } from "./pages/NewMaterialPage";
+import { ReceivedMaterialPage } from "./pages/ReceivedMaterialPage";
+import { ReturnMaterialPage } from "./pages/ReturnMaterialPage";
+import { RndMaterialUtilizationPage } from "./pages/RndMaterialUtilizationPage";
+import { RndQuarantinePage } from "./pages/RndQuarantinePage";
+import { MyStoreRequestsPage } from "./pages/MyStoreRequestsPage";
+import { MyStoreProductionRequestsPage } from "./pages/MyStoreProductionRequestsPage";
 import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { CustomersPage } from "./pages/CustomersPage";
 import { VendorsPage } from "./pages/VendorsPage";
@@ -13,7 +42,23 @@ import { StockTransfersPage } from "./pages/StockTransfersPage";
 import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { PpicPlanningDetailPage } from "./pages/PpicPlanningDetailPage";
+import { PpicMaterialPlanningPage } from "./pages/PpicMaterialPlanningPage";
+import { PpicReadyPosPage } from "./pages/PpicReadyPosPage";
 import { BdPlanningDetailPage } from "./pages/BdPlanningDetailPage";
+import { PoReviewPage } from "./pages/PoReviewPage";
+import { QcStagePage } from "./pages/QcStagePage";
+import { RndBomBoardPage } from "./pages/RndBomBoardPage";
+import { SampleRequestsPage } from "./pages/SampleRequestsPage";
+import { VisitingCardsPage } from "./pages/VisitingCardsPage";
+import { LeadsPage } from "./pages/LeadsPage";
+import { LeadForecastPage } from "./pages/LeadForecastPage";
+import { SampleRequestFormPage } from "./pages/SampleRequestFormPage";
+import { SampleRequestDetailPage } from "./pages/SampleRequestDetailPage";
+import { LeadFormPage } from "./pages/LeadFormPage";
+import { LeadDetailPage } from "./pages/LeadDetailPage";
+import { LeadFollowUpsPage } from "./pages/LeadFollowUpsPage";
+import { BdRequestsPage } from "./pages/BdRequestsPage";
+import { HeldProductsPage } from "./pages/HeldProductsPage";
 import { PurchasePlanningDetailPage } from "./pages/PurchasePlanningDetailPage";
 import { RegulatoryPlanningDetailPage } from "./pages/RegulatoryPlanningDetailPage";
 import { StorePlanningDetailPage } from "./pages/StorePlanningDetailPage";
@@ -30,7 +75,14 @@ import { PreInventoryPage } from "./pages/PreInventoryPage";
 import { PoReadinessPage } from "./pages/PoReadinessPage";
 import { AddOnPlanPage } from "./pages/AddOnPlanPage";
 import { InwardQcReportPage } from "./pages/InwardQcReportPage";
+import { AccountsDispatchPage } from "./pages/AccountsDispatchPage";
+import { VendorPaymentsPage } from "./pages/VendorPaymentsPage";
+import { AlertsPage } from "./pages/AlertsPage";
+import { DelayedPage } from "./pages/DelayedPage";
 import { BulkQcReportPage } from "./pages/BulkQcReportPage";
+import { RndSampleRequestsPage } from "./pages/RndSampleRequestsPage";
+import { RndReturnsPage } from "./pages/RndReturnsPage";
+import { RndDispatchesPage } from "./pages/RndDispatchesPage";
 import { UsersPage } from "./pages/UsersPage";
 import { RecycleBinPage } from "./pages/RecycleBinPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
@@ -61,11 +113,66 @@ export default function App() {
       <AppLayout>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/ppic-planning/material-planning" element={<PpicMaterialPlanningPage />} />
+          <Route path="/ppic-planning/po-readiness" element={<PpicReadyPosPage />} />
           <Route path="/ppic-planning/:metric" element={<PpicPlanningDetailPage />} />
           <Route path="/bd-planning/:metric" element={<BdPlanningDetailPage />} />
+          <Route path="/po-review/:id" element={<PoReviewPage />} />
+          <Route path="/qc/:slug" element={<QcStagePage />} />
+          <Route path="/bom-board" element={<RndBomBoardPage />} />
+          <Route path="/sample-requests" element={<SampleRequestsPage />} />
+          <Route path="/sample-requests/new" element={<SampleRequestFormPage />} />
+          <Route path="/sample-requests/:id" element={<SampleRequestDetailPage />} />
+          <Route path="/visiting-cards" element={<VisitingCardsPage />} />
+          <Route path="/leads" element={<LeadsPage />} />
+          <Route path="/leads/new" element={<LeadFormPage />} />
+          <Route path="/leads/follow-ups" element={<LeadFollowUpsPage />} />
+          <Route path="/leads/forecast" element={<LeadForecastPage />} />
+          <Route path="/leads/:id" element={<LeadDetailPage />} />
+          <Route path="/bd-requests" element={<BdRequestsPage />} />
+          <Route path="/held-products" element={<HeldProductsPage />} />
           <Route path="/purchase-planning/:metric" element={<PurchasePlanningDetailPage />} />
           <Route path="/regulatory-planning/:metric" element={<RegulatoryPlanningDetailPage />} />
+          <Route path="/store-planning/quarantine" element={<Navigate to="/quarantine" replace />} />
+          <Route path="/store-planning/fg" element={<Navigate to="/finished-goods" replace />} />
           <Route path="/store-planning/:metric" element={<StorePlanningDetailPage />} />
+          <Route path="/incoming-material" element={<IncomingMaterialPage />} />
+          <Route path="/available-stock" element={<AvailableStockPage />} />
+          <Route path="/stock-received" element={<StockReceivedPage />} />
+          <Route path="/quarantine" element={<QuarantinePage />} />
+          <Route path="/finished-goods" element={<FinishedGoodsPage />} />
+          <Route path="/stock-issued" element={<StockIssuedPage />} />
+          <Route path="/my-store/received" element={<MyStoreMovementsPage kind="received" />} />
+          <Route path="/my-store/requests" element={<MyStoreRequestsPage />} />
+          <Route path="/material-requests" element={<MaterialRequestsPage />} />
+          <Route path="/material-requests-plan" element={<PlanBundlesPage />} />
+          <Route path="/new-plans" element={<NewPlansPage />} />
+          <Route path="/batches" element={<NewPlansPage mode="batch" />} />
+          <Route path="/batch-indent" element={<BatchPrepPage stage="INDENT_ISSUE" />} />
+          <Route path="/batch-no" element={<BatchPrepPage stage="BATCH_NO" />} />
+          <Route path="/batch-dispensing" element={<BatchPrepPage stage="DISPENSING" />} />
+          <Route path="/batch-line-clearance" element={<BatchPrepPage stage="LINE_CLEARANCE" />} />
+          <Route path="/packaging" element={<PackagingPage />} />
+          <Route path="/plant-stock" element={<PlantStockPage />} />
+          <Route path="/material-received" element={<MaterialReceivedPage />} />
+          <Route path="/indent-issue" element={<IndentIssuePage />} />
+          <Route path="/extra-material" element={<ExtraMaterialPage />} />
+          <Route path="/my-store/grn" element={<DayStoreStagePage stage="MATERIAL_RECEIVED" />} />
+          <Route path="/my-store/finished-goods" element={<FgStorePage stages={["FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"]} heading="Finished Goods" blurb="" tileKey="day-store-fg" />} />
+          <Route path="/fg-approval" element={<FgStorePage stages={["FG_QC_RELEASE"]} heading="Finished Goods Approval" blurb="Finished goods held at the Day Store, waiting for QA's approval." tileKey="qa-fg" />} />
+          <Route path="/finished-goods-dispatch" element={<FgDispatchPage />} />
+          <Route path="/fg-warehouse-requests" element={<FgWarehouseRequestsPage />} />
+          <Route path="/my-store/dispensing" element={<DayStoreStagePage stage="DISPENSING" />} />
+          <Route path="/handover" element={<HandoverPage />} />
+          <Route path="/production-report" element={<ProductionReportPage />} />
+          <Route path="/production-report/batch/:batchId" element={<BatchReportPage />} />
+          <Route path="/new-material" element={<NewMaterialPage />} />
+          <Route path="/received-material" element={<ReceivedMaterialPage />} />
+          <Route path="/return-material" element={<ReturnMaterialPage />} />
+          <Route path="/material-utilization" element={<RndMaterialUtilizationPage />} />
+          <Route path="/rnd-quarantine" element={<RndQuarantinePage />} />
+          <Route path="/my-store/production-requests" element={<MyStoreProductionRequestsPage />} />
+          <Route path="/my-store/issued-to-plant" element={<MyStoreMovementsPage kind="issued-to-plant" />} />
           <Route path="/material-consumption" element={<MaterialConsumptionReportPage />} />
           <Route path="/purchase-orders" element={<PurchaseOrdersPage />} />
           <Route path="/customers" element={<CustomersPage />} />
@@ -87,8 +194,16 @@ export default function App() {
           <Route path="/po-readiness" element={<PoReadinessPage />} />
           <Route path="/add-on-plan" element={<AddOnPlanPage />} />
           <Route path="/inward-qc" element={<InwardQcReportPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/vendor-payments" element={<VendorPaymentsPage />} />
+          <Route path="/accounts-dispatch" element={<AccountsDispatchPage />} />
+          <Route path="/delayed" element={<DelayedPage />} />
           <Route path="/bulk-qc" element={<BulkQcReportPage />} />
+          <Route path="/rnd-sample-requests" element={<RndSampleRequestsPage />} />
+          <Route path="/rnd-returns" element={<RndReturnsPage />} />
+          <Route path="/rnd-dispatches" element={<RndDispatchesPage />} />
           <Route path="/users" element={<UsersPage />} />
+          <Route path="/team" element={<UsersPage />} />
           <Route path="/recycle-bin" element={<RecycleBinPage />} />
           <Route path="/system-health" element={<SystemHealthPage />} />
           <Route path="/audit-log" element={<AuditLogPage />} />

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { ArrowRight, Beaker, ClipboardList, Eye, EyeOff, Lock, Mail, Microscope, ShieldCheck, ShoppingCart, Truck } from "lucide-react";
+import { ArrowRight, Beaker, ClipboardList, Eye, EyeOff, Lock, Microscope, ShieldCheck, ShoppingCart, Truck, User } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { ApiError } from "../lib/api";
 
@@ -78,7 +78,7 @@ export function LoginPage() {
           </div>
           <div>
             <p className="text-lg font-black leading-none tracking-tight text-white">FLS Mitr</p>
-            <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-300">Enterprise Platform</p>
+            <p className="mt-1 text-micro font-bold uppercase tracking-[0.2em] text-brand-300">Enterprise Platform</p>
           </div>
         </div>
 
@@ -116,7 +116,7 @@ export function LoginPage() {
                     and set in the corner rather than a large ghosted
                     numeral behind the text, which collided with the
                     hint's third line on the longer cards. */}
-                <span className="pointer-events-none absolute right-3.5 top-3.5 text-[10px] font-black tabular-nums tracking-wider text-white/25">
+                <span className="pointer-events-none absolute right-3.5 top-3.5 text-micro font-black tabular-nums tracking-wider text-white/25">
                   {String(idx + 1).padStart(2, "0")}
                 </span>
 
@@ -126,8 +126,8 @@ export function LoginPage() {
                 >
                   <Icon className="h-[17px] w-[17px] text-brand-200" strokeWidth={1.9} />
                 </div>
-                <p className="text-[13px] font-bold leading-tight text-white">{label}</p>
-                <p className="mt-1 text-[11px] leading-snug text-slate-400">{hint}</p>
+                <p className="text-body font-bold leading-tight text-white">{label}</p>
+                <p className="mt-1 text-tiny leading-snug text-slate-400">{hint}</p>
               </div>
             ))}
           </div>
@@ -137,7 +137,7 @@ export function LoginPage() {
             discrete items rather than one run-on line. */}
         <div className="relative z-10 flex flex-wrap items-center gap-x-5 gap-y-2">
           {ASSURANCES.map((claim) => (
-            <p key={claim} className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+            <p key={claim} className="flex items-center gap-1.5 text-tiny font-semibold text-slate-500">
               <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-brand-400/70" strokeWidth={1.75} /> {claim}
             </p>
           ))}
@@ -157,7 +157,7 @@ export function LoginPage() {
             </div>
             <div>
               <h1 className="text-lg font-black leading-none tracking-tight text-slate-900">FLS Mitr</h1>
-              <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.2em] text-brand-600">Enterprise Platform</p>
+              <p className="mt-1 text-micro font-bold uppercase tracking-[0.2em] text-brand-600">Enterprise Platform</p>
             </div>
           </div>
 
@@ -168,20 +168,20 @@ export function LoginPage() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="label" htmlFor="login-email">
-                  Email
+                  Login ID or email
                 </label>
                 <div className="relative">
-                  <Mail className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" strokeWidth={2} />
+                  <User className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" strokeWidth={2} />
                   <input
                     id="login-email"
-                    type="email"
+                    type="text"
                     required
                     autoComplete="username"
                     autoFocus
                     className="field pl-10"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="you@fls.local"
+                    placeholder="your login ID"
                   />
                 </div>
               </div>
@@ -226,12 +226,14 @@ export function LoginPage() {
               </button>
             </form>
 
-            <p className="mt-6 flex items-center justify-center gap-1.5 border-t border-slate-100 pt-5 text-[11px] font-semibold text-slate-400">
+            <p className="mt-5 text-center text-tiny font-semibold text-slate-500">Forgot your password? Ask your department admin to set a new one.</p>
+
+            <p className="mt-4 flex items-center justify-center gap-1.5 border-t border-slate-100 pt-5 text-tiny font-semibold text-slate-400">
               <Lock className="h-3 w-3" strokeWidth={2.5} /> Access is scoped to your department's role
             </p>
           </div>
 
-          <p className="mt-6 text-center text-[11px] text-slate-400">© 2026 FLS Mitr — Order Tracking, Packaging BOM &amp; RM BOM</p>
+          <p className="mt-6 text-center text-tiny text-slate-400">© 2026 FLS Mitr — Order Tracking, Packaging BOM &amp; RM BOM</p>
         </div>
       </div>
     </div>

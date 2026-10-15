@@ -47,26 +47,6 @@ export const dispatchToCustomerSchema = z.object({
   note: z.string().max(500).optional(),
 });
 
-// Direct Purchase — R&D buying and receiving material itself, never
-// through the Warehouse/Store ledger at all. Resolve-or-create by
-// (category, itemName) — same convention as every other bulk/manual
-// entry point in this app that might be naming a brand-new catalog item
-// for the first time (see po-readiness's createPoMaterialRequirements) —
-// rather than requiring an existing itemId, since R&D buying something
-// the catalog has never seen before is the whole point of this route.
-export const rndDirectPurchaseSchema = z.object({
-  category: z.enum(["RM", "PM"]),
-  itemName: z.string().min(1).max(200),
-  quantity: z.coerce.number().positive(),
-  unit: z.string().min(1).max(40),
-  vendorName: z.string().min(1).max(200),
-  date: z.coerce.date().optional(),
-  invoiceNo: z.string().max(100).optional(),
-  batchNo: z.string().max(100).optional(),
-  expiryDate: z.coerce.date().optional(),
-  note: z.string().max(500).optional(),
-});
-
 // R&D asking Store for material — the real-world trigger for step 1 (see
 // RndSampleRequest in schema.prisma). Store fulfills or rejects it.
 export const createRndSampleRequestSchema = z.object({
@@ -74,6 +54,8 @@ export const createRndSampleRequestSchema = z.object({
   quantity: z.coerce.number().positive(),
   unit: z.string().min(1).max(40),
   note: z.string().max(500).optional(),
+  // The customer sample request this raw material is for (optional)
+  sampleRequestId: z.string().uuid().optional(),
 });
 
 export const rejectRndSampleRequestSchema = z.object({
@@ -98,7 +80,6 @@ export const importRndSampleRequestsSchema = z.object({
     .max(500),
 });
 
-export type RndDirectPurchaseInput = z.infer<typeof rndDirectPurchaseSchema>;
 export type CreateRndTransferInput = z.infer<typeof createRndTransferSchema>;
 export type ConsumeAtRndInput = z.infer<typeof consumeAtRndSchema>;
 export type DispatchToCustomerInput = z.infer<typeof dispatchToCustomerSchema>;

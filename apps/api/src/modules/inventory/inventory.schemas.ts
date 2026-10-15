@@ -327,7 +327,15 @@ export const qcReviewSchema = z
 // Approve (e.g. 5 of 50 Kg damaged, the rest still clears); that split
 // was dropped — QC is a clean call, not a quantity negotiation, so this
 // now just aliases the plain schema.
-export const inwardQcReviewSchema = qcReviewSchema;
+// Inward QC by R&D: the date the material was sampled is required, and Testing (sampled, being tested) is a fourth outcome besides
+// Approve / Reject / Hold. Reject and Hold still need a note.
+export const inwardQcReviewSchema = z
+  .object({
+    action: z.enum(["APPROVE", "REJECT", "HOLD", "TEST"]),
+    samplingDate: z.coerce.date({ errorMap: () => ({ message: "Enter the sampling date" }) }),
+    note: z.string().max(500).optional(),
+  })
+  .refine((v) => (v.action !== "REJECT" && v.action !== "HOLD") || !!v.note, { message: "A note is required when rejecting or holding QC", path: ["note"] });
 
 export type CreateInventoryItemInput = z.infer<typeof createInventoryItemSchema>;
 export type UpdateInventoryItemInput = z.infer<typeof updateInventoryItemSchema>;

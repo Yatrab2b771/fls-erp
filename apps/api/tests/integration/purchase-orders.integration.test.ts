@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, BATCH_START } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
@@ -20,6 +20,7 @@ async function createCustomer(token: string, companyName = "Acme Nutrition Pvt. 
  * CombinedLot id.
  */
 async function walkToDispatchPlan(itemId: string, plannedQty: number, tokens: { production: string; admin: string }) {
+  await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
   const run = (await request(app).post("/api/pre-productions").set(authHeader(tokens.production)).send({ purchaseOrderItemId: itemId })).body;
   await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
   // JUMP only moves currentStageId — it doesn't set sampleQcStatus, and
@@ -28,12 +29,12 @@ async function walkToDispatchPlan(itemId: string, plannedQty: number, tokens: { 
   // has to set it even after an admin jump. ADMIN bypasses the stage's
   // own department check, same as JUMP does.
   await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
-  const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ plannedQty })).body;
+  const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, plannedQty })).body;
   await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: plannedQty });
-  const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
-  const lot = completed.body.combinedLot as { id: string };
-  await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
-  return lot.id;
+  await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
+  // Every batch is packed, released and dispatched on its own now (no pooled lot): bring it straight to its Dispatch Plan.
+  await prisma.productionBatch.update({ where: { id: pb.id }, data: { currentStageId: "DISPATCH_PLAN" } });
+  return pb.id as string;
 }
 
 describe("POST /api/purchase-orders", () => {
@@ -55,8 +56,8 @@ describe("POST /api/purchase-orders", () => {
         customerId: customer.id,
         poNumber: "PO-1001",
         items: [
-          { productName: "Medicine A", quantity: 100, unit: "KG" },
-          { productName: "Medicine B", quantity: 50, unit: "SKU", volume: 25 },
+          { productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" },
+          { productName: "Medicine B", productCategory: "Powder", quantity: 50, unit: "SKU", volume: 25 },
         ],
       });
     expect(created.status).toBe(201);
@@ -66,13 +67,139 @@ describe("POST /api/purchase-orders", () => {
   });
 });
 
+describe("PO visibility — only BD/Admin see Draft and Rejected POs", () => {
+  it("hides Draft and Rejected POs from every other department, and shows a PO to PPIC the moment BD approves it", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: adminToken } = await createUser(["ADMIN"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const { token: regToken } = await createUser(["REGULATORY"]);
+    const customer = await createCustomer(bdToken);
+
+    const make = async (poNumber: string) =>
+      (
+        await request(app)
+          .post("/api/purchase-orders")
+          .set(authHeader(bdToken))
+          .send({ customerId: customer.id, poNumber, items: [{ productName: "Vis Product", productCategory: "Powder", quantity: 10, unit: "KG" }] })
+      ).body as { id: string };
+    const draft = await make("PO-VIS-DRAFT");
+    const rejected = await make("PO-VIS-REJECTED");
+    const approved = await make("PO-VIS-APPROVED");
+    await request(app).patch(`/api/purchase-orders/${rejected.id}/review`).set(authHeader(bdToken)).send({ status: "REJECTED", rejectionReason: "wrong qty" });
+    await request(app).patch(`/api/purchase-orders/${approved.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+
+    const numbers = async (token: string) => ((await request(app).get("/api/purchase-orders").set(authHeader(token))).body as { poNumber: string }[]).map((p) => p.poNumber).sort();
+
+    // BD and Admin see all three; everyone else only the approved one.
+    expect(await numbers(bdToken)).toEqual(["PO-VIS-APPROVED", "PO-VIS-DRAFT", "PO-VIS-REJECTED"]);
+    expect(await numbers(adminToken)).toEqual(["PO-VIS-APPROVED", "PO-VIS-DRAFT", "PO-VIS-REJECTED"]);
+    expect(await numbers(ppicToken)).toEqual(["PO-VIS-APPROVED"]);
+    expect(await numbers(regToken)).toEqual(["PO-VIS-APPROVED"]);
+
+    // A direct link / PDF / report of an unapproved PO 404s for PPIC, works for BD.
+    for (const po of [draft, rejected]) {
+      for (const path of ["", "/export.pdf", "/full-report", "/reconciliation"]) {
+        expect((await request(app).get(`/api/purchase-orders/${po.id}${path}`).set(authHeader(ppicToken))).status, `PPIC GET ${path} on unapproved PO`).toBe(404);
+      }
+    }
+    expect((await request(app).get(`/api/purchase-orders/${draft.id}`).set(authHeader(bdToken))).status).toBe(200);
+    expect((await request(app).get(`/api/purchase-orders/${draft.id}`).set(authHeader(adminToken))).status).toBe(200);
+    expect((await request(app).get(`/api/purchase-orders/${approved.id}`).set(authHeader(ppicToken))).status).toBe(200);
+
+    // PPIC's own reports never include the unapproved ones either.
+    const report = await request(app).get("/api/purchase-orders/reports/bd-ppic").set(authHeader(ppicToken));
+    expect((report.body as { poNumber: string }[]).map((r) => r.poNumber)).toEqual(["PO-VIS-APPROVED"]);
+    const bdReport = await request(app).get("/api/purchase-orders/reports/bd-ppic").set(authHeader(bdToken));
+    expect((bdReport.body as { poNumber: string }[]).map((r) => r.poNumber).sort()).toEqual(["PO-VIS-APPROVED", "PO-VIS-DRAFT"]);
+    const pending = await request(app).get("/api/purchase-orders/reports/pending-materials").set(authHeader(ppicToken));
+    expect(JSON.stringify(pending.body)).not.toContain("PO-VIS-DRAFT");
+  });
+
+  it("blocks PPIC's planning and material requirements against a PO BD hasn't approved", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+    const customer = await createCustomer(bdToken);
+    const draft = (
+      await request(app)
+        .post("/api/purchase-orders")
+        .set(authHeader(bdToken))
+        .send({ customerId: customer.id, poNumber: "PO-VIS-PLAN", items: [{ productName: "Plan Product", productCategory: "Powder", quantity: 10, unit: "KG" }] })
+    ).body as { id: string; items: { id: string }[] };
+
+    const bom = await request(app).post("/api/bom/plans").set(authHeader(ppicToken)).send({ name: "x", purchaseOrderItemId: draft.items[0]!.id });
+    expect(bom.status).toBe(400);
+    expect(bom.body.error).toMatch(/approved by BD/);
+    const rm = await request(app).post("/api/rm-costing/plans").set(authHeader(ppicToken)).send({ name: "x", purchaseOrderItemId: draft.items[0]!.id });
+    expect(rm.status).toBe(400);
+    expect(rm.body.error).toMatch(/approved by BD/);
+  });
+});
+
+describe("Product Category", () => {
+  it("lists the seeded categories and lets BD add a new one, deduped case-insensitively", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const { token: ppicToken } = await createUser(["PPIC"]);
+
+    const list = await request(app).get("/api/purchase-orders/product-categories").set(authHeader(ppicToken));
+    expect(list.status).toBe(200);
+    const names = list.body.map((c: { name: string }) => c.name);
+    expect(names).toEqual(expect.arrayContaining(["Powder", "Gummies", "Bars", "Capsule", "Tablet", "Liquid"]));
+
+    const denied = await request(app).post("/api/purchase-orders/product-categories").set(authHeader(ppicToken)).send({ name: "Softgel-Test" });
+    expect(denied.status).toBe(403);
+
+    try {
+      const created = await request(app).post("/api/purchase-orders/product-categories").set(authHeader(bdToken)).send({ name: "Softgel-Test" });
+      expect(created.status).toBe(201);
+
+      const again = await request(app).post("/api/purchase-orders/product-categories").set(authHeader(bdToken)).send({ name: "softgel-test" });
+      expect(again.status).toBe(200);
+      expect(again.body.id).toBe(created.body.id);
+    } finally {
+      await prisma.productCategory.deleteMany({ where: { name: "Softgel-Test" } });
+    }
+  });
+
+  it("is required on every new PO line, must exist in the master list, and is stored with the master's spelling", async () => {
+    const { token: bdToken } = await createUser(["BD"]);
+    const customer = await createCustomer(bdToken);
+
+    const missing = await request(app)
+      .post("/api/purchase-orders")
+      .set(authHeader(bdToken))
+      .send({ customerId: customer.id, items: [{ productName: "No Category", quantity: 1, unit: "KG" }] });
+    expect(missing.status).toBe(400);
+
+    const unknown = await request(app)
+      .post("/api/purchase-orders")
+      .set(authHeader(bdToken))
+      .send({ customerId: customer.id, items: [{ productName: "Bad Category", productCategory: "Nonexistent", quantity: 1, unit: "KG" }] });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.error).toMatch(/Unknown Product Category/);
+
+    const created = await request(app)
+      .post("/api/purchase-orders")
+      .set(authHeader(bdToken))
+      .send({ customerId: customer.id, items: [{ productName: "Lowercase", productCategory: "gummies", quantity: 1, unit: "KG" }] });
+    expect(created.status).toBe(201);
+    expect(created.body.items[0].productCategory).toBe("Gummies");
+
+    const added = await request(app).post(`/api/purchase-orders/${created.body.id}/items`).set(authHeader(bdToken)).send({ productName: "Second", productCategory: "Bars", quantity: 2, unit: "KG" });
+    expect(added.status).toBe(201);
+    expect(added.body.productCategory).toBe("Bars");
+
+    const addedWithout = await request(app).post(`/api/purchase-orders/${created.body.id}/items`).set(authHeader(bdToken)).send({ productName: "Third", quantity: 2, unit: "KG" });
+    expect(addedWithout.status).toBe(400);
+  });
+});
+
 describe("POST /api/purchase-orders/import", () => {
   it("is restricted to BD", async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const denied = await request(app)
       .post("/api/purchase-orders/import")
       .set(authHeader(ppicToken))
-      .send({ rows: [{ poNumber: "PO-IMPORT-1", customerName: "X", productName: "Y", quantity: 1, unit: "KG" }] });
+      .send({ rows: [{ poNumber: "PO-IMPORT-1", customerName: "X", productName: "Y", productCategory: "Powder", quantity: 1, unit: "KG" }] });
     expect(denied.status).toBe(403);
   });
 
@@ -85,9 +212,9 @@ describe("POST /api/purchase-orders/import", () => {
       .set(authHeader(bdToken))
       .send({
         rows: [
-          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", orderDate: "2026-08-01", productName: "Whey Protein", quantity: 500, unit: "KG" },
-          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", productName: "Multivitamin Capsules", quantity: 2000, unit: "SKU" },
-          { poNumber: "PO-IMPORT-1002", customerName: "Brand New Customer Pvt Ltd", productName: "Omega-3 Softgels", quantity: 1000, unit: "SKU" },
+          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", orderDate: "2026-08-01", productName: "Whey Protein", productCategory: "Powder", quantity: 500, unit: "KG" },
+          { poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", productName: "Multivitamin Capsules", productCategory: "Powder", quantity: 2000, unit: "SKU" },
+          { poNumber: "PO-IMPORT-1002", customerName: "Brand New Customer Pvt Ltd", productName: "Omega-3 Softgels", productCategory: "Powder", quantity: 1000, unit: "SKU" },
         ],
       });
     expect(imported.status).toBe(201);
@@ -108,7 +235,7 @@ describe("POST /api/purchase-orders/import", () => {
     const reimported = await request(app)
       .post("/api/purchase-orders/import")
       .set(authHeader(bdToken))
-      .send({ rows: [{ poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", productName: "A third product", quantity: 1, unit: "KG" }] });
+      .send({ rows: [{ poNumber: "PO-IMPORT-1001", customerName: "Already Known Customer Ltd", productName: "A third product", productCategory: "Powder", quantity: 1, unit: "KG" }] });
     expect(reimported.body.posCreated).toBe(0);
     expect(reimported.body.skippedExisting).toEqual(["PO-IMPORT-1001"]);
     const po1After = await prisma.purchaseOrder.findFirst({ where: { poNumber: "PO-IMPORT-1001" }, include: { items: true } });
@@ -129,12 +256,13 @@ describe("PATCH /api/purchase-orders/:id/review", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
     expect(po.body.status).toBe("DRAFT");
 
     const { token: ppicToken } = await createUser(["PPIC"]);
+    // A Draft PO is invisible to PPIC (404) — it can't even reach the BD-only gate.
     const denied = await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(ppicToken)).send({ status: "APPROVED" });
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(404);
 
     const noReason = await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "REJECTED" });
     expect(noReason.status).toBe(400);
@@ -155,7 +283,7 @@ describe("PATCH /api/purchase-orders/:id/review", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken1))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
 
     const [a, b] = await Promise.all([
       request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken1)).send({ status: "APPROVED" }),
@@ -174,7 +302,7 @@ describe("PATCH /api/purchase-orders/:id/review", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
 
     const rejected = await request(app)
       .patch(`/api/purchase-orders/${po.body.id}/review`)
@@ -193,12 +321,12 @@ describe("PO line items — Add More / edit / remove", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
 
     const added = await request(app)
       .post(`/api/purchase-orders/${po.body.id}/items`)
       .set(authHeader(bdToken))
-      .send({ productName: "Medicine C", quantity: 30, unit: "SKU" });
+      .send({ productName: "Medicine C", productCategory: "Powder", quantity: 30, unit: "SKU" });
     expect(added.status).toBe(201);
 
     const edited = await request(app).patch(`/api/purchase-orders/${po.body.id}/items/${added.body.id}`).set(authHeader(bdToken)).send({ quantity: 45 });
@@ -219,10 +347,11 @@ describe("PO line items — Add More / edit / remove", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 100, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
 
     const itemId = po.body.items[0].id;
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
 
     const edited = await request(app).patch(`/api/purchase-orders/${po.body.id}/items/${itemId}`).set(authHeader(bdToken)).send({ quantity: 60 });
@@ -240,10 +369,11 @@ describe("PO line items — Add More / edit / remove", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
 
     const itemId = po.body.items[0].id;
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     expect(run.status).toBe(201);
 
@@ -263,7 +393,7 @@ describe("PO document upload", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
 
     const upload = await request(app)
       .post(`/api/purchase-orders/${po.body.id}/documents`)
@@ -284,16 +414,21 @@ describe("PO document upload", () => {
 });
 
 describe("GET /api/purchase-orders/:id/export.pdf", () => {
-  it("generates a printable PDF of the PO, open to any authenticated user, at any status", async () => {
+  it("generates a printable PDF of the PO: BD at any status, any other department once it's approved", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const customer = await createCustomer(bdToken);
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, poNumber: "PO-2001", items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.id, poNumber: "PO-2001", items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
     expect(po.body.status).toBe("DRAFT");
 
     const { token: ppicToken } = await createUser(["PPIC"]);
+    // Draft: BD can print it, PPIC can't even see it.
+    expect((await request(app).get(`/api/purchase-orders/${po.body.id}/export.pdf`).set(authHeader(bdToken))).status).toBe(200);
+    expect((await request(app).get(`/api/purchase-orders/${po.body.id}/export.pdf`).set(authHeader(ppicToken))).status).toBe(404);
+
+    await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
     const exported = await request(app).get(`/api/purchase-orders/${po.body.id}/export.pdf`).set(authHeader(ppicToken));
     expect(exported.status).toBe(200);
     expect(exported.headers["content-type"]).toBe("application/pdf");
@@ -309,10 +444,9 @@ describe("GET /api/purchase-orders/:id/export.pdf", () => {
 });
 
 describe("PO completion — days taken from order date to every item's lot reaching Dispatch Plan", () => {
-  it("isCompleted stays false until every item's CombinedLot reaches DISPATCH_PLAN; then completionDate/daysTaken compute off the latest dispatch date", async () => {
+  it("isCompleted stays false until every item's batches have dispatched its whole quantity; then completionDate/daysTaken compute off the latest dispatch date", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: dispatchToken } = await createUser(["DISPATCH"]);
     const { token: adminToken } = await createUser(["ADMIN"]);
     const customer = await createCustomer(bdToken, "Completion Test Customer");
 
@@ -324,8 +458,8 @@ describe("PO completion — days taken from order date to every item's lot reach
         poNumber: "PO-COMPLETION-1001",
         orderDate: "2026-08-01",
         items: [
-          { productName: "Medicine A", quantity: 10, unit: "KG" },
-          { productName: "Medicine B", quantity: 5, unit: "KG" },
+          { productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" },
+          { productName: "Medicine B", productCategory: "Powder", quantity: 5, unit: "KG" },
         ],
       });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
@@ -334,18 +468,18 @@ describe("PO completion — days taken from order date to every item's lot reach
     const itemA = po.body.items[0].id;
     const itemB = po.body.items[1].id;
     const tokens = { production: productionToken, admin: adminToken };
-    const lotA = await walkToDispatchPlan(itemA, 10, tokens);
+    const batchA = await walkToDispatchPlan(itemA, 10, tokens);
     // Item B deliberately left behind — no production started on it at all.
     void itemB;
 
-    // Lot A ships — PO still isn't complete, B hasn't even started.
-    await request(app).patch(`/api/combined-lots/${lotA}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-08-10" });
+    // Batch A ships - PO still isn't complete, B hasn't even started.
+    await prisma.productionBatch.update({ where: { id: batchA }, data: { dispatchDate: new Date("2026-08-10"), dispatchedQty: 10 } });
     const stillOpen = await request(app).get(`/api/purchase-orders/${po.body.id}`).set(authHeader(bdToken));
     expect(stillOpen.body.completion.isCompleted).toBe(false);
 
     // B starts, reaches Dispatch Plan and ships later — that's what completes the PO.
-    const lotB = await walkToDispatchPlan(itemB, 5, tokens);
-    await request(app).patch(`/api/combined-lots/${lotB}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-08-15" });
+    const batchB = await walkToDispatchPlan(itemB, 5, tokens);
+    await prisma.productionBatch.update({ where: { id: batchB }, data: { dispatchDate: new Date("2026-08-15"), dispatchedQty: 5 } });
 
     const completed = await request(app).get(`/api/purchase-orders/${po.body.id}`).set(authHeader(bdToken));
     expect(completed.body.completion.isCompleted).toBe(true);
@@ -362,88 +496,3 @@ describe("PO completion — days taken from order date to every item's lot reach
 // Per the client: one consolidated commercial invoice for the whole PO,
 // not one per batch — Price per Pouch (from each item's own RM Costing
 // plan) x estimated pouches actually shipped, summed across every item.
-describe("GET/POST /api/purchase-orders/:id/billing — PO-level consolidated invoice", () => {
-  it("computes Price/Pouch x estimated-pouches-shipped per item, sums into one total, and lets Accounts save it as a real invoice", async () => {
-    const { token: bdToken } = await createUser(["BD"]);
-    const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: adminToken } = await createUser(["ADMIN"]);
-    const { token: dispatchToken } = await createUser(["DISPATCH"]);
-    const { token: purchaseToken } = await createUser(["PURCHASE"]);
-    const { token: accountsToken } = await createUser(["ACCOUNTS"]);
-    const { token: rndToken } = await createUser(["RND"]);
-
-    // A priceable item — a real Recipe (RM Costing auto-matches by name,
-    // Kg-unit only) so Generate calculates a real packSizeG/pricePerPouch.
-    await request(app)
-      .post("/api/rm-costing/recipes/import")
-      .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "Billing Test Whey", ingredients: [{ name: "Whey Isolate", brand: "TestBrand", costPerKg: 600, gPerServing: 25, proteinPct: 0.9 }] }] });
-
-    const customer = await createCustomer(bdToken, "Billing Test Customer");
-    const po = await request(app)
-      .post("/api/purchase-orders")
-      .set(authHeader(bdToken))
-      .send({
-        customerId: customer.id,
-        poNumber: "PO-BILL-1001",
-        items: [
-          { productName: "Billing Test Whey", quantity: 100, unit: "Kg" }, // priceable
-          { productName: "Billing Test Unpriced Product", quantity: 50, unit: "Kg" }, // no Recipe — stays unpriced
-        ],
-      });
-    await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
-    const pricedItemId = po.body.items[0].id;
-    const unpricedItemId = po.body.items[1].id;
-
-    // Generate — auto-matches the Recipe, calculates immediately.
-    const rmPlan = await request(app).post("/api/rm-costing/plans").set(authHeader(bdToken)).send({ name: "Billing Test — RM", purchaseOrderItemId: pricedItemId });
-    expect(rmPlan.body.status).toBe("CALCULATED");
-    const packSizeG = rmPlan.body.result.batches[0].packSizeG;
-    const pricePerPouch = rmPlan.body.result.batches[0].pricePerPouch;
-    expect(packSizeG).toBeGreaterThan(0);
-    expect(pricePerPouch).toBeGreaterThan(0);
-
-    // Production run for the priced item, jumped straight to Dispatch Plan
-    // with a real dispatchedQty (Kg — same unit as the PO item, not pouches).
-    const lotId = await walkToDispatchPlan(pricedItemId, 100, { production: productionToken, admin: adminToken });
-    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(dispatchToken)).send({ action: "FORWARD", dispatchDate: "2026-09-10", dispatchedQty: 85 });
-
-    // Denied roles first.
-    const deniedGet = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(bdToken));
-    expect(deniedGet.status).toBe(403);
-    const deniedGenerate = await request(app).post(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(purchaseToken)).send({});
-    expect(deniedGenerate.status).toBe(403); // Purchase can preview, not commit
-
-    const preview = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(purchaseToken));
-    expect(preview.status).toBe(200);
-    expect(preview.body.invoice).toBeNull(); // nothing saved yet
-
-    const pricedLine = preview.body.lines.find((l: { purchaseOrderItemId: string }) => l.purchaseOrderItemId === pricedItemId);
-    const unpricedLine = preview.body.lines.find((l: { purchaseOrderItemId: string }) => l.purchaseOrderItemId === unpricedItemId);
-
-    // 85 Kg dispatched -> pouches via packSizeG, x pricePerPouch.
-    const expectedPouches = Math.round(((85 * 1000) / packSizeG) * 100) / 100;
-    const expectedAmount = Math.round(expectedPouches * pricePerPouch * 100) / 100;
-    expect(pricedLine).toMatchObject({ dispatchedQtyKg: 85, packSizeG, pricePerPouch, priced: true });
-    expect(pricedLine.estimatedPouches).toBeCloseTo(expectedPouches, 2);
-    expect(pricedLine.amount).toBeCloseTo(expectedAmount, 2);
-
-    // The unpriced item (no RM Costing plan at all) carries a null amount
-    // — never guessed at — and doesn't count toward the total.
-    expect(unpricedLine).toMatchObject({ dispatchedQtyKg: 0, packSizeG: null, pricePerPouch: null, estimatedPouches: null, amount: null, priced: false });
-    expect(preview.body.totalAmount).toBeCloseTo(expectedAmount, 2);
-
-    // Accounts commits it as a real, saved invoice.
-    const generated = await request(app)
-      .post(`/api/purchase-orders/${po.body.id}/billing`)
-      .set(authHeader(accountsToken))
-      .send({ invoiceNo: "INV-PO-1001", invoiceDate: "2026-09-11" });
-    expect(generated.status).toBe(201);
-    expect(generated.body.invoice).toMatchObject({ invoiceNo: "INV-PO-1001", totalAmount: preview.body.totalAmount });
-    expect(generated.body.invoice.generatedBy.fullName).toBeTruthy();
-
-    // A later preview now shows the saved invoice alongside the live recompute.
-    const afterSave = await request(app).get(`/api/purchase-orders/${po.body.id}/billing`).set(authHeader(accountsToken));
-    expect(afterSave.body.invoice.invoiceNo).toBe("INV-PO-1001");
-  });
-});

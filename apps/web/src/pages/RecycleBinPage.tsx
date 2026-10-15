@@ -10,6 +10,8 @@ import { ItemPicker } from "../components/ItemPicker";
 import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
 
 const TYPE_LABEL: Record<RecycleBinEntityType, string> = {
   "inventory-transaction": "Material Received/Issued",
@@ -76,6 +78,8 @@ export function RecycleBinPage() {
     }
   }
 
+  const pg = useClientPaging(filtered);
+
   return (
     <div className="space-y-6">
       <div>
@@ -124,7 +128,7 @@ export function RecycleBinPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((r) => (
+                {pg.rows.map((r) => (
                   <tr key={`${r.entityType}:${r.id}`}>
                     <td>
                       <span className={`pill ${TYPE_COLOR[r.entityType]}`}>{TYPE_LABEL[r.entityType]}</span>
@@ -149,6 +153,7 @@ export function RecycleBinPage() {
                 ))}
               </tbody>
             </table>
+            <ClientPager pg={pg} />
           </div>
         </div>
       )}

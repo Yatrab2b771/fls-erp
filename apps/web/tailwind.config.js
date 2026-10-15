@@ -3,11 +3,22 @@ export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
     extend: {
+      // The text scale. Nothing on screen is smaller than 12px (it used to go down to 9px). Sizes are in rem,
+      // so the Small / Medium / Large switch in the profile menu scales all of them together.
+      fontSize: {
+        micro: ["0.75rem", { lineHeight: "1rem" }], // labels, table headers, badges (12px)
+        tiny: ["0.78125rem", { lineHeight: "1.1rem" }], // small buttons, hints (12.5px)
+        body: ["0.875rem", { lineHeight: "1.3rem" }], // fields, table cells, buttons (14px)
+        xs: ["0.8125rem", { lineHeight: "1.2rem" }], // 13px (was 12px)
+        sm: ["0.9375rem", { lineHeight: "1.4rem" }], // 15px (was 14px)
+      },
       fontFamily: {
         sans: ["Inter", "ui-sans-serif", "system-ui", "sans-serif"],
         mono: ["JetBrains Mono", "ui-monospace", "monospace"],
       },
       colors: {
+        // Grey text was too light on white. These two steps are one shade darker; the rest of slate is unchanged.
+        slate: { 400: "#64748b", 500: "#4b5a70" },
         brand: {
           50: "#eef2ff",
           100: "#e0e7ff",

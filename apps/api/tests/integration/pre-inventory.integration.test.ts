@@ -300,10 +300,10 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     expect(row2.poNumber).toBe("PO-2");
 
     const ppicInbox = await request(app).get("/api/notifications").set(authHeader(ppicToken));
-    expect(ppicInbox.body.notifications.filter((n: { title: string }) => n.title === "PO logged for Whey Protein")).toHaveLength(2);
+    expect(ppicInbox.body.notifications.filter((n: { title: string }) => n.title === "PI logged for Whey Protein")).toHaveLength(2);
 
     const accountsInbox = await request(app).get("/api/notifications").set(authHeader(accountsToken));
-    expect(accountsInbox.body.notifications.some((n: { title: string }) => n.title.includes("2 new POs logged from a bulk import"))).toBe(true);
+    expect(accountsInbox.body.notifications.some((n: { title: string }) => n.title.includes("2 new PIs logged from a bulk import"))).toBe(true);
   });
 
   it('"Stock Now Available" fires only on the 0→positive crossing, only when a requirement is actually waiting on it', async () => {
@@ -322,7 +322,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     // First delivery — 0 -> 150, the crossing. Goes through the normal
     // QC path (not Opening Stock), to prove the alert fires from there too.
     const received = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 150 });
-    await request(app).patch(`/api/inventory/transactions/${received.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${received.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
     const ppicInbox = await request(app).get("/api/notifications").set(authHeader(ppicToken));
     expect(ppicInbox.body.notifications.some((n: { title: string }) => n.title === "Whey Protein now available")).toBe(true);
@@ -332,7 +332,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     // Second delivery on top of existing stock — no repeat alert, it already crossed.
     await request(app).post("/api/notifications/read-all").set(authHeader(ppicToken));
     const received2 = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-22", unit: "Kg", quantity: 50 });
-    await request(app).patch(`/api/inventory/transactions/${received2.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${received2.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
 
     const ppicInboxAfter = await request(app).get("/api/notifications").set(authHeader(ppicToken));
     expect(ppicInboxAfter.body.unreadCount).toBe(0);

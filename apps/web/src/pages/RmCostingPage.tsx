@@ -1,27 +1,18 @@
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Beaker, Calculator, ClipboardList, FileSpreadsheet, FlaskConical, Link2, Pencil, Plus, Trash2, Upload, Wand2, X } from "lucide-react";
+import { Calculator, FileSpreadsheet, FlaskConical, Link2, Wand2, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { downloadFile, ApiError } from "../lib/api";
-import { downloadRecipeImportTemplate, parseRecipeWorkbook, RECIPE_UOM } from "../lib/recipeImport";
-import { EmptyState } from "../components/EmptyState";
+import { RmBomCatalog } from "../components/RmBomCatalog";
 import { RecipeRequestBanner } from "../components/RecipeRequestBanner";
-import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
 import {
   useAddRmPlanItem,
   useCalculateRmPlan,
-  useCreateRmPlan,
-  useImportRecipes,
-  useRecipe,
-  useRecipes,
   useRemoveRmPlanItem,
   useRmPlan,
-  useRmPlans,
-  useSendRmPlanToPreInventory,
-  useUpdateRmCosting,
 } from "../lib/hooks";
-import type { CostingParams, RecipeIngredientRow, SuggestedRecipe } from "../lib/types";
+import type { SuggestedRecipe } from "../lib/types";
 
 // Same idea as Packaging BOM's SkuMatchSuggestions — shown above
 // RecipeRequestBanner's "no catalog match" framing when the PO's product
@@ -59,7 +50,7 @@ function RecipeMatchSuggestions({ planId, suggestions }: { planId: string; sugge
               {s.recipeName} <span className="font-normal text-slate-400">({Math.round(s.score * 100)}% match)</span>
             </span>
             <input
-              className="field w-20 px-2 py-1 text-[11px]"
+              className="field w-20 px-2 py-1 text-tiny"
               type="number"
               min="0"
               step="any"
@@ -77,109 +68,26 @@ function RecipeMatchSuggestions({ planId, suggestions }: { planId: string; sugge
   );
 }
 
-// The manufacturing/packaging cost inputs behind every RM Costing plan —
-// R&D's own domain, same reasoning as Recipe formulation itself (see
-// PATCH /plans/:id/costing's own comment): PPIC consumes this, doesn't
-// set it.
-const COSTING_FIELDS: { key: keyof CostingParams; label: string }[] = [
-  { key: "mfgLossPct", label: "Mfg Loss %" },
-  { key: "packSizeG", label: "Pack Size (g)" },
-  { key: "testCost", label: "Testing Cost" },
-  { key: "jarCost", label: "Jar Cost" },
-  { key: "scoopCost", label: "Scoop Cost" },
-  { key: "labelCost", label: "Label Cost" },
-  { key: "convCost", label: "Conversion Cost" },
-  { key: "ccbCost", label: "CCB/Copp Cost" },
-  { key: "profitPct", label: "Profit %" },
-  { key: "gstPct", label: "GST %" },
-];
-
 export function RmCostingPage() {
   const { hasRole } = useAuth();
-  const canSendToPreInventory = hasRole("PPIC");
 
-  // Deep-linkable via ?plan=<id> — reached from a PO's "Generate" pill on
-  // its detail page (the common case), but R&D can also browse/create a
-  // plan by hand below (Active RM Plan card) for a plan that isn't tied
-  // to any one PO — e.g. costing a formulation ahead of a customer's PO.
-  const [searchParams, setSearchParams] = useSearchParams();
+  // Deep-linkable via ?plan=<id> — reached from a PO's "Generate" pill on its detail page.
+  const [searchParams] = useSearchParams();
   const selectedPlanId = searchParams.get("plan") ?? undefined;
-  function selectPlan(id: string | undefined) {
-    setSearchParams(id ? { plan: id } : {}, { replace: true });
-  }
   const { data: plan } = useRmPlan(selectedPlanId);
   const calculate = useCalculateRmPlan(selectedPlanId ?? "");
   const removeItem = useRemoveRmPlanItem(selectedPlanId ?? "");
-  const updateCosting = useUpdateRmCosting(selectedPlanId ?? "");
-  const sendToPreInventory = useSendRmPlanToPreInventory(selectedPlanId ?? "");
 
   const toast = useToast();
 
   const canEditCosting = hasRole("RND");
-
-  // Active RM Plan — search/select any existing plan, or start a
-  // brand-new one not tied to a PO. R&D-only, same reasoning as
-  // Costing Profile/Import Recipes below.
-  const { data: plans } = useRmPlans();
-  const [planSearch, setPlanSearch] = useState("");
-  const filteredPlans = plans?.filter((p) => p.name.toLowerCase().includes(planSearch.trim().toLowerCase()));
-  const createPlan = useCreateRmPlan();
-  const [newPlanName, setNewPlanName] = useState("");
-  const [showNewPlan, setShowNewPlan] = useState(false);
+  const canViewRecipes = hasRole("PPIC");
 
   // With many batches on one plan, showing every recipe's full ingredient
   // table at once makes the page scroll forever — instead, show a compact
   // picker row of every recipe and only render the selected one's table.
   const [selectedBatchIdx, setSelectedBatchIdx] = useState(0);
   useEffect(() => setSelectedBatchIdx(0), [selectedPlanId]);
-
-  // Recipe Catalog — manually queue any known Recipe straight into the
-  // open plan, without waiting on a PO's own auto-match.
-  const { data: recipes } = useRecipes();
-  const [recipeId, setRecipeId] = useState("");
-  const [batchSizeKg, setBatchSizeKg] = useState("");
-  const addItem = useAddRmPlanItem(selectedPlanId ?? "");
-
-  const importRecipes = useImportRecipes();
-  const [recipeStatus, setRecipeStatus] = useState("");
-
-  async function handleImportRecipes(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    setRecipeStatus("Reading file…");
-    try {
-      const buffer = await file.arrayBuffer();
-      const recipesPayload = parseRecipeWorkbook(buffer);
-      if (!recipesPayload.length) {
-        setRecipeStatus("No recognizable ingredient rows found — each sheet needs an Ingredient and a g/serving column.");
-        return;
-      }
-      const result = await importRecipes.mutateAsync(recipesPayload);
-      setRecipeStatus(`Imported ${result.recipesUpserted} recipe(s), ${result.ingredientsUpserted} ingredient row(s).`);
-      toast.success(`Imported ${result.recipesUpserted} recipe(s), ${result.ingredientsUpserted} ingredient row(s) — any matching PPIC request has been notified.`);
-    } catch (err) {
-      const msg = `Import failed: ${err instanceof ApiError ? err.message : "unknown error"}`;
-      setRecipeStatus(msg);
-      toast.error(msg);
-    }
-  }
-
-  const [costingDraft, setCostingDraft] = useState<Record<string, string>>({});
-  useEffect(() => {
-    if (plan) setCostingDraft(Object.fromEntries(Object.entries(plan.costingParams).map(([k, v]) => [k, String(v)])));
-  }, [plan?.id, plan?.costingParams]);
-
-  function handleSaveCosting() {
-    const parsed = Object.fromEntries(Object.entries(costingDraft).map(([k, v]) => [k, Number(v)]));
-    if (!plan || plan.items.length === 0) {
-      updateCosting.mutate(parsed);
-      return;
-    }
-    updateCosting.mutate(parsed, {
-      onSuccess: () => calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Saved, but couldn't recalculate the plan.") }),
-    });
-  }
 
   function handleRemoveItem(itemId: string, recipeName: string, remainingAfter: number) {
     if (!window.confirm(`Remove "${recipeName}" from this plan?`)) return;
@@ -190,19 +98,6 @@ export function RmCostingPage() {
     });
   }
 
-  async function handleSendToPreInventory(planName: string) {
-    if (!window.confirm(`Send this plan's RM procurement quantities to Pre-Inventory as new requirements?`)) return;
-    try {
-      const result = await sendToPreInventory.mutateAsync();
-      const mrNote = result.materialRequests?.rowsCreated ? ` ${result.materialRequests.rowsCreated} Material Request(s) also raised for Store — no need to re-enter these items.` : "";
-      toast.success(
-        `Sent ${result.requirementsCreated} requirement(s) to Pre-Inventory${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""} — from "${planName}".${mrNote}`,
-      );
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not send to Pre-Inventory");
-    }
-  }
-
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3.5">
@@ -211,132 +106,15 @@ export function RmCostingPage() {
         </div>
         <div>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">RM BOM</h1>
-          <p className="text-sm text-slate-500">Scale a formulation to a batch size and cost it end to end, RM through GST.</p>
+          <p className="text-sm text-slate-500">Scale a formulation to a batch size and get the RM quantity to procure.</p>
         </div>
       </div>
 
-      <div className={canEditCosting ? "grid grid-cols-1 gap-4 lg:grid-cols-[20rem_1fr]" : "space-y-4"}>
-        {canEditCosting && (
-          <div className="space-y-4">
-            <div className="card p-4">
-              <p className="label">Active RM Plan</p>
-              <div className="mb-2">
-                <SearchBar value={planSearch} onChange={setPlanSearch} placeholder="Search plans…" />
-              </div>
-              <select className="field" value={selectedPlanId ?? ""} onChange={(e) => selectPlan(e.target.value || undefined)}>
-                <option value="">— Select a plan —</option>
-                {filteredPlans?.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.status})
-                  </option>
-                ))}
-              </select>
-              <button className="btn-ghost mt-2 w-full" onClick={() => setShowNewPlan((s) => !s)}>
-                <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> New Plan
-              </button>
-              {showNewPlan && (
-                <div className="mt-2 flex gap-2">
-                  <input className="field text-xs" placeholder="Plan name" value={newPlanName} onChange={(e) => setNewPlanName(e.target.value)} />
-                  <button
-                    className="btn-primary shrink-0 text-xs"
-                    onClick={async () => {
-                      if (!newPlanName.trim()) return;
-                      const p = await createPlan.mutateAsync({ name: newPlanName.trim() });
-                      setNewPlanName("");
-                      setShowNewPlan(false);
-                      selectPlan(p.id);
-                    }}
-                  >
-                    Create
-                  </button>
-                </div>
-              )}
-            </div>
+      {(canEditCosting || canViewRecipes) && <RmBomCatalog canEdit={canEditCosting} />}
 
-            <div className="card p-4">
-              <p className="label">Recipe Catalog</p>
-              <select className="field mb-2" value={recipeId} onChange={(e) => setRecipeId(e.target.value)}>
-                <option value="">— Select a recipe —</option>
-                {recipes?.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} ({r.ingredientCount} ingredients)
-                  </option>
-                ))}
-              </select>
-              <div className="flex gap-2">
-                <input type="number" min="0" step="any" placeholder="Batch KG" className="field font-mono" value={batchSizeKg} onChange={(e) => setBatchSizeKg(e.target.value)} />
-                <button
-                  className="btn-primary shrink-0"
-                  disabled={!selectedPlanId}
-                  onClick={async () => {
-                    if (!recipeId || !batchSizeKg) return;
-                    try {
-                      await addItem.mutateAsync({ recipeId, batchSizeKg: Number(batchSizeKg) });
-                      setRecipeId("");
-                      setBatchSizeKg("");
-                      calculate.mutate(undefined, { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Added, but couldn't calculate — check this Recipe's ingredients.") });
-                    } catch (err) {
-                      toast.error(err instanceof ApiError ? err.message : "Could not add this Recipe");
-                    }
-                  }}
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-
-            <div className="card p-4">
-              <p className="label flex items-center gap-1.5">
-                <Beaker className="h-3.5 w-3.5" /> Import Recipes (RM BOM)
-              </p>
-              <p className="mb-2 text-[10px] text-slate-400">One sheet per recipe. Any row with an Ingredient/Material and a g/serving or Quantity column is picked up automatically.</p>
-              <button type="button" className="btn-ghost mb-1.5 block w-full text-center" onClick={downloadRecipeImportTemplate}>
-                <FileSpreadsheet className="h-3.5 w-3.5" strokeWidth={2.5} /> Download Sample
-              </button>
-              <label className="btn-ghost block w-full cursor-pointer text-center">
-                <Upload className="h-3.5 w-3.5" strokeWidth={2.5} /> Choose Spreadsheet…
-                <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportRecipes} />
-              </label>
-              {recipeStatus && <p className="mt-2 text-[10px] text-slate-400">{recipeStatus}</p>}
-            </div>
-
-            {plan && (
-              <div className="card h-fit p-4">
-                <p className="label">Costing Profile</p>
-                <p className="mb-2 text-[10px] text-slate-400">R&D's own inputs — mfg loss, testing, and per-unit packaging costs behind this plan's pricing.</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {COSTING_FIELDS.map((f) => (
-                    <div key={f.key}>
-                      <label className="mb-0.5 block text-[9px] font-bold text-slate-400">{f.label}</label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        className="field !py-1.5 text-xs"
-                        value={costingDraft[f.key] ?? ""}
-                        onChange={(e) => setCostingDraft((v) => ({ ...v, [f.key]: e.target.value }))}
-                        onKeyDown={(e) => e.key === "Enter" && handleSaveCosting()}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <button className="btn-primary mt-2 w-full text-xs" disabled={updateCosting.isPending} onClick={handleSaveCosting}>
-                  {updateCosting.isPending ? "Saving…" : "Save Costing Profile"}
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        <div className="space-y-4">
-        {!plan ? (
-          <EmptyState
-            icon={Beaker}
-            title="No plan open"
-            hint={'Every RM BOM plan is generated straight off a PO — open one via "Generate" (or the RM BOM pill) on the PO\'s detail page.'}
-            accent="amber"
-          />
-        ) : (
+      {/* A plan only shows here when it was opened from a PO's "Generate"; plans are never made by hand any more. */}
+      <div className="space-y-4">
+        {!plan ? null : (
             <>
               {plan.status === "DRAFT" && plan.suggestedRecipes && plan.suggestedRecipes.length > 0 && <RecipeMatchSuggestions planId={plan.id} suggestions={plan.suggestedRecipes} />}
               {plan.status === "DRAFT" && plan.purchaseOrderItemId && <RecipeRequestBanner purchaseOrderItemId={plan.purchaseOrderItemId} />}
@@ -345,7 +123,7 @@ export function RmCostingPage() {
                   <div>
                     <div className="flex items-center gap-2">
                       <h2 className="text-lg font-black text-slate-900">{plan.name}</h2>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${plan.status === "CALCULATED" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                      <span className={`rounded-full px-2 py-0.5 text-micro font-bold uppercase ${plan.status === "CALCULATED" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
                         {plan.status}
                       </span>
                     </div>
@@ -353,7 +131,7 @@ export function RmCostingPage() {
                     {plan.linkedOrder && (
                       <Link
                         to={`/purchase-orders/${plan.linkedOrder.purchaseOrderId}`}
-                        className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 hover:underline"
+                        className="mt-1 inline-flex items-center gap-1 text-micro font-bold text-amber-700 hover:underline"
                       >
                         <Link2 className="h-3 w-3" strokeWidth={2.5} /> {plan.linkedOrder.poNumber ?? "PO"} · {plan.linkedOrder.productName}
                       </Link>
@@ -429,12 +207,11 @@ export function RmCostingPage() {
                             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 bg-amber-50/50 px-4 py-2.5">
                               <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
                                 <p className="font-bold text-slate-800">{b.recipeName}</p>
-                                <span className="font-mono text-[11px] text-slate-500">Batch {b.batchSizeKg} Kg</span>
-                                <span className="text-[11px] text-slate-400">RM Cost ₹{b.totalRmCost.toFixed(0)} · Price/Pouch ₹{b.pricePerPouch.toFixed(2)}</span>
+                                <span className="font-mono text-tiny text-slate-500">Batch {b.batchSizeKg} Kg</span>
                               </div>
                               {item && (
                                 <button
-                                  className="flex items-center gap-1 text-[10px] font-bold text-amber-600 hover:underline"
+                                  className="flex items-center gap-1 text-micro font-bold text-amber-600 hover:underline"
                                   onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/items/${item.id}/dispensing.pdf`, `BMR_${b.recipeName}.pdf`)}
                                 >
                                   <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Dispensing PDF
@@ -466,7 +243,7 @@ export function RmCostingPage() {
                                         <td className="font-mono text-slate-600">{ing.itemCode || "—"}</td>
                                         <td className="font-semibold text-slate-700">{ing.name}</td>
                                         <td className="text-slate-500">{ing.brand}</td>
-                                        <td className="text-center text-slate-400">{RECIPE_UOM}</td>
+                                        <td className="text-center text-slate-400">Kg</td>
                                         <td className="text-right font-mono">{propPerKg.toFixed(4)}</td>
                                         <td className="text-right font-mono font-bold text-amber-700">{ing.qtyInKg.toFixed(3)}</td>
                                       </tr>
@@ -485,22 +262,7 @@ export function RmCostingPage() {
                     <div className="flex items-center justify-between border-b border-slate-100 bg-gradient-to-r from-amber-50/60 to-white px-5 py-4">
                       <h3 className="text-sm font-bold uppercase tracking-wide text-slate-700">Consolidated Master Procurement</h3>
                       <div className="flex gap-2">
-                        {canSendToPreInventory && (
-                          <button
-                            className="btn-primary btn-sm"
-                            disabled={sendToPreInventory.isPending || !!plan.sentToPreInventoryAt}
-                            onClick={() => handleSendToPreInventory(plan.name)}
-                            title={
-                              plan.sentToPreInventoryAt
-                                ? "Already sent — recalculate this plan if you need to send an updated result"
-                                : "Create a Pre-Inventory requirement for each ingredient above"
-                            }
-                          >
-                            <ClipboardList className="h-3 w-3" strokeWidth={2.5} />{" "}
-                            {sendToPreInventory.isPending ? "Sending…" : plan.sentToPreInventoryAt ? "Already Sent" : "Send to Pre-Inventory"}
-                          </button>
-                        )}
-                        <button className="btn-ghost btn-sm" onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/export.xlsx`, `FLS_RM_Costing_${plan.id}.xlsx`)}>
+                                                <button className="btn-ghost btn-sm" onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/export.xlsx`, `FLS_RM_Plan_${plan.id}.xlsx`)}>
                           <FileSpreadsheet className="h-3 w-3" strokeWidth={2.5} /> Excel
                         </button>
                         <button className="btn-ghost btn-sm" onClick={() => downloadFile(`/api/rm-costing/plans/${plan.id}/export.pdf`, `FLS_RM_Master_${plan.id}.pdf`)}>
@@ -535,278 +297,7 @@ export function RmCostingPage() {
               )}
             </>
           )}
-        </div>
       </div>
-
-      {canEditCosting && <RecipeCatalogBrowser />}
-    </div>
-  );
-}
-
-// Manual "Browse & Edit Recipe" — same reasoning as Packaging BOM's own
-// Browse & Edit Catalog (CatalogBrowser/SkuEditor in PackagingBomPage.tsx):
-// R&D shouldn't have to re-upload a whole Excel sheet just to fix one
-// ingredient's cost or add one row. This is deliberately ADDITIONAL to
-// Import Recipes above, not a replacement for it — bulk sheets still
-// work exactly as before; this is just a second way in, for a single
-// recipe at a time, in the same Item Code / Ingredient / Make / Qty per
-// Kg shape as the client's own "Bill of Material (RM)" paper form.
-// Saving here goes through the exact same upsert-by-name backend route
-// Import Recipes already uses (POST /recipes/import, one recipe in the
-// array) — no separate save endpoint needed.
-function RecipeCatalogBrowser() {
-  const toast = useToast();
-  const { data: recipes } = useRecipes();
-  const [search, setSearch] = useState("");
-  const [selectedId, setSelectedId] = useState("");
-  const [addingNew, setAddingNew] = useState(false);
-  const [newRecipeName, setNewRecipeName] = useState("");
-
-  const filtered = recipes?.filter((r) => r.name.toLowerCase().includes(search.trim().toLowerCase()));
-  const selected = recipes?.find((r) => r.id === selectedId);
-
-  function handleCreateNew() {
-    if (!newRecipeName.trim()) return;
-    if (recipes?.some((r) => r.name.toLowerCase() === newRecipeName.trim().toLowerCase())) {
-      toast.error("A recipe with this exact name already exists — select it from the list instead.");
-      return;
-    }
-    // Not saved yet — RecipeEditor's own Save is what actually creates it
-    // (needs at least one real ingredient row first, same "a recipe needs
-    // ingredients" rule Import Recipes enforces).
-    setSelectedId("__new__:" + newRecipeName.trim());
-    setAddingNew(false);
-  }
-
-  const isNew = selectedId.startsWith("__new__:");
-  const newName = isNew ? selectedId.slice("__new__:".length) : "";
-
-  return (
-    <div>
-      <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-        <Pencil className="h-3.5 w-3.5" /> Browse &amp; Edit Recipe
-      </h2>
-      <div className="card grid grid-cols-1 gap-0 md:grid-cols-[16rem_1fr]">
-        <div className="border-b border-slate-100 p-3.5 md:border-b-0 md:border-r">
-          <SearchBar value={search} onChange={setSearch} placeholder="Search recipes…" />
-          {!addingNew ? (
-            <button type="button" className="btn-ghost btn-sm mt-2 w-full" onClick={() => setAddingNew(true)}>
-              <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> New Recipe
-            </button>
-          ) : (
-            <div className="mt-2 flex gap-1.5">
-              <input
-                className="field !py-1.5 min-w-0 flex-1 text-xs"
-                placeholder="Product name"
-                value={newRecipeName}
-                onChange={(e) => setNewRecipeName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCreateNew()}
-              />
-              <button type="button" className="btn-primary btn-sm shrink-0" onClick={handleCreateNew}>
-                Add
-              </button>
-              <button type="button" className="btn-ghost btn-sm shrink-0" onClick={() => setAddingNew(false)}>
-                <X className="h-3 w-3" strokeWidth={2.5} />
-              </button>
-            </div>
-          )}
-          <div className="mt-2 max-h-96 space-y-0.5 overflow-y-auto">
-            {(filtered ?? []).length === 0 && <p className="px-2 py-3 text-[11px] text-slate-400">No recipes yet.</p>}
-            {(filtered ?? []).map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => setSelectedId(r.id)}
-                className={`block w-full truncate rounded-lg px-2.5 py-1.5 text-left text-xs ${r.id === selectedId ? "bg-amber-50 font-bold text-amber-700" : "text-slate-600 hover:bg-slate-50"}`}
-                title={r.name}
-              >
-                {r.name} <span className="text-slate-400">({r.ingredientCount})</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="p-4">
-          {!selected && !isNew ? (
-            <p className="text-xs text-slate-400">Pick a recipe to view/edit its ingredients, or add a new one.</p>
-          ) : isNew ? (
-            <RecipeEditor key={selectedId} recipeId={null} recipeName={newName} />
-          ) : (
-            <RecipeEditor key={selected!.id} recipeId={selected!.id} recipeName={selected!.name} />
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-interface EditableIngredient {
-  key: string; // stable React key — existing row id, or a generated one for a new row
-  itemCode: string;
-  name: string;
-  brand: string;
-  gPerServing: string; // labeled "Qty/Kg" in the UI — see the field's own comment below
-  costPerKg: string;
-  proteinPct: string;
-}
-
-let nextNewRowId = 1;
-function blankRow(): EditableIngredient {
-  return { key: `new-${nextNewRowId++}`, itemCode: "", name: "", brand: "", gPerServing: "", costPerKg: "", proteinPct: "" };
-}
-
-// The recipe's own ingredient table — Item Code / Ingredient / Make / Qty
-// per Kg / Cost per Kg / Protein %, matching the client's paper "Bill of
-// Material (RM)" form column-for-column (see rm-pdf.ts's
-// buildBatchDispensingPdf, which prints this same data). "Qty/Kg" here is
-// stored as RecipeIngredient.gPerServing under the hood — the costing
-// engine only ever uses it as a ratio against the recipe's own total
-// (gPerServing / totalServing), so it doesn't matter that the paper
-// form's own column expresses it directly against a Kg batch instead of
-// a "per serving" concept from the original workbook format; the same
-// number works correctly either way, only the label differs.
-function RecipeEditor({ recipeId, recipeName }: { recipeId: string | null; recipeName: string }) {
-  const toast = useToast();
-  const { data: detail } = useRecipe(recipeId ?? undefined);
-  const importRecipes = useImportRecipes();
-
-  const [rows, setRows] = useState<EditableIngredient[]>(() =>
-    detail ? detail.ingredients.map(rowFromDetail) : [blankRow()],
-  );
-
-  useEffect(() => {
-    setRows(detail ? detail.ingredients.map(rowFromDetail) : [blankRow()]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recipeId, detail?.id]);
-
-  function rowFromDetail(ing: RecipeIngredientRow): EditableIngredient {
-    return {
-      key: ing.id,
-      itemCode: ing.itemCode ?? "",
-      name: ing.name,
-      brand: ing.brand,
-      gPerServing: String(ing.gPerServing),
-      costPerKg: String(ing.costPerKg),
-      proteinPct: String(ing.proteinPct > 1 ? ing.proteinPct : ing.proteinPct * 100),
-    };
-  }
-
-  function updateRow(key: string, patch: Partial<EditableIngredient>) {
-    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  }
-  function addRow() {
-    setRows((prev) => [...prev, blankRow()]);
-  }
-  function removeRow(key: string) {
-    setRows((prev) => (prev.length === 1 ? prev : prev.filter((r) => r.key !== key)));
-  }
-
-  async function handleSave() {
-    const usable = rows.filter((r) => r.name.trim() && Number(r.gPerServing) > 0);
-    if (usable.length === 0) {
-      toast.error("Add at least one ingredient with a name and a Qty/Kg greater than 0.");
-      return;
-    }
-    try {
-      await importRecipes.mutateAsync([
-        {
-          name: recipeName,
-          ingredients: usable.map((r) => ({
-            name: r.name.trim(),
-            brand: r.brand.trim() || "Approved Vendor",
-            itemCode: r.itemCode.trim() || undefined,
-            gPerServing: Number(r.gPerServing),
-            costPerKg: Number(r.costPerKg) || 0,
-            proteinPct: Number(r.proteinPct) || 0,
-          })),
-        },
-      ]);
-      toast.success(`Saved "${recipeName}".`);
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not save this recipe");
-    }
-  }
-
-  return (
-    <div className="space-y-3">
-      <h3 className="text-sm font-black text-slate-900">{recipeName}</h3>
-      <div className="overflow-x-auto rounded-xl border border-slate-200">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-slate-50 text-[9.5px] font-bold uppercase tracking-wide text-slate-400">
-            <tr>
-              <th className="px-2 py-1.5">Item Code</th>
-              <th className="px-2 py-1.5">Ingredient</th>
-              <th className="px-2 py-1.5">Make</th>
-              <th className="px-2 py-1.5 text-center">UOM</th>
-              <th className="px-2 py-1.5 text-right">Qty/Kg</th>
-              <th className="px-2 py-1.5 text-right">Cost/Kg</th>
-              <th className="px-2 py-1.5 text-right">Protein %</th>
-              <th className="px-2 py-1.5"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.key} className="border-t border-slate-100">
-                <td className="px-2 py-1">
-                  <input className="field !h-7 !py-0 !text-xs" placeholder="RM00xxx" value={row.itemCode} onChange={(e) => updateRow(row.key, { itemCode: e.target.value })} />
-                </td>
-                <td className="px-2 py-1">
-                  <input className="field !h-7 !py-0 !text-xs" placeholder="Ingredient name" value={row.name} onChange={(e) => updateRow(row.key, { name: e.target.value })} />
-                </td>
-                <td className="px-2 py-1">
-                  <input className="field !h-7 !py-0 !text-xs" placeholder="Make" value={row.brand} onChange={(e) => updateRow(row.key, { brand: e.target.value })} />
-                </td>
-                <td className="px-2 py-1 text-center text-slate-400">{RECIPE_UOM}</td>
-                <td className="px-2 py-1">
-                  <input
-                    className="field !h-7 w-20 !py-0 !text-right !text-xs"
-                    type="number"
-                    step="any"
-                    min="0"
-                    value={row.gPerServing}
-                    onChange={(e) => updateRow(row.key, { gPerServing: e.target.value })}
-                  />
-                </td>
-                <td className="px-2 py-1">
-                  <input
-                    className="field !h-7 w-20 !py-0 !text-right !text-xs"
-                    type="number"
-                    step="any"
-                    min="0"
-                    placeholder="optional"
-                    value={row.costPerKg}
-                    onChange={(e) => updateRow(row.key, { costPerKg: e.target.value })}
-                  />
-                </td>
-                <td className="px-2 py-1">
-                  <input
-                    className="field !h-7 w-16 !py-0 !text-right !text-xs"
-                    type="number"
-                    step="any"
-                    min="0"
-                    placeholder="optional"
-                    value={row.proteinPct}
-                    onChange={(e) => updateRow(row.key, { proteinPct: e.target.value })}
-                  />
-                </td>
-                <td className="px-1 py-1 text-center">
-                  <button type="button" className="btn-icon h-6 w-6 hover:!bg-rose-50 hover:!text-rose-600" title="Remove row" onClick={() => removeRow(row.key)}>
-                    <Trash2 className="h-3 w-3" strokeWidth={2.25} />
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="flex items-center justify-between">
-        <button type="button" className="btn-ghost btn-sm" onClick={addRow}>
-          <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add Ingredient
-        </button>
-        <button type="button" className="btn-primary btn-sm" disabled={importRecipes.isPending} onClick={handleSave}>
-          {importRecipes.isPending ? "Saving…" : "Save Recipe"}
-        </button>
-      </div>
-      <p className="text-[10px] text-slate-400">Cost/Kg and Protein % are optional here — leave blank to fill in later once pricing is known; Qty/Kg is required so this recipe can actually scale to a batch.</p>
     </div>
   );
 }

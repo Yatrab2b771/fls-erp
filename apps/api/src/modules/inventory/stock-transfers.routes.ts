@@ -7,7 +7,7 @@ import { requireAuth, requireRole, type AuthedRequest } from "../../common/middl
 import { validateBody } from "../../common/middleware/validate";
 import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
-import { assertDayStoreAccess } from "./day-store-access";
+import { assertDayStoreAccess, assertPlantAccess, getScopedDayStoreIds, getScopedPlantIds } from "./day-store-access";
 import { getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "./stock";
 import { createStockTransferSchema, type CreateStockTransferInput } from "./stock-transfers.schemas";
 
@@ -71,12 +71,18 @@ function serializeTransfer(t: TransferWithRelations) {
 // visibility.
 const READ_ROLES = ["STORE", "PRODUCTION", "PPIC"] as const;
 
-stockTransfersRouter.get("/", requireRole(...READ_ROLES), async (req, res, next) => {
+stockTransfersRouter.get("/", requireRole(...READ_ROLES), async (req: AuthedRequest, res, next) => {
   try {
     const status = req.query.status as "PENDING" | "CONFIRMED" | undefined;
+    // A Day Store login sees only what moved to / from its own store and that store's Plant.
+    const scope = await getScopedDayStoreIds(req.user!.id, req.user!.roles);
+    // ...and a Plant-limited Production login sees only the transfers to / from its own Plant.
+    const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const where: Prisma.StockTransferWhereInput = {
       deletedAt: null,
       ...(status === "PENDING" ? { confirmedAt: null } : status === "CONFIRMED" ? { confirmedAt: { not: null } } : {}),
+      ...(scope ? { OR: [{ sourceDayStoreId: { in: scope } }, { destDayStoreId: { in: scope } }, { sourcePlant: { dayStoreId: { in: scope } } }, { destPlant: { dayStoreId: { in: scope } } }] } : {}),
+      ...(plantScope ? { OR: [{ sourcePlantId: { in: plantScope } }, { destPlantId: { in: plantScope } }] } : {}),
     };
     const transfers = await prisma.stockTransfer.findMany({ where, include: transferInclude, orderBy: { sentAt: "desc" } });
     res.json(transfers.map(serializeTransfer));
@@ -98,11 +104,22 @@ stockTransfersRouter.post("/", requireRole("STORE", "PRODUCTION"), validateBody(
       if (!req.user!.roles.includes("STORE") && !req.user!.roles.includes("ADMIN")) {
         return res.status(403).json({ error: "Only Store can send from a Day Store" });
       }
+      // A Day Store sends its own stock: the Warehouse does not (it issues stock out, and receives returns).
+      if (!req.user!.roles.includes("ADMIN") && (await getScopedDayStoreIds(req.user!.id, req.user!.roles)) === null) {
+        return res.status(403).json({ error: "A Day Store sends its own stock - use that Day Store's login. The Warehouse issues stock out and confirms returns." });
+      }
       await assertDayStoreAccess(req.user!.id, req.user!.roles, input.sourceDayStoreId!);
+      // ...and only to the Warehouse or to its own Plant (never another store, never another store's Plant).
+      if (input.destinationType === "PLANT") {
+        const own = await prisma.plant.findUnique({ where: { dayStoreId: input.sourceDayStoreId! }, select: { id: true } });
+        if (!own) return res.status(400).json({ error: "That Day Store has no Plant of its own to send to." });
+        if (input.destPlantId !== own.id) return res.status(400).json({ error: "A Day Store can only send to its own Plant." });
+      }
     } else {
       if (!req.user!.roles.includes("PRODUCTION") && !req.user!.roles.includes("ADMIN")) {
         return res.status(403).json({ error: "Only Production can send from a Plant" });
       }
+      await assertPlantAccess(req.user!.id, req.user!.roles, input.sourcePlantId);
     }
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: input.itemId }, select: { id: true } });
@@ -169,9 +186,13 @@ stockTransfersRouter.post("/:id/confirm", requireRole("STORE", "PRODUCTION"), as
       if (!req.user!.roles.includes("PRODUCTION") && !req.user!.roles.includes("ADMIN")) {
         return res.status(403).json({ error: "Only Production can confirm a transfer headed to a Plant" });
       }
+      await assertPlantAccess(req.user!.id, req.user!.roles, transfer.destPlantId);
     } else {
       if (!req.user!.roles.includes("STORE") && !req.user!.roles.includes("ADMIN")) {
         return res.status(403).json({ error: "Only Store can confirm this transfer" });
+      }
+      if (transfer.destinationType === "WAREHOUSE" && !req.user!.roles.includes("ADMIN") && (await getScopedDayStoreIds(req.user!.id, req.user!.roles)) !== null) {
+        return res.status(403).json({ error: "Only the Warehouse confirms stock coming back to it." });
       }
       if (transfer.destinationType === "DAY_STORE" && transfer.destDayStoreId) {
         await assertDayStoreAccess(req.user!.id, req.user!.roles, transfer.destDayStoreId);

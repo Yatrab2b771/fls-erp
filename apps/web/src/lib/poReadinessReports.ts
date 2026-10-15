@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import type { PoReadinessRow } from "./types";
+import { customerTypeLabel } from "./customerTags";
 
 function download(sheetName: string, rows: Record<string, unknown>[], filename: string) {
   const sheet = XLSX.utils.json_to_sheet(rows);
@@ -28,6 +29,7 @@ export function exportCustomerShortfallReport(rows: PoReadinessRow[], customerId
       .filter((item) => !item.covered)
       .map((item) => ({
         Customer: r.purchaseOrder.customer.companyName,
+        "Customer Type": customerTypeLabel(r.purchaseOrder.customer.companyName),
         "PO Number": r.purchaseOrder.poNumber ?? r.purchaseOrder.id.slice(0, 8),
         Item: item.itemName,
         Category: CATEGORY_LABEL[item.category] ?? item.category,

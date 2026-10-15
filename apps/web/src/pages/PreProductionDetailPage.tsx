@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Beaker, Check, CheckCircle2, ClipboardEdit, ClipboardList, FlaskConical, Layers, Link2, ListChecks, ListPlus, Lock, Pencil, Plus, Shuffle, Trash2, Truck, Undo2 } from "lucide-react";
+import { Save, ArrowLeft, ArrowRight, Beaker, Check, CheckCircle2, ClipboardEdit, ClipboardList, FlaskConical, Layers, Link2, ListChecks, ListPlus, Lock, Pencil, Plus, Shuffle, Trash2, Truck, Undo2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
+import { useMyStoreInfo, usePlantConsumptionBalance } from "../lib/hooks";
 import {
   useAssignPreProductionPlant,
   useCompleteProductionBatch,
-  useCreatePlant,
   useCreateProductionBatch,
   useDispensingRequirements,
+  useMaterialCoverage,
   useInventoryItems,
   useInventoryTransactions,
   usePlants,
@@ -21,6 +22,7 @@ import {
 import { PRE_PRODUCTION_STAGE_FIELDS, PRE_PRODUCTION_STAGE_LABEL, PRE_PRODUCTION_STAGE_ORDER, PRE_PRODUCTION_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/preProductionStage";
 import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
 import { FieldGrid } from "../components/FieldGrid";
+import { PlanFromPpic } from "../components/PlanFromPpic";
 import { ItemPicker } from "../components/ItemPicker";
 import { PickerWithAdd } from "../components/PickerWithAdd";
 import { DelayBadge } from "../components/Badges";
@@ -28,6 +30,8 @@ import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import type { ChecklistRow, DispensingRequirementItem, PreProduction, PreProductionStageId, ProductionBatch } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
+import { ActionMenu, type ActionMenuItem } from "../components/ActionMenu";
 
 // --- Tier 1 of the three-tier production pipeline — see types.ts's own
 // comment block above PreProduction/ProductionBatch/CombinedLot. This
@@ -80,6 +84,7 @@ function fieldValue(run: PreProduction, name: string): string {
 export function PreProductionDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { data: run, isLoading } = usePreProduction(id);
+  const { hasRole } = useAuth();
 
   if (isLoading) {
     return (
@@ -97,8 +102,8 @@ export function PreProductionDetailPage() {
 
   return (
     <div className="space-y-6">
-      <Link to={`/purchase-orders/${po.id}`} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
-        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {po.poNumber ?? po.id.slice(0, 8)}
+      <Link to={hasRole("PRODUCTION") && !hasRole("ADMIN") ? "/new-plans" : `/purchase-orders/${po.id}`} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {hasRole("PRODUCTION") && !hasRole("ADMIN") ? "New Plan" : po.poNumber ?? po.id.slice(0, 8)}
       </Link>
 
       <div className="card p-5 sm:p-6">
@@ -112,7 +117,7 @@ export function PreProductionDetailPage() {
                 <h1 className="text-xl font-black tracking-tight text-slate-900">{run.purchaseOrderItem.productName}</h1>
                 <DelayBadge delay={run.delay} />
               </div>
-              <p className="text-sm text-slate-500">{po.customer.companyName}</p>
+              <p className="text-sm text-slate-500"><CustomerName name={po.customer.companyName} /></p>
               <div className="mt-1.5">
                 <PreProductionPlantControl run={run} />
               </div>
@@ -122,6 +127,19 @@ export function PreProductionDetailPage() {
       </div>
 
       <StageProgressStrip run={run} />
+
+      <details className="card group overflow-hidden" open>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-600">
+          <span className="flex items-center gap-1.5">
+            <ListChecks className="h-3.5 w-3.5" /> Plan from PPIC (RM + PM, with quantities)
+          </span>
+          <span className="text-micro font-semibold normal-case text-slate-400 group-open:hidden">Show</span>
+          <span className="hidden text-micro font-semibold normal-case text-slate-400 group-open:inline">Hide</span>
+        </summary>
+        <div className="border-t border-slate-100 p-4">
+          <PlanFromPpic poId={po.id} itemId={run.purchaseOrderItem.id} />
+        </div>
+      </details>
 
       <CurrentStageCard run={run} />
 
@@ -162,7 +180,7 @@ function StageProgressStrip({ run }: { run: PreProduction }) {
   return (
     <div className="card p-4 sm:p-5">
       {isAdmin && (
-        <p className="mb-2.5 flex items-center gap-1.5 text-[10.5px] font-bold text-slate-400">
+        <p className="mb-2.5 flex items-center gap-1.5 text-micro font-bold text-slate-400">
           <Shuffle className="h-3 w-3" strokeWidth={2.5} /> Admin: click any stage to move this run there directly.
         </p>
       )}
@@ -170,7 +188,7 @@ function StageProgressStrip({ run }: { run: PreProduction }) {
         {PRE_PRODUCTION_STAGE_ORDER.map((stage, idx) => {
           const isDone = idx < currentIndex || (idx === currentIndex && stage === "SAMPLE_QC_APPROVAL" && run.sampleQcStatus === "Approved");
           const isCurrent = idx === currentIndex && !isDone;
-          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10.5px] font-bold whitespace-nowrap ${
+          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-micro font-bold whitespace-nowrap ${
             isCurrent ? "border-brand-300 bg-brand-50 text-brand-700 shadow-soft" : isDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-400"
           }`;
           const icon = isDone ? <Check className="h-3 w-3" strokeWidth={3} /> : isCurrent ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" /> : <Lock className="h-2.5 w-2.5" strokeWidth={2.5} />;
@@ -200,7 +218,6 @@ function PreProductionPlantControl({ run }: { run: PreProduction }) {
   const { hasRole } = useAuth();
   const toast = useToast();
   const { data: plants } = usePlants();
-  const createPlant = useCreatePlant();
   const assignPlant = useAssignPreProductionPlant(run.id);
   const [editing, setEditing] = useState(false);
   const [plantId, setPlantId] = useState(run.plantId ?? "");
@@ -248,7 +265,7 @@ function PreProductionPlantControl({ run }: { run: PreProduction }) {
   return (
     <div className="flex items-end gap-2">
       <div className="w-56">
-        <PickerWithAdd label="Plant" placeholder="— No Plant —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+        <PickerWithAdd label="Plant" placeholder="— No Plant —" options={plants ?? []} value={plantId} onChange={setPlantId} />
       </div>
       <button type="button" className="btn-primary btn-sm" disabled={assignPlant.isPending} onClick={handleSave}>
         {assignPlant.isPending ? "…" : "Save"}
@@ -264,7 +281,12 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
   const { hasRole } = useAuth();
   const stage = run.currentStageId;
   const roles = PRE_PRODUCTION_STAGE_ROLE[stage];
-  const canAct = hasRole(...roles);
+  // Material Received & GRN and Dispensing are done by the Day Store of this run's Plant - not by the Warehouse seat, not by another store.
+  const { data: myStore } = useMyStoreInfo({ enabled: hasRole("STORE") });
+  const isAdmin = hasRole("ADMIN");
+  const dayStoreStage = stage === "MATERIAL_RECEIVED" || stage === "DISPENSING";
+  const ownPlantStore = !!run.plantId && !!myStore?.stores.some((s) => s.plantId === run.plantId);
+  const canAct = hasRole(...roles) && (!dayStoreStage || isAdmin || (myStore?.scoped === true && ownPlantStore));
   const roleLabel = roles.join(" / ");
   const fields = PRE_PRODUCTION_STAGE_FIELDS[stage];
   const forwardTarget = getForwardTarget(stage);
@@ -279,7 +301,6 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [consumptionLines, setConsumptionLines] = useState<ConsumptionLine[]>([]);
-  const [indentLines, setIndentLines] = useState<IndentLine[]>([]);
   const [sourceReceiptId, setSourceReceiptId] = useState(run.sourceReceiptId ?? "");
 
   useEffect(() => {
@@ -288,7 +309,6 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
     setNote("");
     setError(null);
     setConsumptionLines([]);
-    setIndentLines([]);
     setSourceReceiptId(run.sourceReceiptId ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.id, run.currentStageId]);
@@ -309,9 +329,6 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
         tareWeight: l.tareWeight ? Number(l.tareWeight) : undefined,
         arNo: l.arNo || undefined,
       }));
-    }
-    if (stage === "INDENT_ISSUE" && indentLines.length > 0) {
-      body.indentLines = indentLines.map((l) => ({ itemId: l.itemId, category: l.category, requestedQty: Number(l.requestedQty) }));
     }
     if (stage === "MATERIAL_RECEIVED") body.sourceReceiptId = sourceReceiptId || null;
     try {
@@ -357,7 +374,7 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
           <ClipboardEdit className="h-3.5 w-3.5" /> {PRE_PRODUCTION_STAGE_LABEL[stage]}
         </h3>
-        <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
           {roleLabel}
         </span>
       </div>
@@ -388,7 +405,10 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
         )}
 
 
-        {canAct && stage === "INDENT_ISSUE" && <IndentRequestLinesEditor preProductionId={run.id} lines={indentLines} onChange={setIndentLines} />}
+        {/* The indent follows the plan: its materials are shown, not typed. */}
+        {stage === "INDENT_ISSUE" && <MaterialCoveragePanel preProductionId={run.id} />}
+
+        {stage === "MATERIAL_RECEIVED" && <MaterialCoveragePanel preProductionId={run.id} />}
 
         {canAct && stage === "MATERIAL_RECEIVED" && <MaterialReceiptLinker value={sourceReceiptId} onChange={setSourceReceiptId} />}
 
@@ -424,6 +444,39 @@ function CurrentStageCard({ run }: { run: PreProduction }) {
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Stage 1: the GRN is recorded once the material the released quantity needs has reached the Plant.
+function MaterialCoveragePanel({ preProductionId }: { preProductionId: string }) {
+  const { data } = useMaterialCoverage(preProductionId);
+  if (!data || data.lines.length === 0) return null;
+  const partial = data.releasedQty < data.orderQty - 1e-6;
+  return (
+    <div className={`mt-4 rounded-xl border p-3 ${data.allCovered ? "border-emerald-200 bg-emerald-50/60" : "border-amber-200 bg-amber-50/60"}`}>
+      <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-slate-600">
+        {data.allCovered ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} /> : <ArrowRight className="h-3.5 w-3.5 text-amber-600" strokeWidth={2.5} />}
+        Material for {data.releasedQty} {data.unit}
+        {partial ? ` (part of ${data.orderQty} ${data.unit} released so far)` : ""}
+        {data.allCovered ? " — all with the Day Store" : " — must reach the Day Store before this stage can be recorded"}
+      </p>
+      <div className="space-y-1">
+        {data.lines.map((l) => (
+          <div key={`${l.category}-${l.material}`} className="flex items-center justify-between gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
+            <span className="font-bold text-slate-700">
+              {l.material} <span className="text-slate-400">({l.category})</span>
+            </span>
+            <span className={`font-mono font-bold ${l.covered ? "text-emerald-600" : "text-amber-700"}`}>
+              {Math.round((l.receivedQty + l.atDayStoreQty) * 1000) / 1000} / {l.requiredQty} {l.unit}
+              <span className="ml-1 font-sans text-micro font-bold text-slate-400">
+                ({l.atDayStoreQty} at Day Store{l.receivedQty > 0 ? `, ${l.receivedQty} at Plant` : ""})
+              </span>
+              {!l.covered && l.inTransitQty > 0 && <span className="ml-1 font-sans text-micro font-bold text-sky-600">({l.inTransitQty} on the way)</span>}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -571,7 +624,7 @@ function DispensingConsumptionEditor({
                   </button>
                   <div className="flex w-full flex-wrap items-center gap-2 pl-1">
                     <input
-                      className="field !h-6 w-20 !py-0 font-mono !text-[11px]"
+                      className="field !h-6 w-20 !py-0 font-mono !text-tiny"
                       type="number"
                       min="0"
                       step="any"
@@ -581,7 +634,7 @@ function DispensingConsumptionEditor({
                       onChange={(e) => updateLine(idx, { grossWeight: e.target.value })}
                     />
                     <input
-                      className="field !h-6 w-20 !py-0 font-mono !text-[11px]"
+                      className="field !h-6 w-20 !py-0 font-mono !text-tiny"
                       type="number"
                       min="0"
                       step="any"
@@ -590,8 +643,8 @@ function DispensingConsumptionEditor({
                       value={l.tareWeight}
                       onChange={(e) => updateLine(idx, { tareWeight: e.target.value })}
                     />
-                    <span className="font-mono text-[10.5px] text-slate-400">Net: {l.grossWeight && l.tareWeight ? (Number(l.grossWeight) - Number(l.tareWeight)).toFixed(2) : "—"}</span>
-                    <input className="field !h-6 w-28 !py-0 !text-[11px]" placeholder="A.R. No." aria-label={`A.R. No. for ${l.itemName}`} value={l.arNo} onChange={(e) => updateLine(idx, { arNo: e.target.value })} />
+                    <span className="font-mono text-micro text-slate-400">Net: {l.grossWeight && l.tareWeight ? (Number(l.grossWeight) - Number(l.tareWeight)).toFixed(2) : "—"}</span>
+                    <input className="field !h-6 w-28 !py-0 !text-tiny" placeholder="A.R. No." aria-label={`A.R. No. for ${l.itemName}`} value={l.arNo} onChange={(e) => updateLine(idx, { arNo: e.target.value })} />
                   </div>
                 </div>
               ))}
@@ -634,7 +687,7 @@ export function ChecklistPanel({
       </div>
 
       <div className="divide-y divide-slate-100 bg-white">
-        <div className="flex items-center gap-2 px-3 py-1.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">
+        <div className="flex items-center gap-2 px-3 py-1.5 text-micro font-bold uppercase tracking-wide text-slate-400">
           <span className="flex-1">Checklist item</span>
           <span className="w-14 text-center">{deptLabel}</span>
           <span className="w-14 text-center">QA</span>
@@ -668,7 +721,7 @@ export function ChecklistPanel({
         ))}
       </div>
 
-      <div className="bg-sky-50/40 px-3 py-2 text-[10.5px] font-semibold text-slate-500">
+      <div className="bg-sky-50/40 px-3 py-2 text-micro font-semibold text-slate-500">
         {allDeptChecked && allQaChecked
           ? `All items checked by both ${deptLabel} and QA — ready to set the status above to Approved.`
           : `Every item needs both a ${deptLabel} check and a QA check before this gate should be approved.`}
@@ -688,89 +741,6 @@ function ChecklistPanelForPreProduction({ preProductionId, title, deptLabel, can
     }
   }
   return <ChecklistPanel title={title} deptLabel={deptLabel} canEditDept={canEditDept} rows={rows} onToggle={toggle} pending={update.isPending} />;
-}
-
-interface IndentLine {
-  itemId: string;
-  itemName: string;
-  category: "RM" | "PM";
-  requestedQty: string;
-}
-
-function IndentRequestLinesEditor({ preProductionId, lines, onChange }: { preProductionId: string; lines: IndentLine[]; onChange: (lines: IndentLine[]) => void }) {
-  const [category, setCategory] = useState<"RM" | "PM">("RM");
-  const { data: items } = useInventoryItems(category);
-  const { data: requirements } = useDispensingRequirements(preProductionId);
-  const [itemId, setItemId] = useState("");
-  const [requestedQty, setRequestedQty] = useState("");
-
-  function addLine() {
-    const item = items?.find((i) => i.id === itemId);
-    if (!item || !requestedQty || Number(requestedQty) <= 0) return;
-    onChange([...lines, { itemId, itemName: item.name, category, requestedQty }]);
-    setItemId("");
-    setRequestedQty("");
-  }
-
-  function removeLine(idx: number) {
-    onChange(lines.filter((_, i) => i !== idx));
-  }
-
-  function updateLine(idx: number, patch: Partial<IndentLine>) {
-    onChange(lines.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
-  }
-
-  const stagedItemIds = new Set(lines.map((l) => l.itemId));
-  const toFill = aggregateRequirements(requirements?.items ?? []).filter((r) => r.remainingQty > 0 && !stagedItemIds.has(r.itemId));
-
-  function fillFromRequirement() {
-    onChange([...lines, ...toFill.map((r) => ({ itemId: r.itemId, itemName: r.itemName, category: r.category, requestedQty: fillQty(r.remainingQty) }))]);
-  }
-
-  return (
-    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
-      <p className="mb-2 text-xs font-bold text-slate-600">Material Indent Lines — optional, raises real Material Requests for Store</p>
-      {toFill.length > 0 && (
-        <button type="button" className="btn-ghost btn-sm mb-2" onClick={fillFromRequirement}>
-          <ListPlus className="h-3.5 w-3.5" strokeWidth={2.5} /> Fill {toFill.length} {toFill.length === 1 ? "item" : "items"} from requirement
-        </button>
-      )}
-      <div className="flex flex-wrap gap-2">
-        <div className="w-40">
-          <ItemPicker
-            items={CATEGORY_OPTIONS}
-            value={category}
-            onChange={(v) => {
-              setCategory(v as "RM" | "PM");
-              setItemId("");
-            }}
-          />
-        </div>
-        <div className="min-w-0 flex-1">
-          <ItemPicker items={items ?? []} value={itemId} onChange={setItemId} placeholder="— Select item —" />
-        </div>
-        <input className="field w-24 font-mono" type="number" min="0" step="any" placeholder="Qty" value={requestedQty} onChange={(e) => setRequestedQty(e.target.value)} />
-        <button type="button" className="btn-ghost shrink-0" onClick={addLine}>
-          <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add
-        </button>
-      </div>
-      {lines.length > 0 && (
-        <div className="mt-2 space-y-1">
-          {lines.map((l, idx) => (
-            <div key={idx} className="flex flex-wrap items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
-              <span className="min-w-0 flex-1 truncate font-bold text-slate-700" title={l.itemName}>
-                {l.itemName} <span className="text-slate-400">({l.category})</span>
-              </span>
-              <input className="field !h-7 w-24 !py-0 font-mono !text-xs" type="number" min="0" step="any" aria-label={`Requested quantity for ${l.itemName}`} value={l.requestedQty} onChange={(e) => updateLine(idx, { requestedQty: e.target.value })} />
-              <button type="button" className="btn-icon h-6 w-6 shrink-0 hover:!bg-rose-50 hover:!text-rose-600" aria-label={`Remove ${l.itemName}`} onClick={() => removeLine(idx)}>
-                <Trash2 className="h-3 w-3" strokeWidth={2.25} />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function MaterialReceiptLinker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
@@ -812,9 +782,11 @@ function ConsumptionHistory({ run }: { run: PreProduction }) {
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
           <Beaker className="h-3.5 w-3.5" /> RM/PM Consumption — Dispensing Sheet
         </h3>
-        <Link to={`/material-consumption?preProductionId=${run.id}`} className="text-[10px] font-bold text-brand-600 hover:underline">
-          Full report
-        </Link>
+        {hasRole("PRODUCTION", "STORE", "QA_QC") && (
+          <Link to={`/material-consumption?preProductionId=${run.id}`} className="text-micro font-bold text-brand-600 hover:underline">
+            Full report
+          </Link>
+        )}
       </div>
       <div className="divide-y divide-slate-100">
         {run.consumptions.map((c) => (
@@ -822,7 +794,7 @@ function ConsumptionHistory({ run }: { run: PreProduction }) {
             <div className="min-w-0">
               <span className="text-xs font-bold text-slate-700">{c.item.name}</span>
               {(c.grossWeight != null || c.tareWeight != null || c.arNo) && (
-                <p className="mt-0.5 font-mono text-[10.5px] text-slate-400">
+                <p className="mt-0.5 font-mono text-micro text-slate-400">
                   {c.grossWeight != null && <>Gross {c.grossWeight} · </>}
                   {c.tareWeight != null && <>Tare {c.tareWeight} · </>}
                   {c.netWeight != null && <>Net {c.netWeight} · </>}
@@ -883,7 +855,7 @@ function IndentRequestHistory({ run }: { run: PreProduction }) {
               <span className="font-mono font-bold text-slate-600">
                 {r.requestedQty} {r.item.unit ?? ""}
               </span>
-              <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide ${REQUEST_STATUS_STYLE[r.status] ?? "border-slate-200 bg-slate-100 text-slate-500"}`}>{r.status}</span>
+              <span className={`rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wide ${REQUEST_STATUS_STYLE[r.status] ?? "border-slate-200 bg-slate-100 text-slate-500"}`}>{r.status}</span>
             </span>
           </div>
         ))}
@@ -926,8 +898,18 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
   const navigate = useNavigate();
   const ready = run.sampleQcStatus === "Approved";
   const { data: batches } = useProductionBatches(ready ? run.id : undefined);
+  // PPIC may have released only part of the order: batches can be planned only up to that, less what is produced or already planned.
+  const released = run.releasedQty ?? run.plannedQty;
+  const inProgressPlanned = (batches ?? []).filter((b) => b.status === "IN_PROGRESS").reduce((sum, b) => sum + b.plannedQty, 0);
+  const canPlan = Math.max(0, Math.min(run.remainingQty, Math.round((released - run.combinedQty - inProgressPlanned) * 1000) / 1000));
 
-  if (!ready) return null;
+  if (!ready) {
+    return (
+      <div className="card p-4 text-xs text-slate-500">
+        <b className="text-slate-700">Production sheet</b> — batches (shift, manpower, start / end time, utilization) open here once Line Clearance and Sample QC are approved.
+      </div>
+    );
+  }
 
   if (run.combinedLot) {
     return (
@@ -957,15 +939,106 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
         </h3>
         <span className="font-mono text-xs font-bold text-slate-600">
           Produced {run.combinedQty} / {run.plannedQty} — remaining {run.remainingQty}
+          {released < run.plannedQty - 1e-6 && <span className="ml-2 text-amber-600">· Released {released}</span>}
         </span>
       </div>
       <div className="space-y-3 p-4">
-        {(batches ?? []).map((pb) => (
-          <ProductionBatchCard key={pb.id} preProductionId={run.id} batch={pb} />
-        ))}
-        {hasRole("PRODUCTION") && run.remainingQty > 0 && <NewProductionBatchForm preProductionId={run.id} remainingQty={run.remainingQty} />}
+        <PlanDetails run={run} />
+        <MaterialUtilization runId={run.id} />
+        <ProductionBatchesTable
+          preProductionId={run.id}
+          batches={batches ?? []}
+          renderUtilization={() => (
+            <Link to="/batches" className="text-xs font-bold text-brand-700 hover:underline">
+              Fill and see a batch&apos;s Utilization on the Batch page →
+            </Link>
+          )}
+        />
+        {hasRole("PRODUCTION") && run.remainingQty > 0 && canPlan > 0 && <NewProductionBatchForm key={canPlan} preProductionId={run.id} remainingQty={canPlan} />}
+        {hasRole("PRODUCTION") && run.remainingQty > 0 && canPlan <= 0 && released < run.plannedQty - 1e-6 && (
+          <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+            All of the {released} {run.purchaseOrderItem.unit} PPIC has released is planned. More batches open up when PPIC releases more.
+          </p>
+        )}
         {(batches ?? []).length === 0 && run.remainingQty <= 0 && <p className="text-xs text-slate-400">No production runs yet.</p>}
       </div>
+    </div>
+  );
+}
+
+// The top of the production sheet: everything the PO and PPIC already know, ready-filled (read-only).
+function PlanDetails({ run }: { run: PreProduction }) {
+  const item = run.purchaseOrderItem;
+  const cells: [string, string][] = [
+    ["PO", item.purchaseOrder.poNumber ?? "—"],
+    ["Customer", item.purchaseOrder.customer.companyName],
+    ["Product", item.productName],
+    ["Product Type", item.productCategory ?? "—"],
+    ["Quantity", `${item.quantity} ${item.unit}${item.volume != null ? ` · Volume ${item.volume}` : ""}`],
+    ["Plant", run.plant?.name ?? "—"],
+  ];
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+      <p className="mb-2 text-micro font-bold uppercase tracking-wide text-slate-400">Plan (from the PO)</p>
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+        {cells.map(([label, value]) => (
+          <div key={label}>
+            <dt className="text-micro font-bold uppercase tracking-wide text-slate-400">{label}</dt>
+            <dd className="text-xs font-semibold text-slate-800">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+// Material utilisation for the run, per material: A Production (used), B Wastage, C Rejected, D Sample, E Return to Store.
+// Read from the Plant's consumption log (Plant Consumption page), which is kept per run, not per batch.
+function MaterialUtilization({ runId }: { runId: string }) {
+  const { hasRole } = useAuth();
+  const { data } = usePlantConsumptionBalance(runId);
+  const items = data?.items ?? [];
+  if (!data?.plant) return null;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2.5">
+        <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Material utilization (this run)</p>
+        {hasRole("PRODUCTION", "STORE") && (
+          <Link to="/plant-consumption" className="text-tiny font-bold text-brand-600 hover:underline">
+            Log usage →
+          </Link>
+        )}
+      </div>
+      {items.length === 0 ? (
+        <p className="px-3 py-3 text-xs text-slate-400">Nothing used yet. It fills in as material is used, wasted, rejected, sampled or returned.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full whitespace-nowrap text-xs">
+            <thead>
+              <tr className="text-left text-micro font-bold uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2">Material</th>
+                <th className="px-3 py-2 text-right">A · Production</th>
+                <th className="px-3 py-2 text-right">B · Wastage</th>
+                <th className="px-3 py-2 text-right">C · Rejected</th>
+                <th className="px-3 py-2 text-right">D · Sample</th>
+                <th className="px-3 py-2 text-right">E · Return to Store</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {items.map((i) => (
+                <tr key={i.itemId}>
+                  <td className="px-3 py-2 font-bold text-slate-700">{i.itemName}</td>
+                  {[i.consumedQty, i.wastedQty, i.rejectedQty, i.sampleQty, i.returnedQty].map((q, idx) => (
+                    <td key={idx} className={`px-3 py-2 text-right font-mono ${q ? "font-bold text-slate-800" : "text-slate-300"}`}>
+                      {q ? `${Math.round(q * 1000) / 1000} ${i.unit}` : "—"}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -974,56 +1047,129 @@ function ProductionBatchesSection({ run }: { run: PreProduction }) {
 // once, on this batch's own pipeline page, the first time it touches
 // the run (see ProductionBatchDetailPage.tsx's BatchNoBadge). Production
 // just starts the run.
-function NewProductionBatchForm({ preProductionId, remainingQty }: { preProductionId: string; remainingQty: number }) {
+export function NewProductionBatchForm({ preProductionId, remainingQty }: { preProductionId: string; remainingQty: number }) {
   const create = useCreateProductionBatch(preProductionId);
   const toast = useToast();
   const [plannedQty, setPlannedQty] = useState(String(remainingQty));
 
+  // A batch is divided off with just its quantity. Its indent, batch number, Dispensing and Line Clearance come next (each by its own
+  // department); its production sheet (shift, manpower, start) is filled when its production starts.
   async function handleCreate() {
-    if (!plannedQty || Number(plannedQty) <= 0) return;
+    if (!(Number(plannedQty) > 0)) return;
     try {
       await create.mutateAsync({ plannedQty: Number(plannedQty) });
       setPlannedQty("");
-      toast.success("Production run started.");
+      toast.success("Batch added. It goes to Indent Issue next.");
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not start a new production run");
+      toast.error(err instanceof ApiError ? err.message : "Could not add the batch");
     }
   }
 
   return (
-    <div className="flex flex-wrap items-end gap-2 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 p-3">
-      <div className="w-32">
-        <label className="label">Planned Qty</label>
+    <div className="flex flex-wrap items-end gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 p-3">
+      <div className="w-36">
+        <label className="label">Add a batch: quantity</label>
         <input className="field font-mono" type="number" min="0" step="any" value={plannedQty} onChange={(e) => setPlannedQty(e.target.value)} />
       </div>
-      <button type="button" className="btn-primary btn-sm" disabled={create.isPending} onClick={handleCreate}>
-        <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> {create.isPending ? "Starting…" : "Start Production Run"}
+      <button type="button" className="btn-primary btn-sm" disabled={!(Number(plannedQty) > 0) || create.isPending} onClick={handleCreate}>
+        <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> {create.isPending ? "Adding…" : "Add batch"}
       </button>
+      <p className="pb-2 text-tiny text-slate-500">The total of all batches cannot go beyond what PPIC has released.</p>
     </div>
   );
 }
 
-function ProductionBatchCard({ preProductionId, batch }: { preProductionId: string; batch: ProductionBatch }) {
+/**
+ * The batches of a run as one sheet (an Excel-like table): a row for each batch, its fields as cells that can be edited right there.
+ * Save keeps what was typed; Mark Completed sends the batch on to its own QC / Packaging / Dispatch pipeline.
+ */
+export function ProductionBatchesTable({ preProductionId, batches, renderUtilization }: { preProductionId: string; batches: ProductionBatch[]; renderUtilization?: (batch: ProductionBatch) => ReactNode }) {
+  if (batches.length === 0) return null;
+  // Per-batch flow: input and output are worked out from the Utilization (no boxes, no wastage column).
+  const flow = batches.some((b) => b.preProduction?.batchFlow);
+  return (
+    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
+              <th className="px-3 py-2.5">Batch</th>
+              <th className="px-3 py-2.5">Status</th>
+              <th className="px-3 py-2.5 text-right">Quantity</th>
+              <th className="px-3 py-2.5">Shift</th>
+              <th className="px-3 py-2.5">Manpower</th>
+              <th className="px-3 py-2.5">Start date &amp; time</th>
+              {!flow && <th className="px-3 py-2.5">Input qty</th>}
+              <th className="px-3 py-2.5">Utilization (RM)</th>
+              <th className="px-3 py-2.5">End date &amp; time</th>
+              {!flow && <th className="px-3 py-2.5">Output qty</th>}
+              <th className="px-3 py-2.5">Mfg status</th>
+              <th className="px-3 py-2.5">Remarks</th>
+              {!flow && <th className="px-3 py-2.5 text-right">Wastage</th>}
+              <th className="px-3 py-2.5">Pipeline</th>
+              <th className="px-3 py-2.5 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {batches.map((b) => (
+              <ProductionBatchRow key={b.id} preProductionId={preProductionId} batch={b} flow={flow} renderUtilization={renderUtilization} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Compact cells: the base .field is tall; a disabled one stays readable.
+const CELL = "field !h-8 !py-0 !px-2 !text-xs disabled:!bg-transparent disabled:!border-transparent disabled:!text-slate-700 disabled:!opacity-100 disabled:!shadow-none";
+
+function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }: { preProductionId: string; batch: ProductionBatch; flow: boolean; renderUtilization?: (batch: ProductionBatch) => ReactNode }) {
   const { hasRole } = useAuth();
   const canAct = hasRole("PRODUCTION");
   const update = useUpdateProductionBatch(preProductionId);
   const complete = useCompleteProductionBatch(preProductionId);
   const toast = useToast();
+  const [showUtil, setShowUtil] = useState(false);
   const isDone = batch.status === "COMPLETED";
+  const locked = isDone || !canAct;
+  // The finishing fields (end, output, status, remarks) open only once every plan material has its Production quantity on this batch.
+  const util = batch.utilization;
+  const utilDone = util ? util.complete : true;
+  // Per-batch flow: the start fields (shift, manpower, start date & time) must be in first, too.
+  const startFilled = !!batch.shift && !!batch.manpowerCount && !!batch.shiftStartAt;
+  const finishLocked = locked || !utilDone || (flow && !startFilled);
+  const finishTip = isDone ? undefined : !startFilled && flow ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !utilDone ? "Fill the Utilization first" : undefined;
 
+  // A date-time input wants the local "yyyy-MM-ddTHH:mm"; the API stores it as a full timestamp.
+  const toLocalInput = (iso: string | null) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
   const [values, setValues] = useState({
-    manufacturingStartDate: batch.manufacturingStartDate?.slice(0, 10) ?? "",
+    shift: batch.shift ?? "",
+    manpowerCount: batch.manpowerCount != null ? String(batch.manpowerCount) : "",
+    shiftStartAt: toLocalInput(batch.shiftStartAt),
+    shiftEndAt: toLocalInput(batch.shiftEndAt),
     manufacturingStatus: batch.manufacturingStatus ?? "",
-    manufacturingEndDate: batch.manufacturingEndDate?.slice(0, 10) ?? "",
     manufacturingRemarks: batch.manufacturingRemarks ?? "",
     inputQty: batch.inputQty != null ? String(batch.inputQty) : "",
     outputQty: batch.outputQty != null ? String(batch.outputQty) : "",
   });
+  const set = (key: keyof typeof values) => (e: { target: { value: string } }) => setValues((v) => ({ ...v, [key]: e.target.value }));
+  const FINISHING = ["shiftEndAt", "outputQty", "manufacturingStatus", "manufacturingRemarks"];
 
   async function handleSave() {
     try {
       const body: Record<string, unknown> = { id: batch.id };
-      for (const [k, v] of Object.entries(values)) if (v !== "") body[k] = k === "inputQty" || k === "outputQty" ? Number(v) : v;
+      for (const [k, v] of Object.entries(values)) {
+        if (v === "") continue;
+        if ((!utilDone || (flow && !startFilled)) && FINISHING.includes(k)) continue; // shut until the Utilization is complete and the start fields are saved
+        if (flow && (k === "inputQty" || k === "outputQty")) continue; // worked out from the Utilization
+        body[k] = k === "inputQty" || k === "outputQty" || k === "manpowerCount" ? Number(v) : k === "shiftStartAt" || k === "shiftEndAt" ? new Date(v).toISOString() : v;
+      }
       await update.mutateAsync(body as never);
       toast.success("Saved.");
     } catch (err) {
@@ -1032,94 +1178,118 @@ function ProductionBatchCard({ preProductionId, batch }: { preProductionId: stri
   }
 
   async function handleComplete() {
-    if (batch.outputQty == null) {
-      toast.error("Record the output quantity before completing this run.");
+    if (!utilDone) {
+      toast.error(`Fill the Utilization first: ${util!.missing.length} of ${util!.required} materials have no Production quantity on this batch yet.`);
+      setShowUtil(true);
+      return;
+    }
+    if (flow && !batch.shiftEndAt) {
+      toast.error("Record the end date and time (and Save) before completing this batch.");
+      return;
+    }
+    if (!flow && batch.outputQty == null) {
+      toast.error("Record the output quantity (and Save) before completing this batch.");
       return;
     }
     if (!window.confirm("Mark this batch completed? It'll then have its own QC/Packaging/Dispatch pipeline to go through, independent of any other batch on this run.")) return;
     try {
       await complete.mutateAsync(batch.id);
-      toast.success("Completed — this batch now has its own pipeline to go through (see the link below).");
+      toast.success("Completed. This batch now has its own pipeline to go through.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not complete");
     }
   }
 
+  const items: ActionMenuItem[] =
+    locked
+      ? []
+      : [
+          { key: "save", label: update.isPending ? "Saving…" : "Save", icon: Save, onClick: handleSave, disabled: update.isPending },
+          { key: "complete", label: complete.isPending ? "Completing…" : "Mark Completed", icon: Check, tone: "primary", onClick: handleComplete, disabled: complete.isPending || !utilDone || (flow && !startFilled), title: finishTip },
+        ];
+
   return (
-    <div className={`rounded-xl border p-3 ${isDone ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-white"}`}>
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs font-black text-slate-800">{batch.batchNo ?? `Run ${batch.id.slice(0, 8)}`}</span>
-        <span className="flex items-center gap-2">
-          <span className="font-mono text-[10.5px] text-slate-400">Planned {batch.plannedQty}</span>
+    <>
+      <tr className={isDone ? "bg-emerald-50/30" : "hover:bg-slate-50"}>
+        <td className="px-3 py-1.5 font-black text-slate-800">{batch.batchNo ?? `Batch ${batch.id.slice(0, 8)}`}</td>
+        <td className="px-3 py-1.5">
           {isDone ? (
             <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">
-              <CheckCircle2 className="h-3 w-3" strokeWidth={2.5} /> Completed — output {batch.outputQty}
+              <CheckCircle2 className="h-3 w-3" strokeWidth={2.5} /> Completed
             </span>
           ) : (
             <span className="pill border-amber-200 bg-amber-50 text-amber-700">In Progress</span>
           )}
-        </span>
-      </div>
-
-      {/* Once completed, this batch runs its OWN IPQC-through-Dispatch
-          pipeline — doesn't wait on any sibling batch. See
-          ProductionBatchDetailPage.tsx. */}
-      {isDone && (
-        <Link
-          to={`/production-batches/${batch.id}`}
-          className="mb-2 flex items-center justify-between gap-2 rounded-lg border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-bold text-brand-700 hover:bg-brand-100"
-        >
-          <span className="flex items-center gap-1.5">
-            <Truck className="h-3.5 w-3.5" strokeWidth={2.25} /> This batch's own QC / Packaging / Dispatch pipeline — currently at {COMBINED_LOT_STAGE_LABEL[batch.currentStageId]}
-          </span>
-          <ArrowRight className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} />
-        </Link>
-      )}
-
-      {!isDone && canAct && (
-        <>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            <div>
-              <label className="label">Start Date</label>
-              <input className="field !h-8 !text-xs" type="date" value={values.manufacturingStartDate} onChange={(e) => setValues((v) => ({ ...v, manufacturingStartDate: e.target.value }))} />
-            </div>
-            <div>
-              <label className="label">End Date</label>
-              <input className="field !h-8 !text-xs" type="date" value={values.manufacturingEndDate} onChange={(e) => setValues((v) => ({ ...v, manufacturingEndDate: e.target.value }))} />
-            </div>
-            <div>
-              <label className="label">Status</label>
-              <input className="field !h-8 !text-xs" placeholder="e.g. Completed" value={values.manufacturingStatus} onChange={(e) => setValues((v) => ({ ...v, manufacturingStatus: e.target.value }))} />
-            </div>
-            <div>
-              <label className="label">Input Qty</label>
-              <input className="field !h-8 font-mono !text-xs" type="number" min="0" step="any" value={values.inputQty} onChange={(e) => setValues((v) => ({ ...v, inputQty: e.target.value }))} />
-            </div>
-            <div>
-              <label className="label">Output Qty</label>
-              <input className="field !h-8 font-mono !text-xs" type="number" min="0" step="any" value={values.outputQty} onChange={(e) => setValues((v) => ({ ...v, outputQty: e.target.value }))} />
-            </div>
-            <div>
-              <label className="label">Remarks</label>
-              <input className="field !h-8 !text-xs" value={values.manufacturingRemarks} onChange={(e) => setValues((v) => ({ ...v, manufacturingRemarks: e.target.value }))} />
-            </div>
-          </div>
-          {batch.inputQty != null && batch.outputQty != null && batch.wastage.wastageQty != null && (
-            <p className="mt-1.5 font-mono text-[10.5px] text-slate-400">
-              Wastage: {batch.wastage.wastageQty} ({batch.wastage.wastagePct}%)
-            </p>
+        </td>
+        <td className="px-3 py-1.5 text-right font-mono text-slate-600">{batch.plannedQty}</td>
+        <td className="px-3 py-1.5">
+          <select disabled={locked} className={`${CELL} w-24`} value={values.shift} onChange={set("shift")}>
+            <option value="">—</option>
+            <option value="Day">Day</option>
+            <option value="Night">Night</option>
+          </select>
+        </td>
+        <td className="px-3 py-1.5">
+          <input disabled={locked} className={`${CELL} w-20 font-mono`} type="number" min="0" step="1" value={values.manpowerCount} onChange={set("manpowerCount")} />
+        </td>
+        <td className="px-3 py-1.5">
+          <input disabled={locked} className={`${CELL} w-44`} type="datetime-local" value={values.shiftStartAt} onChange={set("shiftStartAt")} />
+        </td>
+        {!flow && (
+          <td className="px-3 py-1.5">
+            <input disabled={locked} className={`${CELL} w-24 font-mono`} type="number" min="0" step="any" value={values.inputQty} onChange={set("inputQty")} />
+          </td>
+        )}
+        <td className="px-3 py-1.5">
+          {util && util.required > 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowUtil((o) => !o)}
+              className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-tiny font-bold ${utilDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}
+              title={utilDone ? "Every plan material has its Production quantity on this batch" : `Missing: ${util.missing.join(", ")}`}
+            >
+              {util.logged} of {util.required} {showUtil ? "▴" : "▾"}
+            </button>
+          ) : (
+            <span className="text-slate-300">—</span>
           )}
-          <div className="mt-2 flex justify-end gap-2">
-            <button type="button" className="btn-ghost btn-sm" disabled={update.isPending} onClick={handleSave}>
-              {update.isPending ? "Saving…" : "Save"}
-            </button>
-            <button type="button" className="btn-primary btn-sm" disabled={complete.isPending} onClick={handleComplete}>
-              <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {complete.isPending ? "Completing…" : "Mark Completed"}
-            </button>
-          </div>
-        </>
+        </td>
+        <td className="px-3 py-1.5">
+          <input disabled={finishLocked} title={finishTip} className={`${CELL} w-44`} type="datetime-local" value={values.shiftEndAt} onChange={set("shiftEndAt")} />
+        </td>
+        {!flow && (
+          <td className="px-3 py-1.5">
+            <input disabled={finishLocked} title={finishTip} className={`${CELL} w-24 font-mono`} type="number" min="0" step="any" value={values.outputQty} onChange={set("outputQty")} />
+          </td>
+        )}
+        <td className="px-3 py-1.5">
+          <input disabled={finishLocked} title={finishTip} className={`${CELL} w-32`} placeholder="e.g. Completed" value={values.manufacturingStatus} onChange={set("manufacturingStatus")} />
+        </td>
+        <td className="px-3 py-1.5">
+          <input disabled={finishLocked} title={finishTip} className={`${CELL} w-44`} value={values.manufacturingRemarks} onChange={set("manufacturingRemarks")} />
+        </td>
+        {!flow && <td className="px-3 py-1.5 text-right font-mono text-slate-600">{batch.inputQty != null && batch.outputQty != null && batch.wastage.wastageQty != null ? `${batch.wastage.wastageQty} (${batch.wastage.wastagePct}%)` : "—"}</td>}
+        <td className="px-3 py-1.5">
+          {isDone ? (
+            <Link to={`/production-batches/${batch.id}`} className="inline-flex items-center gap-1 font-bold text-brand-700 hover:underline" title="This batch's own QC / Packaging / Dispatch pipeline">
+              <Truck className="h-3.5 w-3.5" strokeWidth={2.25} /> {COMBINED_LOT_STAGE_LABEL[batch.currentStageId]} <ArrowRight className="h-3 w-3" strokeWidth={2.5} />
+            </Link>
+          ) : (
+            <span className="text-slate-300">—</span>
+          )}
+        </td>
+        <td className="px-3 py-1.5 text-right">
+          <ActionMenu items={items} />
+        </td>
+      </tr>
+      {showUtil && renderUtilization && (
+        <tr className="bg-slate-50/70">
+          <td colSpan={flow ? 12 : 15} className="whitespace-normal px-4 py-3">
+            {renderUtilization(batch)}
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1143,7 +1313,7 @@ function StageHistory({ run }: { run: PreProduction }) {
                 {PRE_PRODUCTION_STAGE_LABEL[e.fromStageId]} <span className="text-slate-300">→</span> {PRE_PRODUCTION_STAGE_LABEL[e.toStageId]}
               </p>
               {e.note && <p className="mt-0.5 text-xs text-slate-500">{e.note}</p>}
-              <p className="mt-0.5 text-[10px] text-slate-400">
+              <p className="mt-0.5 text-micro text-slate-400">
                 {e.actorName} · {new Date(e.createdAt).toLocaleString()}
               </p>
             </div>

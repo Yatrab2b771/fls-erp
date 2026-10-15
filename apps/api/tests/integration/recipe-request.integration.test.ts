@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, ensurePlant } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -27,7 +28,7 @@ async function createUnmatchedPoItem(bdToken: string, productName: string, poNum
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: resolvedCustomerId, poNumber, items: [{ productName, quantity: 100, unit }] });
+    .send({ customerId: resolvedCustomerId, poNumber, items: [{ productName, productCategory: "Powder", quantity: 100, unit, packSize: "1 kg" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }
@@ -60,7 +61,7 @@ describe("POST /api/recipe-requests — PPIC asks R&D for a missing Recipe/BOM",
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Already Matched", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
+      .send({ recipes: [{ name: "RR Already Matched", customerId: matchedCustomer.id, ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
     await request(app)
       .post("/api/catalog/import")
       .set(authHeader(rndToken))
@@ -73,7 +74,7 @@ describe("POST /api/recipe-requests — PPIC asks R&D for a missing Recipe/BOM",
   it("only asks for the side that's actually missing — a PO-item unit that isn't Kg means RM Costing was never in play", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
-    const itemId = await createUnmatchedPoItem(bdToken, "RR Non-Kg Product", "PO-RR-003", "SKU");
+    const itemId = await createUnmatchedPoItem(bdToken, "RR Non-Kg Product", "PO-RR-003", "Litres");
 
     const created = await request(app).post("/api/recipe-requests").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
     expect(created.status).toBe(201);
@@ -109,13 +110,14 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: rndToken } = await createUser(["RND"]);
 
-    // Recipe already exists (unit Kg, name matches) so only bomNeeded is true.
+    // Recipe already exists (unit Kg, name matches, for this customer) so only bomNeeded is true.
+    const bomOnlyCustomer = await createCustomer(bdToken, customerNameFor("RR Resolve BOM Only"));
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Resolve BOM Only", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
+      .send({ recipes: [{ name: "RR Resolve BOM Only", customerId: bomOnlyCustomer.id, ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
 
-    const itemId = await createUnmatchedPoItem(bdToken, "RR Resolve BOM Only", "PO-RR-020");
+    const itemId = await createUnmatchedPoItem(bdToken, "RR Resolve BOM Only", "PO-RR-020", "Kg", bomOnlyCustomer.id);
     const created = await request(app).post("/api/recipe-requests").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
     expect(created.body.bomNeeded).toBe(true);
     expect(created.body.rmNeeded).toBe(false);
@@ -132,6 +134,7 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     expect(updated.bomFulfilledAt).toBeTruthy();
 
     // Generate now actually matches.
+    await ensurePlant(itemId);
     const plan = await request(app).post("/api/bom/plans").set(authHeader(bdToken)).send({ name: "Resolve — BOM", purchaseOrderItemId: itemId });
     expect(plan.body.status).toBe("CALCULATED");
   });
@@ -160,7 +163,7 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Resolve Both", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
+      .send({ recipes: [{ name: "RR Resolve Both", customerName: customerNameFor("RR Resolve Both"), ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
 
     const afterRecipe = await request(app).get("/api/recipe-requests").set(authHeader(ppicToken));
     const nowReady = afterRecipe.body.find((r: { id: string }) => r.id === created.body.id);
@@ -179,12 +182,11 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     const { token: rndToken } = await createUser(["RND"]);
 
     // Recipe already exists so only the BOM/packaging side is missing.
+    const customer = await createCustomer(bdToken, customerNameFor("RR Manual Add Resolves"));
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Manual Add Resolves", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
-
-    const customer = await createCustomer(bdToken, customerNameFor("RR Manual Add Resolves"));
+      .send({ recipes: [{ name: "RR Manual Add Resolves", customerId: customer.id, ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
     const itemId = await createUnmatchedPoItem(bdToken, "RR Manual Add Resolves", "PO-RR-022", "Kg", customer.id);
     const created = await request(app).post("/api/recipe-requests").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
     expect(created.body.bomNeeded).toBe(true);
@@ -209,6 +211,7 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     expect(afterAdd.body.find((r: { id: string }) => r.id === created.body.id).status).toBe("READY");
 
     // Generate now actually matches, same as the bulk-import case above.
+    await ensurePlant(itemId);
     const plan = await request(app).post("/api/bom/plans").set(authHeader(bdToken)).send({ name: "Resolve — Manual Add", purchaseOrderItemId: itemId });
     expect(plan.body.status).toBe("CALCULATED");
   });
@@ -218,12 +221,11 @@ describe("Uploading the missing catalog piece resolves the request — R&D's Imp
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: rndToken } = await createUser(["RND"]);
 
+    const customer = await createCustomer(bdToken, customerNameFor("RR Checklist Resolves"));
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Checklist Resolves", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
-
-    const customer = await createCustomer(bdToken, customerNameFor("RR Checklist Resolves"));
+      .send({ recipes: [{ name: "RR Checklist Resolves", customerId: customer.id, ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
     const itemId = await createUnmatchedPoItem(bdToken, "RR Checklist Resolves", "PO-RR-023", "Kg", customer.id);
     const created = await request(app).post("/api/recipe-requests").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
     expect(created.body.bomNeeded).toBe(true);
@@ -263,11 +265,13 @@ describe("POST /api/pre-productions — blocked while this PO item's Recipe/BOM 
     const openRequest = await request(app).post("/api/recipe-requests").set(authHeader(ppicToken)).send({ purchaseOrderItemId: itemId });
     expect(openRequest.status).toBe(201);
 
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     const blockedPending = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     expect(blockedPending.status).toBe(400);
     expect(blockedPending.body.error).toMatch(/no ETA given yet/);
 
     await request(app).patch(`/api/recipe-requests/${openRequest.body.id}/eta`).set(authHeader(rndToken)).send({ etaDate: "2026-09-15" });
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     const blockedEta = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     expect(blockedEta.status).toBe(400);
     expect(blockedEta.body.error).toMatch(/ETA/);
@@ -279,8 +283,9 @@ describe("POST /api/pre-productions — blocked while this PO item's Recipe/BOM 
     await request(app)
       .post("/api/rm-costing/recipes/import")
       .set(authHeader(rndToken))
-      .send({ recipes: [{ name: "RR Batch Gate Product", ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
+      .send({ recipes: [{ name: "RR Batch Gate Product", customerName: customerNameFor("RR Batch Gate Product"), ingredients: [{ name: "Some Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
 
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     const allowed = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     expect(allowed.status).toBe(201);
   });
@@ -299,10 +304,11 @@ describe("POST /api/pre-productions — blocked while this PO item's Recipe/BOM 
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.id, poNumber: "PO-RR-040", items: [{ productName: "RR No Gate Product", quantity: 50, unit: "SKU" }] });
+      .send({ customerId: customer.id, poNumber: "PO-RR-040", items: [{ productName: "RR No Gate Product", productCategory: "Powder", quantity: 50, unit: "SKU" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
     const itemId = po.body.items[0].id;
 
+    await prisma.purchaseOrderItem.update({ where: { id: itemId }, data: { planSentToProductionAt: new Date() } }); // PPIC has sent the plan to Production
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     expect(run.status).toBe(201);
   });

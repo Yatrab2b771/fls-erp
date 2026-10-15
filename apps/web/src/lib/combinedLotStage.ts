@@ -32,6 +32,7 @@ export const COMBINED_LOT_STAGE_ROLE: Record<CombinedLotStageId, RoleName[]> = {
   FG_QC_RELEASE: ["QA_QC"],
   BILLING_EWAY_BILL: ["ACCOUNTS"],
   DISPATCH_PLAN: ["DISPATCH"],
+  FG_HANDOVER: ["STORE"],
 };
 
 export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
@@ -44,6 +45,7 @@ export const COMBINED_LOT_STAGE_LABEL: Record<CombinedLotStageId, string> = {
   FG_QC_RELEASE: "Finished Goods QC & Release",
   BILLING_EWAY_BILL: "Billing & E-Way Bill",
   DISPATCH_PLAN: "Dispatch Plan",
+  FG_HANDOVER: "Hand over to Dispatch",
 };
 
 const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
@@ -164,4 +166,26 @@ export function getForwardTarget(stage: CombinedLotStageId): CombinedLotStageId 
 export function getRejectTarget(stage: CombinedLotStageId): CombinedLotStageId | null {
   const idx = COMBINED_LOT_STAGE_ORDER.indexOf(stage);
   return idx > 0 ? COMBINED_LOT_STAGE_ORDER[idx - 1]! : null;
+}
+
+// A production batch has its own, shorter order: after QA approves the finished goods (held by the Day Store) the Day Store hands them to
+// Dispatch, and what Dispatch does next is a list of shipments. Batches already at Billing / Dispatch Plan finish the old way.
+export const PRODUCTION_BATCH_STAGE_ORDER: CombinedLotStageId[] = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING", "QA_GATE_PACKAGING", "FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"];
+
+/** The stages a batch shows: the new order, or the old one for a batch that is already past FG QC & Release in the old way. */
+export function batchStageOrderFor(stage: CombinedLotStageId): CombinedLotStageId[] {
+  return stage === "BILLING_EWAY_BILL" || stage === "DISPATCH_PLAN" ? COMBINED_LOT_STAGE_ORDER : PRODUCTION_BATCH_STAGE_ORDER;
+}
+
+export function getBatchForwardTarget(stage: CombinedLotStageId): CombinedLotStageId {
+  if (stage === "BILLING_EWAY_BILL" || stage === "DISPATCH_PLAN") return getForwardTarget(stage);
+  if (stage === "FG_HANDOVER") return stage;
+  const idx = PRODUCTION_BATCH_STAGE_ORDER.indexOf(stage);
+  return PRODUCTION_BATCH_STAGE_ORDER[idx + 1] ?? stage;
+}
+
+export function getBatchRejectTarget(stage: CombinedLotStageId): CombinedLotStageId | null {
+  if (stage === "BILLING_EWAY_BILL" || stage === "DISPATCH_PLAN") return getRejectTarget(stage);
+  const idx = PRODUCTION_BATCH_STAGE_ORDER.indexOf(stage);
+  return idx > 0 ? PRODUCTION_BATCH_STAGE_ORDER[idx - 1]! : null;
 }

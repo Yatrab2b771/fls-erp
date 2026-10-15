@@ -1,6 +1,12 @@
 import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
+import { loadOrderConversion } from "../purchase-orders/order-conversion";
 import { recordAudit } from "../../common/lib/audit";
+import { isPoItemApproved } from "../purchase-orders/po-visibility";
+import { planningBlockedByHold } from "../purchase-orders/hold-guards";
+import { sendItemToRegulatoryIfReady } from "../purchase-orders/regulatory-handoff";
+import { raiseRequestsForPlannedItemSafe } from "../inventory/plan-requests";
+import { syncShortToPurchaseSafe } from "../purchase-orders/purchase-sync";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
@@ -10,9 +16,6 @@ import { addPlanItemSchema, createPlanSchema } from "./bom-plan.schemas";
 import { calculateMasterBOM, hasBomSpec, type BomPlanLineInput, type BomResult } from "./bom-engine";
 import { buildMasterBomWorkbook } from "./bom-export";
 import { buildMasterBomPdf } from "./bom-pdf";
-import { bulkCreateRequirements, type RequirementSourceRow } from "../inventory/pre-inventory.routes";
-import { createPoMaterialRequirements } from "../po-readiness/po-readiness.routes";
-import { createMaterialRequestsFromPlan } from "../inventory/inventory.routes";
 import { Prisma } from "@prisma/client";
 
 export const bomPlanRouter = Router();
@@ -98,7 +101,7 @@ async function findSkuSuggestions(poItem: { productName: string; quantity: numbe
 const planInclude = {
   // deletedAt: null — a soft-deleted SKU line drops out of the plan the
   // instant it's removed, same as before, just recoverable now.
-  items: { where: { deletedAt: null }, include: { sku: { include: { customer: true, packagingComponents: true } } } },
+  items: { where: { deletedAt: null }, include: { sku: { include: { customer: true, packagingComponents: { include: { pmItem: { select: { name: true } } } } } } } },
   purchaseOrderItem: { include: { purchaseOrder: { select: { id: true, poNumber: true } } } },
 } satisfies Prisma.BomPlanInclude;
 
@@ -134,10 +137,16 @@ bomPlanRouter.post("/plans", validateBody(createPlanSchema), async (req: AuthedR
       purchaseOrderItemId?: string;
     };
 
-    let poItem: { productName: string; quantity: number; purchaseOrderId: string; productType: "EXISTING" | "NEW" } | null = null;
+    let poItem: { productName: string; quantity: number; unit: string; packSize: string | null; purchaseOrderId: string; productType: "EXISTING" | "NEW"; plannedPlantId: string | null } | null = null;
+    let conversionProblem: string | undefined;
     if (purchaseOrderItemId) {
-      poItem = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { productName: true, quantity: true, purchaseOrderId: true, productType: true } });
+      poItem = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { productName: true, quantity: true, unit: true, packSize: true, purchaseOrderId: true, productType: true, plannedPlantId: true } });
       if (!poItem) return res.status(400).json({ error: "Unknown purchase order item" });
+      if (!(await isPoItemApproved(purchaseOrderItemId))) return res.status(400).json({ error: "This purchase order hasn't been approved by BD yet." });
+      // The plan's material goes to that Plant's Day Store as soon as it is calculated, so the Plant has to be known first.
+      if (!poItem.plannedPlantId) return res.status(400).json({ error: "Assign a Plant to this product before generating its plan.", code: "PLANT_REQUIRED" });
+      const heldMsg = await planningBlockedByHold(purchaseOrderItemId);
+      if (heldMsg) return res.status(409).json({ error: heldMsg });
     }
 
     const plan = await prisma.bomPlan.create({
@@ -176,7 +185,7 @@ bomPlanRouter.post("/plans", validateBody(createPlanSchema), async (req: AuthedR
           productName: { equals: poItem.productName, mode: "insensitive" },
           ...(order ? { customerId: order.customerId } : {}),
         },
-        include: { packagingComponents: true },
+        include: { packagingComponents: { include: { pmItem: { select: { name: true } } } } },
       });
       // A Sku row existing isn't the same as R&D having actually defined
       // its packaging — the PO form's own "+ New" product quick-add (and
@@ -187,8 +196,11 @@ bomPlanRouter.post("/plans", validateBody(createPlanSchema), async (req: AuthedR
       // match needs actual spec data too, same bar checkGap() now uses to
       // decide whether R&D still needs to hear about this.
       const realMatch = candidates.length === 1 && hasBomSpec({ spec: candidates[0]!, packagingComponents: candidates[0]!.packagingComponents }) ? candidates[0]! : null;
-      if (realMatch) {
-        const targetYield = Math.max(1, Math.round(poItem.quantity));
+      // The BOM works in packs: a Kg order is turned into packs with the pack size (a SKU order already is packs).
+      const conv = realMatch && order ? await loadOrderConversion(poItem, order.customerId) : null;
+      if (realMatch && conv && conv.packs == null) conversionProblem = conv.packsProblem ?? undefined;
+      if (realMatch && conv && conv.packs != null) {
+        const targetYield = Math.max(1, conv.packs);
         await prisma.bomPlanItem.create({ data: { planId: plan.id, skuId: realMatch.id, targetYield, addedById: req.user!.id } });
 
         const withItems = await prisma.bomPlan.findUniqueOrThrow({ where: { id: plan.id }, include: planInclude });
@@ -212,7 +224,7 @@ bomPlanRouter.post("/plans", validateBody(createPlanSchema), async (req: AuthedR
           entityId: plan.id,
           metadata: { totalYield: result.totalYield, lineCount: result.lines.length, autoGenerated: true },
         });
-      } else {
+      } else if (!realMatch) {
         // No real match — don't make PPIC come back and click "Request
         // from R&D" by hand; the gap is already known the moment Generate
         // fails, same reasoning productType NEW already gets above.
@@ -224,13 +236,18 @@ bomPlanRouter.post("/plans", validateBody(createPlanSchema), async (req: AuthedR
     }
 
     const finalPlan = await prisma.bomPlan.findUniqueOrThrow({ where: { id: plan.id }, include: planInclude });
+    // Auto-match landed straight on CALCULATED — hand the product to Regulatory.
+    if (finalPlan.status === "CALCULATED") {
+      await sendItemToRegulatoryIfReady(purchaseOrderItemId, req.user!.id, req.log);
+      await raiseRequestsForPlannedItemSafe(purchaseOrderItemId, req.user!.id, req.log);
+    }
     // Still empty after the exact-match attempt above? Look for a
     // near-name match before handing back a bare empty Draft — a typo'd
     // product name shouldn't read the same as a genuinely new one. Never
     // worth attempting for a declared-NEW product — there's nothing to
     // suggest, it's genuinely not in the catalog yet.
     const suggestions = finalPlan.items.length === 0 && poItem?.productType !== "NEW" ? await findSkuSuggestions(poItem) : undefined;
-    res.status(201).json(serializePlan(finalPlan, suggestions));
+    res.status(201).json({ ...serializePlan(finalPlan, suggestions), ...(conversionProblem ? { conversionProblem } : {}) });
   } catch (err) {
     next(err);
   }
@@ -309,6 +326,9 @@ bomPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: strin
   try {
     const plan = await prisma.bomPlan.findUnique({ where: { id: req.params.id }, include: planInclude });
     if (!plan) return res.status(404).json({ error: "Plan not found" });
+    // A product on hold (and not fully planned yet) can't have its plan calculated.
+    const heldMsg = await planningBlockedByHold(plan.purchaseOrderItemId);
+    if (heldMsg) return res.status(409).json({ error: heldMsg });
     if (plan.items.length === 0) return res.status(400).json({ error: "Plan has no queued SKUs" });
 
     // Same "existing isn't the same as defined" guard as Generate's own
@@ -355,83 +375,14 @@ bomPlanRouter.post("/plans/:id/calculate", async (req: AuthedRequest<{ id: strin
       metadata: { totalYield: result.totalYield, lineCount: result.lines.length },
     });
 
+    // Plan is CALCULATED — hand the product to Regulatory automatically.
+    await sendItemToRegulatoryIfReady(plan.purchaseOrderItemId, req.user!.id, req.log);
+    // Both plans calculated + a Plant: the materials go to that Plant's Day Store by themselves.
+    await raiseRequestsForPlannedItemSafe(plan.purchaseOrderItemId, req.user!.id, req.log);
+    // The plan's materials changed - keep Purchase's shortfall requirements in step.
+    await syncShortToPurchaseSafe(req.user!.id, req.log);
+
     res.json({ plan: serializePlan(updated), result });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Turns a calculated BOM into Pre-Inventory requirements (S1) in one
-// click — one PM requirement per component/spec line, quantity already
-// including the wastage buffer. PPIC-only, matching who's allowed to
-// raise a Pre-Inventory requirement by hand. Every packaging component
-// here is a countable unit (jars, stickers, boxes...), never weighed,
-// so unit is always "Count".
-bomPlanRouter.post("/plans/:id/send-to-pre-inventory", requireRole("PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
-  try {
-    const plan = await prisma.bomPlan.findUnique({ where: { id: req.params.id } });
-    if (!plan) return res.status(404).json({ error: "Plan not found" });
-    if (!plan.resultSnapshot) return res.status(400).json({ error: "Plan has not been calculated yet — POST /plans/:id/calculate first" });
-    // Server-side guard, not just the button being disabled client-side —
-    // PreInventoryRequirement has no unique constraint to fall back on,
-    // so a second send from the same unchanged result would silently
-    // create a full duplicate set of rows. Recalculating (POST
-    // /calculate) clears this and opens the door to a fresh send.
-    if (plan.sentToPreInventoryAt) {
-      return res.status(400).json({ error: "This plan's result was already sent to Pre-Inventory. Recalculate it first if you need to send an updated result." });
-    }
-
-    const result = plan.resultSnapshot as unknown as BomResult;
-    const rows: RequirementSourceRow[] = result.lines
-      .filter((line) => line.totalQty > 0)
-      .map((line) => ({
-        date: new Date(),
-        category: "PM",
-        itemName: `${line.component} — ${line.spec}`,
-        unit: "Count",
-        requiredQty: line.totalQty,
-        note: `From BOM Plan "${plan.name}"`,
-      }));
-
-    if (rows.length === 0) return res.status(400).json({ error: "This plan's calculated result has nothing to send" });
-
-    const outcome = await bulkCreateRequirements(rows, req.user!.id, req);
-
-    // Also feed PO Readiness, and raise this PO's Material Requests, when
-    // this plan is linked to a real PO — see createPoMaterialRequirements'
-    // and createMaterialRequestsFromPlan's own comments for why.
-    let poReadiness: { rowsCreated: number; itemsCreated: number } | null = null;
-    let materialRequests: { rowsCreated: number } | null = null;
-    if (plan.purchaseOrderItemId) {
-      const poItem = await prisma.purchaseOrderItem.findUnique({
-        where: { id: plan.purchaseOrderItemId },
-        select: { purchaseOrderId: true, purchaseOrder: { select: { poNumber: true } } },
-      });
-      if (poItem) {
-        poReadiness = await createPoMaterialRequirements(
-          poItem.purchaseOrderId,
-          rows.map((r) => ({ category: r.category, itemName: r.itemName, unit: r.unit, requiredQty: r.requiredQty })),
-          req.user!.id,
-        );
-        materialRequests = await createMaterialRequestsFromPlan(
-          rows.map((r) => ({ category: r.category, itemName: r.itemName, requiredQty: r.requiredQty })),
-          req.user!.id,
-          `Auto-raised from BOM Plan "${plan.name}" for PO ${poItem.purchaseOrder.poNumber ?? poItem.purchaseOrderId.slice(0, 8)}`,
-        );
-      }
-    }
-
-    await prisma.bomPlan.update({ where: { id: plan.id }, data: { sentToPreInventoryAt: new Date() } });
-
-    await recordAudit({
-      actorId: req.user!.id,
-      action: "bom_plan.sent_to_pre_inventory",
-      entityType: "BomPlan",
-      entityId: plan.id,
-      metadata: { ...outcome, poReadiness, materialRequests },
-    });
-
-    res.status(201).json({ ...outcome, poReadiness, materialRequests });
   } catch (err) {
     next(err);
   }

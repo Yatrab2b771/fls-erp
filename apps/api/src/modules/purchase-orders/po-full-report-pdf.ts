@@ -146,7 +146,7 @@ export function buildPoFullReportPdf(report: PoFullReport): PDFKit.PDFDocument {
       .font("Helvetica")
       .fontSize(9)
       .fillColor("#475569")
-      .text(`Ordered ${item.quantity} ${item.unit} · ${item.productType} · ${item.batchCount} batch(es) · Dispatched ${item.dispatchedTotal} ${item.unit}`);
+      .text(`Ordered ${item.quantity} ${item.unit} · ${item.productCategory ? `${item.productCategory} · ` : ""}${item.productType} ·${item.batchCount} batch(es) · Dispatched ${item.dispatchedTotal} ${item.unit}`);
     doc.fillColor("#000000");
     doc.moveDown(0.3);
 

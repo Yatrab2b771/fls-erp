@@ -3,7 +3,7 @@ import type { RmMasterResult } from "./rm-costing-engine";
 
 /**
  * Builds the same multi-sheet workbook the prototype produced client-side
- * with `exportTrueExcel()` — one detailed costing sheet per batch plus a
+ * with `exportTrueExcel()` — one detailed sheet per batch plus a
  * "Master Procurement" rollup — but generated server-side so the export is
  * identical no matter who downloads it, same rationale as
  * packaging-bom/bom-export.ts.
@@ -13,7 +13,7 @@ export async function buildRmMasterWorkbook(result: RmMasterResult): Promise<Exc
   workbook.creator = "FLS Mitr";
   workbook.created = new Date();
 
-  const colWidths = [10, 35, 15, 10, 8, 12, 10, 15, 8, 15, 12];
+  const colWidths = [10, 35, 15, 10, 12, 15, 8, 12];
 
   for (const res of result.batches) {
     // Sheet names are capped at 31 chars and can't contain \/?*[] — same
@@ -25,58 +25,14 @@ export async function buildRmMasterWorkbook(result: RmMasterResult): Promise<Exc
     sheet.addRow([res.recipeName]).font = { bold: true };
     sheet.addRow(["Gm per Serving", res.gmPerServing, "", "Batch Size in KG", res.batchSizeKg]);
     sheet.addRow(["Serving per Batch", res.servingsPerBatch, "", "Protein % in Batch", res.proteinPctInBatch / 100]);
-    sheet.addRow(["Cost per Kg Without Packaging", res.costPerKgWithoutPkg]);
     sheet.addRow([]);
 
-    const headerRow = sheet.addRow([
-      "Protein %",
-      "Ingredients Name",
-      "Brand",
-      "Cost",
-      "Unit",
-      "Rate per gm",
-      "g/serving",
-      "Per Batch",
-      "Unit",
-      "Amount",
-      "Qty in Kg",
-    ]);
+    const headerRow = sheet.addRow(["Protein %", "Ingredients Name", "Brand", "Item Code", "g/serving", "Per Batch", "Unit", "Qty in Kg"]);
     headerRow.font = { bold: true };
 
     for (const ing of res.ingredients) {
-      sheet.addRow([
-        ing.proteinPct,
-        ing.name,
-        ing.brand,
-        ing.costPerKg,
-        "KG",
-        ing.ratePerGm,
-        ing.gPerServing,
-        ing.perBatchGrams,
-        "KG",
-        ing.amount,
-        ing.qtyInKg,
-      ]);
+      sheet.addRow([ing.proteinPct, ing.name, ing.brand, ing.itemCode ?? "", ing.gPerServing, ing.perBatchGrams, "g", ing.qtyInKg]);
     }
-    sheet.addRow([]);
-
-    const waterfallRows: (string | number)[][] = [
-      ["", "", "", "", "", "", "", "Total RM Cost", "", res.totalRmCost],
-      ["", "", "", "", "", "", "", "Testing Cost Protein", "", res.testCost],
-      ["", "", "", "", "", "", "", "For Powder (Kg)", res.batchSizeKg, res.powderCostPlusTesting],
-      ["", "", "", "", "", "", "", "Manufacturing Loss", res.mfgLossPct / 100, res.mfgLossAmount],
-      ["", "", "", "", "", "", "", "For Powder in g", res.packSizeG, res.costPerPouchPowder],
-      ["", "", "", "", "", "", "", "Jar", "", res.jarCost],
-      ["", "", "", "", "", "", "", "Scoop + Wad", "", res.scoopCost],
-      ["", "", "", "", "", "", "", "Label", "", res.labelCost],
-      ["", "", "", "", "", "", "", "Conversion", "", res.convCost],
-      ["", "", "", "", "", "", "", "CCB/Copp", "", res.ccbCost],
-      ["", "", "", "", "", "", "", "Total Cost Including Packaging", "", res.cogsPerPouch],
-      ["", "", "", "", "", "", "", "Profit", res.profitPct / 100, res.profitAmount],
-      ["", "", "", "", "", "", "", "GST", res.gstPct / 100, res.gstAmount],
-      ["", "", "", "", "", "", "", "Price Per Pouch", "", res.pricePerPouch],
-    ];
-    for (const row of waterfallRows) sheet.addRow(row);
   }
 
   const master = workbook.addWorksheet("Master Procurement");

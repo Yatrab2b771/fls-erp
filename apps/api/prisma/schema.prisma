@@ -35,24 +35,33 @@ enum RoleName {
 }
 
 model User {
-  id           String   @id @default(uuid())
+  financeDecisions  FinanceDecision[] @relation("FinanceDecisionUpdatedBy")
+  financePayments   FinancePayment[]  @relation("FinancePaymentCreatedBy")
+  id                String            @id @default(uuid())
   // A short, permanent, human-readable identifier — the UUID id isn't
   // something anyone can read aloud or tell two same-named people apart
   // by. DB-generated autoincrement, so it's guaranteed unique with no
   // generation logic to get wrong; formatted as "FLS-0007" in the UI.
-  employeeId   Int      @unique @default(autoincrement())
-  email        String   @unique
-  passwordHash String
-  fullName     String
-  isActive     Boolean  @default(true)
+  employeeId        Int               @unique @default(autoincrement())
+  email             String            @unique
+  // The short name a person logs in with (lower case, no spaces). Login also works with the email. Chosen by the admin who creates the account.
+  loginId           String?           @unique
+  passwordHash      String
+  // When the password was last set and by whom: USER (own change), ADMIN (a department admin or the System Admin) or SYSTEM (a server command)
+  passwordChangedAt DateTime?
+  passwordChangedBy String?
+  lastLoginAt       DateTime?
+  fullName          String
+  isActive          Boolean           @default(true)
   // Bumped on password change/reset/deactivation — included in every JWT,
   // so a token minted before the bump stops verifying immediately instead
   // of staying valid until its natural expiry.
-  tokenVersion Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  tokenVersion      Int               @default(0)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   roles                            UserRole[]
+  fgShipmentsRequested             FgShipment[]               @relation("FgShipmentRequestedBy")
   auditLogs                        AuditLog[]
   customersCreated                 Customer[]
   vendorsCreated                   Vendor[]
@@ -73,6 +82,7 @@ model User {
   combinedLotStageEvents           CombinedLotStageEvent[]    @relation("CombinedLotStageEventActor")
   productionBatchesCreated         ProductionBatch[]          @relation("ProductionBatchCreatedBy")
   productionBatchesCompleted       ProductionBatch[]          @relation("ProductionBatchCompletedBy")
+  productionBatchesHeld            ProductionBatch[]          @relation("ProductionBatchHeldBy")
   inventoryTxns                    InventoryTransaction[]
   dispatchTransfers                DispatchTransfer[]
   inventoryRequested               InventoryRequest[]         @relation("InventoryRequestRequestedBy")
@@ -93,11 +103,22 @@ model User {
   combinedLotsCoaApproved          CombinedLot[]              @relation("CombinedLotCoaApprovedBy")
   preInventoryRequested            PreInventoryRequirement[]  @relation("PreInventoryRequirementRequestedBy")
   preInventoryPurchased            PreInventoryRequirement[]  @relation("PreInventoryRequirementPurchaseBy")
+  purchaseLinesLogged              RequirementPurchaseLine[]  @relation("RequirementPurchaseLineLoggedBy")
   dispatchTransfersSent            DispatchTransfer[]         @relation("DispatchTransferDispatchedBy")
   dispatchTransfersInvoiced        DispatchTransfer[]         @relation("DispatchTransferInvoicedBy")
   dayStoreAssignments              DayStoreAssignment[]       @relation("DayStoreAssignmentUser")
   dayStoreAssignmentsGranted       DayStoreAssignment[]       @relation("DayStoreAssignmentAssignedBy")
+  plantAssignments                 PlantAssignment[]          @relation("PlantAssignmentUser")
+  plantAssignmentsGranted          PlantAssignment[]          @relation("PlantAssignmentAssignedBy")
   poMaterialRequirementsAdded      PoMaterialRequirement[]
+  sampleRequested                  SampleRequest[]            @relation("SampleRequestedBy")
+  itemChangesRequested             ItemChangeRequest[]        @relation("ItemChangeRequestedBy")
+  itemChangesDecided               ItemChangeRequest[]        @relation("ItemChangeDecidedBy")
+  businessCardsCreated             BusinessCard[]             @relation("BusinessCardCreatedBy")
+  leadsOwned                       Lead[]                     @relation("LeadPoc")
+  leadsCreated                     Lead[]                     @relation("LeadCreatedBy")
+  leadMeetingsLogged               LeadMeeting[]              @relation("LeadMeetingCreatedBy")
+  leadReschedules                  LeadReschedule[]           @relation("LeadRescheduleBy")
   recipeRequested                  RecipeRequest[]            @relation("RecipeRequestRequestedBy")
   recipeRequestsResponded          RecipeRequest[]            @relation("RecipeRequestRespondedBy")
   rndTransfersSent                 RndTransfer[]              @relation("RndTransferSentBy")
@@ -144,10 +165,12 @@ model Role {
 // timestamp — "who gave this user this role, and when" is itself an audit
 // fact worth keeping.
 model UserRole {
-  userId    String
-  roleId    String
-  grantedAt DateTime @default(now())
-  grantedBy String?
+  userId      String
+  roleId      String
+  grantedAt   DateTime @default(now())
+  grantedBy   String?
+  // The admin of this department: manages the logins of the people who hold only this role. One per role (a partial unique index in the database).
+  isDeptAdmin Boolean  @default(false)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
   role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
@@ -205,16 +228,22 @@ model Notification {
 // ---------------------------------------------------------------------------
 
 model Customer {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   companyName     String
   contactPerson   String?
   contactNo       String?
   gstNo           String?
   email           String?
   deliveryAddress String?
+  // BD picks the Top 10 customers by hand (no limit, no rule). "New" is not stored: a customer is New for 90 days after createdAt.
+  isTop10         Boolean   @default(false)
+  // Null: New for 90 days after createdAt. BD can set it by hand in the PO form's customer type dropdown (true = New, false = not New).
+  newOverride     Boolean?
+  top10SetAt      DateTime?
+  top10SetById    String?
   createdById     String
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   createdBy          User                  @relation(fields: [createdById], references: [id])
   purchaseOrders     PurchaseOrder[]
@@ -224,7 +253,12 @@ model Customer {
   // in the real business a Brand and the Customer placing the PO are
   // the same company, so the catalog hangs directly off Customer now.
   skus               Sku[]
+  recipes            Recipe[]
+  sampleRequests     SampleRequest[]
+  businessCards      BusinessCard[]
+  leads              Lead[]
 
+  @@index([companyName])
   @@map("customers")
 }
 
@@ -354,6 +388,19 @@ enum ProductType {
   NEW
 }
 
+// Master list behind the PO line's Product Category dropdown. Seeded with
+// the usual dosage forms; BD can add a new one inline from the PO form
+// ("+ Add new product category"), which lands here so it's reusable by
+// everyone afterwards instead of being a one-off typed string.
+model ProductCategory {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@map("product_categories")
+}
+
 // The PO *header* — BD receives this from a company/brand. Product-level
 // detail lives on PurchaseOrderItem, not here, because one PO can list
 // several distinct products (e.g. Medicine A, B, C) each needing its own
@@ -382,6 +429,11 @@ model PurchaseOrder {
   materialRequirements PoMaterialRequirement[]
   invoice              PurchaseOrderInvoice?
 
+  @@index([status])
+  @@index([customerId])
+  @@index([createdAt])
+  @@index([orderDate])
+  @@index([poNumber])
   @@map("purchase_orders")
 }
 
@@ -492,7 +544,13 @@ model PurchaseOrderItem {
   id              String      @id @default(uuid())
   purchaseOrderId String
   productName     String
-  dosageForm      String?
+  dosageForm      String? // legacy free text — superseded by productCategory for new entries
+  // BD's mandatory Product Category pick (Powder / Gummies / Bars / ...,
+  // see ProductCategory below) — stored as the category's name, not an FK,
+  // so a snapshot on the line survives a later rename/deactivation of the
+  // master row. Nullable only because rows created before this field
+  // existed have none; the API requires it on every new line.
+  productCategory String?
   quantity        Float
   unit            String // KG | SKU | other free-text
   volume          Float?
@@ -526,6 +584,36 @@ model PurchaseOrderItem {
   // before that run exists (PATCH /:id/planned-plant, PPIC-only).
   plannedPlantId String?
 
+  // How much of the ordered quantity PPIC has released to Production so far. Null = all of it (every item sent before partial
+  // releases existed, and every normal full send). A partial release adds to it; Production's batches can only be planned up
+  // to this much (see production-batches.routes.ts), and PPIC can release more later until it reaches `quantity`.
+  releasedQty Float?
+
+  // Set automatically the moment this product's BOM/RM plan is CALCULATED
+  // (see regulatory-handoff.ts) — that is what puts the product into
+  // Regulatory's review queue. Null = plan not calculated yet, so nothing
+  // for Regulatory to look at. Raw-material shortfall doesn't matter for
+  // this: Regulatory can approve a product whose materials are short.
+  sentToRegulatoryAt   DateTime?
+  sentToRegulatoryById String?
+
+  // PPIC's "Hold" on a product. Not fully planned yet -> its BOM/RM plan can't
+  // be generated (hold-guards.ts). Fully planned (Material Planning) -> it
+  // can't be sent to Production and takes no stock in the FIFO allocation, so
+  // other products can use the material meanwhile; Regulatory's review is not
+  // held. Releasing puts it back at its normal FIFO place. Only settable
+  // before the plan is sent to Production; sending a held product is refused.
+  materialHeldAt   DateTime?
+  materialHeldById String?
+
+  // PPIC's Cancel — the product is dead for good (unlike Hold there is no
+  // undo). The row is kept, only marked, so history survives. A cancelled
+  // product drops out of every PPIC list, the stock queue, Regulatory's queue
+  // and the PO's completion maths; every planning / send action refuses it.
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelReason  String?
+
   // Regulatory's own sign-off, per product line — separate from BD's own
   // self-declared regulatoryBody/regulatoryStatus on the PurchaseOrder
   // header (what BD says was filed with FSSAI/AYUSH, unverified). This is
@@ -544,17 +632,20 @@ model PurchaseOrderItem {
   // the existing RecipeRequest gap-block just above it.
   planSentToProductionAt DateTime?
 
-  purchaseOrder        PurchaseOrder   @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
-  plannedPlant         Plant?          @relation(fields: [plannedPlantId], references: [id])
-  regulatoryReviewedBy User?           @relation("PurchaseOrderItemRegulatoryReviewedBy", fields: [regulatoryReviewedById], references: [id])
+  purchaseOrder        PurchaseOrder       @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  plannedPlant         Plant?              @relation(fields: [plannedPlantId], references: [id])
+  regulatoryReviewedBy User?               @relation("PurchaseOrderItemRegulatoryReviewedBy", fields: [regulatoryReviewedById], references: [id])
   preProduction        PreProduction?
   // Optional read-only cross-links into the planning modules — see
   // BomPlan.purchaseOrderItemId / RmPlan.purchaseOrderItemId.
   bomPlans             BomPlan[]
   rmPlans              RmPlan[]
   recipeRequests       RecipeRequest[]
-  deletedBy            User?           @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
+  changeRequests       ItemChangeRequest[]
+  deletedBy            User?               @relation("PurchaseOrderItemDeletedBy", fields: [deletedById], references: [id])
 
+  @@index([purchaseOrderId])
+  @@index([cancelledAt])
   @@map("purchase_order_items")
 }
 
@@ -653,6 +744,10 @@ model PreProduction {
   plannedQty  Float
   combinedQty Float @default(0)
 
+  // true: the run was started in the per-batch flow. It has no stages of its own (Material Received, Indent, Dispensing and Line Clearance
+  // are done per batch, see BatchPrepStage), so it is created already at its last stage.
+  batchFlow Boolean @default(false)
+
   // Which physical production Plant this run's material is dispensed
   // at — set by PPIC, usually at creation. Required before Dispensing
   // can log real RM/PM consumption against it (see
@@ -727,6 +822,60 @@ enum ProductionBatchStatus {
   COMPLETED
 }
 
+// The per-batch preparation pipeline (a run with batchFlow = true): each batch is indented by Production, gets its batch number from R&D,
+// is dispensed by the Day Store (its material only) and has its line cleared by QA, and only then (READY) can its production start.
+// Batches of runs from before this flow, and any row created without it, are READY from the start.
+enum BatchPrepStage {
+  INDENT_ISSUE // Production
+  BATCH_NO // R&D
+  DISPENSING // Day Store
+  LINE_CLEARANCE // QA
+  READY // Production may run the batch
+}
+
+// The serial behind the batch numbers (one counter per year): FLS-26-0001, FLS-26-0002, ... Only ever counts up, so a number is never reused.
+model BatchNoCounter {
+  key  String @id
+  last Int    @default(0)
+
+  @@map("batch_no_counters")
+}
+
+// The "E · Return" of a batch's Utilization: material the batch did not use. It stays in the Plant's stock (so it is free for another batch)
+// until Production sends it back to the Day Store from Plant Stock; returnedQty is how much of it has been sent back already.
+model BatchLeftover {
+  id                String   @id @default(uuid())
+  productionBatchId String
+  itemId            String
+  quantity          Float
+  returnedQty       Float    @default(0)
+  unit              String
+  createdById       String
+  createdAt         DateTime @default(now())
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+
+  @@index([productionBatchId])
+  @@index([itemId])
+  @@map("batch_leftovers")
+}
+
+// What the Day Store dispensed (issued to the Plant) for ONE batch: the "Given" of that batch's Utilization.
+model BatchDispensingLine {
+  id                String   @id @default(uuid())
+  productionBatchId String
+  itemId            String
+  quantity          Float
+  unit              String
+  createdById       String
+  createdAt         DateTime @default(now())
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+
+  @@index([productionBatchId])
+  @@map("batch_dispensing_lines")
+}
+
 // One small manufacturing run against a PreProduction — Production
 // Execution's own fields, plannedQty (how much of PreProduction.plannedQty
 // this specific run covers), plus its OWN independent Tier-3 pipeline
@@ -756,9 +905,44 @@ enum ProductionBatchStatus {
 model ProductionBatch {
   id              String                @id @default(uuid())
   preProductionId String
-  batchNo         String?
+  batchNo         String?               @unique
   plannedQty      Float
   status          ProductionBatchStatus @default(IN_PROGRESS)
+
+  // Per-batch preparation (see BatchPrepStage). Indent: Production. Batch No: R&D. Dispensing: Day Store. Line Clearance: QA.
+  prepStageId            BatchPrepStage @default(READY)
+  prodIndentSlipSign     String?
+  productionPlanDate     DateTime?
+  indentSignedAt         DateTime?
+  batchNoAllocatedAt     DateTime?
+  batchNoAllocatedById   String?
+  // Production's Hold on this batch while it is still in preparation (before READY), when PPIC has put its product on hold.
+  // A held batch cannot move through Indent / Batch No / Dispensing / Line Clearance until Production releases it. Cleared on release.
+  heldAt                 DateTime?
+  heldById               String?
+  holdReason             String?
+  rmDispensingDate       DateTime?
+  pmIssuedDate           DateTime?
+  dispensingRemarks      String?
+  dispensedAt            DateTime?
+  grnNo                  String? // optional: the GRN the batch's material came on
+  lineClearanceStatus    String? // Approved | Not Approved | Hold
+  lineClearanceRemarks   String?
+  lineClearanceAt        DateTime?
+  // BMR 4.0 checklist QA ticks before the line is Approved: { itemKey: true | false } (the items are in batch-checklists.ts)
+  lineClearanceChecks    Json?
+  // Packaging's own production sheet (like the batch's): shift, manpower, start and end date-time. Dates / status / remarks are below.
+  packagingShift         String?
+  packagingManpowerCount Int?
+  packagingStartAt       DateTime?
+  packagingEndAt         DateTime?
+
+  // The production sheet for this batch - Production fills it as the batch runs: which shift, how many people, and from when
+  // to when (full date and time). Material utilisation (used / wastage / rejected / sample / returned) is read from the run.
+  shift         String? // Day | Night
+  manpowerCount Int?
+  shiftStartAt  DateTime?
+  shiftEndAt    DateTime?
 
   manufacturingStartDate DateTime?
   manufacturingStatus    String?
@@ -854,11 +1038,24 @@ model ProductionBatch {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  preProduction PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
-  createdBy     User          @relation("ProductionBatchCreatedBy", fields: [createdById], references: [id])
-  completedBy   User?         @relation("ProductionBatchCompletedBy", fields: [completedById], references: [id])
+  preProduction          PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+  createdBy              User          @relation("ProductionBatchCreatedBy", fields: [createdById], references: [id])
+  completedBy            User?         @relation("ProductionBatchCompletedBy", fields: [completedById], references: [id])
+  heldBy                 User?         @relation("ProductionBatchHeldBy", fields: [heldById], references: [id])
+  // Production's hand-over to Dispatch: set when Production finishes packaging and hands the batch on. Everything after that (QA gates,
+  // FG Store, release, billing, dispatch) belongs to other departments; this only marks the batch as "from Production" for Dispatch.
+  handedOverToDispatchAt DateTime?
+  handedOverById         String?
+  fgShipments            FgShipment[]
+
+  materialConsumptions BatchMaterialConsumption[]
+  stockTransfers       StockTransfer[]
+  dispensingLines      BatchDispensingLine[]
+  leftovers            BatchLeftover[]
 
   @@index([preProductionId])
+  @@index([status])
+  @@index([prepStageId])
   @@map("production_batches")
 }
 
@@ -872,6 +1069,7 @@ enum CombinedLotStageId {
   FG_QC_RELEASE // QA_QC — finished-goods-level QC + release sign-off, distinct from Packaging QC
   BILLING_EWAY_BILL // Accounts
   DISPATCH_PLAN // Dispatch — terminal
+  FG_HANDOVER // Day Store — finished goods approved by QA, ready to hand over to Dispatch (ProductionBatch only; the pipeline ends here, shipments follow)
 }
 
 // LEGACY — no longer created for new production. Used to be the pooled
@@ -1046,13 +1244,18 @@ model BatchMaterialConsumption {
   qaVerifiedById String?
   qaVerifiedAt   DateTime?
 
-  preProduction PreProduction @relation(fields: [preProductionId], references: [id])
-  item          InventoryItem @relation(fields: [itemId], references: [id])
-  createdBy     User          @relation(fields: [createdById], references: [id])
-  qaVerifiedBy  User?         @relation("BatchMaterialConsumptionQaVerifiedBy", fields: [qaVerifiedById], references: [id])
+  // Which batch of the run used it. Null on entries logged before this existed, or logged for the run as a whole.
+  productionBatchId String?
+
+  preProduction   PreProduction    @relation(fields: [preProductionId], references: [id])
+  productionBatch ProductionBatch? @relation(fields: [productionBatchId], references: [id], onDelete: SetNull)
+  item            InventoryItem    @relation(fields: [itemId], references: [id])
+  createdBy       User             @relation(fields: [createdById], references: [id])
+  qaVerifiedBy    User?            @relation("BatchMaterialConsumptionQaVerifiedBy", fields: [qaVerifiedById], references: [id])
 
   @@index([preProductionId])
   @@index([itemId])
+  @@index([productionBatchId])
   @@map("batch_material_consumptions")
 }
 
@@ -1350,6 +1553,13 @@ model Sku {
   corrugatedBoxMm       String?
   packagingSizeNos      String?
 
+  // Header block of the R&D PM BOM sheet (product code, pack size such as
+  // "120 g", packing configuration such as "1*64 Jars", batch size in packs).
+  productCode   String?
+  packSize      String?
+  packingConfig String?
+  batchPacks    Int?
+
   // Any imported spreadsheet columns not modeled above — kept so an
   // import never silently drops data even before the schema has a column
   // for it.
@@ -1383,14 +1593,24 @@ model Sku {
 // the UI, not a closed set (a new packaging type showing up later is a
 // new row here, not a schema migration).
 model SkuPackagingComponent {
-  id       String  @id @default(uuid())
-  skuId    String
-  type     String // e.g. "Jar", "Cap", "Silica 5gm" — matches PM SHEET's ITEM NAME( FIELDS)
-  quantity Float? // per finished unit — nullable since a newly-ticked type may not have a quantity yet
-  unit     String  @default("Nos") // matches PM SHEET's UNIT column (Nos, KG, ...)
-  pmCode   String? // matches PM SHEET's PM CODE column, when known
+  id           String  @id @default(uuid())
+  skuId        String
+  type         String // e.g. "Jar", "Cap", "Silica 5gm" — matches PM SHEET's ITEM NAME( FIELDS)
+  quantity     Float? // per finished unit — nullable since a newly-ticked type may not have a quantity yet
+  unit         String  @default("Nos") // matches PM SHEET's UNIT column (Nos, KG, ...)
+  pmCode       String? // matches PM SHEET's PM CODE column, when known
+  // The Store's own PM item this component is, when R&D picked one — what
+  // makes the BOM line's name match the item master (so stock/short/PR
+  // work off the real item, not free text).
+  pmItemId     String?
+  // Per-row overage (0.02 = 2%) as on the PM BOM sheet's OV% column; null = the old default.
+  overagePct   Float?
+  spec         String? // Specification / size, e.g. "55mm*80mm"
+  make         String?
+  packingLevel String? // Primary | Secondary | Tertiary, when the sheet gives it
 
-  sku Sku @relation(fields: [skuId], references: [id], onDelete: Cascade)
+  sku    Sku            @relation(fields: [skuId], references: [id], onDelete: Cascade)
+  pmItem InventoryItem? @relation("SkuComponentPmItem", fields: [pmItemId], references: [id], onDelete: SetNull)
 
   @@unique([skuId, type])
   @@map("sku_packaging_components")
@@ -1439,6 +1659,7 @@ model BomPlan {
   purchaseOrderItem PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
   items             BomPlanItem[]
 
+  @@index([purchaseOrderItemId])
   @@map("bom_plans")
 }
 
@@ -1473,15 +1694,27 @@ model BomPlanItem {
 // time — kept denormalized because the costing engine reads it on every
 // calculation and it never changes without the ingredient list changing too.
 model Recipe {
-  id           String   @id @default(uuid())
-  name         String   @unique
-  totalServing Float
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id              String   @id @default(uuid())
+  name            String
+  // The customer this recipe is for. Null = an older "common" recipe made before recipes were per customer;
+  // it is never used for a customer by itself - R&D decides to copy it into that customer's own recipe.
+  customerId      String?
+  totalServing    Float
+  // PER_KG: quantities are per Kg of batch (powder, bar). PER_UNIT: milligrams per gummy / capsule.
+  kind            String   @default("PER_KG")
+  productCode     String?
+  versionLabel    String? // trial / document no. from the sheet
+  batchSize       Float? // Kg for PER_KG, Nos for PER_UNIT (reference only)
+  avgUnitWeightMg Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
+  customer    Customer?          @relation(fields: [customerId], references: [id], onDelete: SetNull)
   ingredients RecipeIngredient[]
   planItems   RmPlanItem[]
 
+  @@unique([customerId, name])
+  @@index([name])
   @@map("recipes")
 }
 
@@ -1501,6 +1734,7 @@ model RecipeIngredient {
   gPerServing Float
   proteinPct  Float   @default(0)
   sortOrder   Int     @default(0)
+  uom         String  @default("Kg")
 
   recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
 
@@ -1548,6 +1782,7 @@ model RmPlan {
   purchaseOrderItem PurchaseOrderItem? @relation(fields: [purchaseOrderItemId], references: [id], onDelete: SetNull)
   items             RmPlanItem[]
 
+  @@index([purchaseOrderItemId])
   @@map("rm_plans")
 }
 
@@ -1688,6 +1923,8 @@ enum InventoryTxnType {
 // doesn't inflate on-hand stock.
 enum InventoryReceiptStatus {
   PENDING_QC
+  // R&D has taken a sample and it is being tested - not in stock yet, still reviewable (Approve / Hold / Reject)
+  TESTING
   ON_HOLD
   QC_APPROVED
   QC_REJECTED
@@ -1743,6 +1980,7 @@ model InventoryItem {
   rndSampleRequests        RndSampleRequest[]
   debitNotes               DebitNote[]
   qcSampleTransfers        QcSampleTransfer[]
+  skuComponents            SkuPackagingComponent[]    @relation("SkuComponentPmItem")
   qcSampleTransactions     QcSampleTransaction[]
   vendorPurchaseOrderItems VendorPurchaseOrderItem[]
   stockTransfers           StockTransfer[]
@@ -1784,6 +2022,7 @@ model DayStore {
 
   createdBy         User                   @relation("DayStoreCreatedBy", fields: [createdById], references: [id])
   transactions      InventoryTransaction[]
+  materialRequests  InventoryRequest[]     @relation("InventoryRequestRequestingStore")
   assignments       DayStoreAssignment[]
   stockTransfersOut StockTransfer[]        @relation("StockTransferSource")
   stockTransfersIn  StockTransfer[]        @relation("StockTransferDestination")
@@ -1817,6 +2056,22 @@ model DayStoreAssignment {
   @@map("day_store_assignments")
 }
 
+// Limits a PRODUCTION user to one (or more) Plants - the Production side of a Day Store login. A Production user with no
+// rows here is unrestricted (the original, all-Plants seat); with rows they see and act on those Plants only.
+model PlantAssignment {
+  userId       String
+  plantId      String
+  assignedAt   DateTime @default(now())
+  assignedById String?
+
+  user       User  @relation("PlantAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  plant      Plant @relation(fields: [plantId], references: [id], onDelete: Cascade)
+  assignedBy User? @relation("PlantAssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@id([userId, plantId])
+  @@map("plant_assignments")
+}
+
 model Plant {
   id          String   @id @default(uuid())
   name        String   @unique
@@ -1837,6 +2092,7 @@ model Plant {
   dayStoreId String? @unique
 
   createdBy         User                   @relation("PlantCreatedBy", fields: [createdById], references: [id])
+  assignments       PlantAssignment[]
   dayStore          DayStore?              @relation(fields: [dayStoreId], references: [id])
   transactions      InventoryTransaction[]
   requests          InventoryRequest[]
@@ -1914,18 +2170,21 @@ model StockTransfer {
   deletedAt   DateTime?
   deletedById String?
 
-  item             InventoryItem         @relation(fields: [itemId], references: [id])
-  sourceDayStore   DayStore?             @relation("StockTransferSource", fields: [sourceDayStoreId], references: [id])
-  sourcePlant      Plant?                @relation("StockTransferSourcePlant", fields: [sourcePlantId], references: [id])
-  destDayStore     DayStore?             @relation("StockTransferDestination", fields: [destDayStoreId], references: [id])
-  destPlant        Plant?                @relation("StockTransferDestPlant", fields: [destPlantId], references: [id])
-  preProduction    PreProduction?        @relation(fields: [preProductionId], references: [id])
-  sentBy           User                  @relation("StockTransferSentBy", fields: [sentById], references: [id])
-  confirmedBy      User?                 @relation("StockTransferConfirmedBy", fields: [confirmedById], references: [id])
-  deletedBy        User?                 @relation("StockTransferDeletedBy", fields: [deletedById], references: [id])
+  item              InventoryItem         @relation(fields: [itemId], references: [id])
+  sourceDayStore    DayStore?             @relation("StockTransferSource", fields: [sourceDayStoreId], references: [id])
+  sourcePlant       Plant?                @relation("StockTransferSourcePlant", fields: [sourcePlantId], references: [id])
+  destDayStore      DayStore?             @relation("StockTransferDestination", fields: [destDayStoreId], references: [id])
+  destPlant         Plant?                @relation("StockTransferDestPlant", fields: [destPlantId], references: [id])
+  preProduction     PreProduction?        @relation(fields: [preProductionId], references: [id])
+  // The batch the returned material came from (Plant returns only); null when not tied to one.
+  productionBatchId String?
+  productionBatch   ProductionBatch?      @relation(fields: [productionBatchId], references: [id], onDelete: SetNull)
+  sentBy            User                  @relation("StockTransferSentBy", fields: [sentById], references: [id])
+  confirmedBy       User?                 @relation("StockTransferConfirmedBy", fields: [confirmedById], references: [id])
+  deletedBy         User?                 @relation("StockTransferDeletedBy", fields: [deletedById], references: [id])
   // Set only for a WAREHOUSE-destination transfer once confirmed — the
   // InventoryTransaction(RECEIVED) row that actually landed the stock.
-  warehouseReceipt InventoryTransaction?
+  warehouseReceipt  InventoryTransaction?
 
   @@index([itemId])
   @@index([sourceDayStoreId])
@@ -1981,11 +2240,11 @@ model PreInventoryRequirement {
   updatedAt     DateTime          @updatedAt
 
   // Purchase — S3, meaningful once live stock < requiredQty
-  poNumber     String?
-  vendorName   String?
-  eta          DateTime?
-  purchaseById String?
-  purchaseAt   DateTime?
+  poNumber            String?
+  vendorName          String?
+  eta                 DateTime?
+  purchaseById        String?
+  purchaseAt          DateTime?
   // Set only when Purchase edits an already-logged PO Number/Vendor/ETA
   // (not on the first log — see pre-inventory.routes.ts's isCorrection),
   // so PPIC has a visible "Updated" tag to notice a correction even if
@@ -1998,6 +2257,23 @@ model PreInventoryRequirement {
   // notifications for the same shortfall (see POST /:id/notify-purchase).
   purchaseNotifiedAt DateTime?
 
+  // Set when the row came from Material Planning's "Send Short to Purchase":
+  // the PO product it is for. Such a row is kept in step with Material
+  // Planning (quantity updated, removed once nothing is short) until Purchase
+  // logs a PO against it - see purchase-sync.ts. Null for every other row.
+  sourcePoItemId String?
+
+  // Picked by hand on a manual requirement ("for PO-1007 / Protein Powder"): shown and grouped
+  // like sourcePoItemId, but never synced with Material Planning - the quantity stays what the
+  // person typed. Null for everything else.
+  linkedPoItemId String?
+
+  // The Day Store / R&D material request this purchase need came from (Store flagged the Warehouse short
+  // and PPIC took it on), so PPIC can see what each purchase request is for and the requester can follow
+  // it. At most one of the two is set; both null for everything else.
+  sourceRequestId    String?
+  sourceRndRequestId String?
+
   // Soft delete
   deletedAt   DateTime?
   deletedById String?
@@ -2007,9 +2283,93 @@ model PreInventoryRequirement {
   purchaseBy  User?         @relation("PreInventoryRequirementPurchaseBy", fields: [purchaseById], references: [id])
   deletedBy   User?         @relation("PreInventoryRequirementDeletedBy", fields: [deletedById], references: [id])
 
+  // Purchase can split one shortfall into several PI / Vendor / ETA lines.
+  purchaseLines RequirementPurchaseLine[]
+
   @@index([category])
   @@index([itemId])
+  @@index([sourceRequestId])
+  @@index([sourceRndRequestId])
   @@map("pre_inventory_requirements")
+}
+
+enum PurchaseLineStatus {
+  OPEN // still to arrive (fully or partly)
+  RECEIVED // everything on this line has been received into stock
+}
+
+// One slice of a shortfall that Purchase has ordered: "40 Kg on PI-102 from
+// Vendor A, ETA 12 Oct". A requirement can carry several (20 + 40 + 40 Kg),
+// each with its own PI Number / Vendor / ETA. Store's receipts close them
+// oldest-ETA-first (see purchase-lines.ts); a line is never deleted by the
+// Material Planning sync, only by Purchase while nothing of it has arrived.
+model RequirementPurchaseLine {
+  id            String             @id @default(uuid())
+  requirementId String
+  quantity      Float
+  receivedQty   Float              @default(0)
+  piNumber      String
+  vendorName    String
+  eta           DateTime
+  status        PurchaseLineStatus @default(OPEN)
+  loggedById    String
+  loggedAt      DateTime           @default(now())
+  // Set when Purchase edits an already-logged line (PPIC sees an "Updated" tag).
+  correctedAt   DateTime?
+  closedAt      DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  requirement PreInventoryRequirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  loggedBy    User                    @relation("RequirementPurchaseLineLoggedBy", fields: [loggedById], references: [id])
+  finance     FinanceDecision?
+
+  @@index([requirementId])
+  @@index([status, eta])
+  @@map("requirement_purchase_lines")
+}
+
+// What Finance (Accounts) decided on a purchase line Purchase has logged (vendor, PO number, ETA) for a short RM / PM: paid in part or in full,
+// on hold, or rejected, with a remark. No row yet = still waiting for Finance. The remark's time is what Finance's aging counts from.
+enum FinanceStatus {
+  PAID_PARTIAL
+  PAID_FULL
+  ON_HOLD
+  REJECTED
+}
+
+model FinanceDecision {
+  id             String        @id @default(uuid())
+  purchaseLineId String        @unique
+  status         FinanceStatus
+  poAmount       Float? // the PO value Finance enters, so "full" and the balance can be told
+  remarks        String?
+  remarksAt      DateTime      @default(now())
+  updatedById    String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  purchaseLine RequirementPurchaseLine @relation(fields: [purchaseLineId], references: [id], onDelete: Cascade)
+  updatedBy    User                    @relation("FinanceDecisionUpdatedBy", fields: [updatedById], references: [id])
+  payments     FinancePayment[]
+
+  @@map("finance_decisions")
+}
+
+model FinancePayment {
+  id          String   @id @default(uuid())
+  decisionId  String
+  amount      Float
+  paidOn      DateTime
+  remark      String?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  decision  FinanceDecision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  createdBy User            @relation("FinancePaymentCreatedBy", fields: [createdById], references: [id])
+
+  @@index([decisionId])
+  @@map("finance_payments")
 }
 
 // PARTIALLY_ISSUED sits between APPROVED and ISSUED — Store doesn't
@@ -2053,6 +2413,18 @@ model InventoryRequest {
   // not need one.
   plantId String?
 
+  // A Day Store asking the Warehouse for material (purpose ISSUED_DAY_STORE): which store it is for.
+  // Null for a PPIC indent. When Store issues against it, the material goes to this store.
+  requestingDayStoreId String?
+
+  // The customer PO product this request is for (a production request raised from a plan, or a Day Store
+  // request raised for one) - so every list can say "for DEMO Collagen Powder, PO-1006".
+  purchaseOrderItemId String?
+
+  // A Day Store's request to the Warehouse that exists to fill a production request: the production request's id.
+  // These are the plan-driven, urgent ones (the Warehouse's "Material Request (Plan)" list).
+  forRequestId String?
+
   // Which PreProduction's Indent Issue stage raised this request, when it
   // was — closes the gap where that stage used to just be a free-text
   // sign-off, disconnected from this, the actual "which material goes to
@@ -2060,31 +2432,41 @@ model InventoryRequest {
   // with no run attached, same as before this field existed.
   preProductionId String?
 
+  // Production asked for material that is NOT part of any plan ("extra material"), straight from its Plant's Day Store. The Day Store fills
+  // it from its shelf, asks the Warehouse for the rest, and a shortage at the Warehouse goes to PPIC and Purchase by itself.
+  // extraForPoItemId is an optional note of which product it is for - it does not make the request a plan request.
+  isExtra          Boolean @default(false)
+  extraForPoItemId String?
+
   // Soft delete — this is the "withdraw" action on a request Store hasn't
   // issued anything against yet.
   deletedAt   DateTime?
   deletedById String?
 
-  item          InventoryItem          @relation(fields: [itemId], references: [id])
-  requestedBy   User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
-  reviewedBy    User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
-  plant         Plant?                 @relation(fields: [plantId], references: [id])
-  preProduction PreProduction?         @relation(fields: [preProductionId], references: [id])
-  deletedBy     User?                  @relation("InventoryRequestDeletedBy", fields: [deletedById], references: [id])
+  item               InventoryItem          @relation(fields: [itemId], references: [id])
+  requestedBy        User                   @relation("InventoryRequestRequestedBy", fields: [requestedById], references: [id])
+  reviewedBy         User?                  @relation("InventoryRequestReviewedBy", fields: [reviewedById], references: [id])
+  plant              Plant?                 @relation(fields: [plantId], references: [id])
+  requestingDayStore DayStore?              @relation("InventoryRequestRequestingStore", fields: [requestingDayStoreId], references: [id])
+  preProduction      PreProduction?         @relation(fields: [preProductionId], references: [id])
+  deletedBy          User?                  @relation("InventoryRequestDeletedBy", fields: [deletedById], references: [id])
   // One request can now be issued against more than once (partial
   // fulfillment) — issuedQty/remainingQty are derived by summing these,
   // never stored, same "never let a number drift out of sync" rule as
   // Pre-Inventory's shortQty.
-  fulfillments  InventoryTransaction[]
+  fulfillments       InventoryTransaction[]
   // Traceability only — Production turning this raw material into a
   // finished shipment isn't tracked anywhere in this system, so this
   // isn't derived or enforced, just a manual tag Store can set when
   // logging the eventual FG transfer. Many transfers can point back to
   // one request (a batch can ship in parts), so it's not @unique.
-  fgTransfers   DispatchTransfer[]
+  fgTransfers        DispatchTransfer[]
 
   @@index([status])
   @@index([preProductionId])
+  @@index([requestingDayStoreId])
+  @@index([purchaseOrderItemId])
+  @@index([forRequestId])
   @@map("inventory_requests")
 }
 
@@ -2113,6 +2495,8 @@ model InventoryTransaction {
   // Inward QC — set on create for RECEIVED rows only (PENDING_QC),
   // stays null for ISSUED_* rows the whole way through.
   receiptStatus InventoryReceiptStatus?
+  // The date R&D sampled this receipt - required for every inward QC decision (Testing / Hold / Approve / Reject).
+  samplingDate  DateTime?
   qcCheckedById String?
   qcCheckedAt   DateTime?
   qcNote        String?
@@ -2437,7 +2821,7 @@ model RndStoreTransaction {
   // batch number on a direct-purchase INBOUND row (vendorName set) —
   // either way just a free-text batch identifier, unrelated to the
   // Warehouse ledger's own batchNo field on InventoryTransaction.
-  batchNo String?
+  batchNo        String?
 
   // Set only on INBOUND/RETURNED rows created by confirming an
   // RndTransfer — links this leg back to the Warehouse-side leg of the
@@ -2497,6 +2881,10 @@ model RndSampleRequest {
   // Set once Store fulfills — the RndTransfer this request turned into.
   transferId String? @unique
 
+  // The customer sample request this raw material is for (optional)
+  sampleRequestId String?
+  sampleRequest   SampleRequest? @relation(fields: [sampleRequestId], references: [id], onDelete: SetNull)
+
   item        InventoryItem @relation(fields: [itemId], references: [id])
   requestedBy User          @relation("RndSampleRequestRequestedBy", fields: [requestedById], references: [id])
   reviewedBy  User?         @relation("RndSampleRequestReviewedBy", fields: [reviewedById], references: [id])
@@ -2504,6 +2892,7 @@ model RndSampleRequest {
 
   @@index([itemId])
   @@index([status])
+  @@index([sampleRequestId])
   @@map("rnd_sample_requests")
 }
 
@@ -2592,4 +2981,388 @@ model DispatchTransfer {
   @@index([sourceRequestId])
   @@index([plantId])
   @@map("dispatch_transfers")
+}
+
+// ---------------------------------------------------------------------------
+// Finished goods shipments - what Dispatch does with a batch's finished goods once the Day Store has handed them over (stage
+// FG_HANDOVER). One row per shipment, so one batch can go out in several parts, to the customer or to the Warehouse.
+//   CUSTOMER   goes straight out: status DISPATCHED (with transport, picking and loading details; invoice optional).
+//   WAREHOUSE  Dispatch first tells the Warehouse how much it is sending (REQUESTED); the Warehouse accepts (ACCEPTED) or refuses
+//              (REJECTED); Dispatch then sends it (SENT) and the Warehouse confirms it arrived (RECEIVED), when it becomes Warehouse
+//              finished-goods stock.
+// What is left with Dispatch for a batch = its approved quantity less every shipment that is not REJECTED / cancelled.
+// ---------------------------------------------------------------------------
+// CUSTOMER: Dispatch -> customer. WAREHOUSE: Dispatch -> Warehouse (to store). FROM_WAREHOUSE: the Warehouse sends stock back to Dispatch (Dispatch asked
+// for it) so Dispatch can send it to a customer: REQUESTED (by Dispatch) -> SENT (by the Warehouse) -> RECEIVED (by Dispatch), or REJECTED.
+enum FgShipmentType {
+  CUSTOMER
+  WAREHOUSE
+  FROM_WAREHOUSE
+}
+
+// A customer shipment goes REQUESTED-free: Dispatch fills it -> WITH_ACCOUNTS -> Accounts adds invoice / e-way bill -> READY_TO_SEND (or SENT_BACK to Dispatch
+// with a reason, who fix it and resubmit) -> Dispatch sends it -> DISPATCHED.
+enum FgShipmentStatus {
+  REQUESTED
+  ACCEPTED
+  REJECTED
+  SENT
+  RECEIVED
+  DISPATCHED
+  WITH_ACCOUNTS
+  READY_TO_SEND
+  SENT_BACK
+}
+
+model FgShipment {
+  id                String           @id @default(uuid())
+  productionBatchId String
+  type              FgShipmentType
+  status            FgShipmentStatus
+  quantity          Float
+  note              String?
+
+  requestedById  String
+  requestedAt    DateTime  @default(now())
+  acceptedById   String?
+  acceptedAt     DateTime?
+  rejectedReason String?
+  sentById       String?
+  sentAt         DateTime?
+  receivedById   String?
+  receivedAt     DateTime?
+
+  // The shipment itself (customer dispatches, and the send leg of a warehouse transfer)
+  dispatchDate  DateTime?
+  transportType String?
+  pickedBy      String?
+  pickingDate   DateTime?
+  loadedBy      String?
+  loadingDate   DateTime?
+  remarks       String?
+
+  // Transport and charges (customer shipments and the send leg of a warehouse transfer)
+  transportName   String? // the transporter, e.g. "VRL Logistics"
+  vehicleNo       String?
+  lrNo            String? // lorry receipt number
+  weightKg        Float?
+  cartonCount     Int?
+  goodsValue      Float? // the value the insurance is worked out on
+  freightCharge   Float? // what carrying the goods costs
+  insuranceCharge Float? // 0.1% of the goods value unless Dispatch enters another figure
+
+  // Accounts: added before a customer shipment can be sent (still editable afterwards)
+  invoiceAmount Float?
+  invoiceNo     String?
+  invoiceDate   DateTime?
+  ewayBillNo    String?
+  ewayBillDate  DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+  requestedBy     User            @relation("FgShipmentRequestedBy", fields: [requestedById], references: [id])
+
+  @@index([productionBatchId])
+  @@index([type, status])
+  @@map("fg_shipments")
+}
+
+// Every save of a Packaging BOM (kind PM, entityId = Sku id) or an RM recipe (kind RM, entityId =
+// Recipe id) writes one numbered snapshot, so an older BOM can be looked at and restored later.
+model BomVersion {
+  id          String   @id @default(uuid())
+  kind        String
+  entityId    String
+  version     Int
+  note        String?
+  snapshot    Json
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@unique([kind, entityId, version])
+  @@index([kind, entityId])
+  @@map("bom_versions")
+}
+
+enum SampleRequestStatus {
+  REQUESTED // New: BD has sent it, R&D has not picked it up
+  PLANNING // R&D has given an ETA
+  IN_PROCESS // the sample is being made
+  READY // the sample is made
+  DISPATCHED // handed over / sent to the customer
+  ON_HOLD // waiting on something (the reason is in the R&D remarks)
+  CANNOT_MAKE // R&D cannot make it (the reason is in the R&D remarks)
+}
+
+enum SampleTemplate {
+  POWDER
+  GUMMIES
+  BARS
+}
+
+enum SampleFeedback {
+  APPROVED
+  CHANGE_REQUESTED
+  REJECTED
+}
+
+// A sample a customer has asked R&D for. R&D raises it from the customer's request and moves it along until it is dispatched.
+model SampleRequest {
+  id             String              @id @default(uuid())
+  requestNo      Int                 @unique @default(autoincrement())
+  customerId     String
+  productName    String // what the customer wants a sample of
+  quantity       String? // free text: "Standard", "50 g", "2-3 servings"
+  neededBy       DateTime?
+  remarks        String?
+  status         SampleRequestStatus @default(REQUESTED)
+  statusAt       DateTime            @default(now())
+  sampleCode     String?
+  clientFeedback String? // the customer's remark on the latest feedback
+  requestedById  String // the POC (salesman)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  // The Sample Request Sheet's columns. Yellow (Sales / BD): composition, neededBy (Customer TAT), dosageForm, quantity, remarks, referenceSample,
+  // clientFeedback. Blue (R&D): sampleCode, preparedByName, expectedDate (ETA), preparedOn, rdRemarks. Pink (RA, Gummies only): exportDomestic, labelClaim.
+  leadId          String?
+  template        SampleTemplate  @default(POWDER)
+  composition     String?
+  dosageForm      String?
+  referenceSample String?
+  exportDomestic  String? // Export | Domestic
+  labelClaim      String? // label claim as per FSSAI
+  expectedDate    DateTime?
+  preparedByName  String?
+  preparedOn      DateTime?
+  rdRemarks       String?
+  internalRemark  String?
+  feedback        SampleFeedback?
+  // Each Change requested starts another round: the finished round is kept in SampleRound and the blue part starts again.
+  round           Int             @default(1)
+  readyAt         DateTime?
+  dispatchedAt    DateTime?
+  // R&D marks the BOM as uploaded once the customer approved the sample
+  bomUploadedAt   DateTime?
+
+  customer    Customer           @relation(fields: [customerId], references: [id])
+  requestedBy User               @relation("SampleRequestedBy", fields: [requestedById], references: [id])
+  lead        Lead?              @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  rounds      SampleRound[]
+  rmRequests  RndSampleRequest[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([leadId])
+  @@map("sample_requests")
+}
+
+// One finished round of a sample request: what R&D made, and what the customer said about it.
+model SampleRound {
+  id              String         @id @default(uuid())
+  sampleRequestId String
+  round           Int
+  sampleCode      String?
+  preparedByName  String?
+  expectedDate    DateTime?
+  preparedOn      DateTime?
+  rdRemarks       String?
+  readyAt         DateTime?
+  dispatchedAt    DateTime?
+  feedback        SampleFeedback
+  customerRemark  String
+  internalRemark  String?
+  createdById     String
+  createdAt       DateTime       @default(now())
+
+  sampleRequest SampleRequest @relation(fields: [sampleRequestId], references: [id], onDelete: Cascade)
+
+  @@unique([sampleRequestId, round])
+  @@map("sample_rounds")
+}
+
+// A contact BD collected on a visiting card (scanned with the phone camera, or typed in). A scan is saved straight away as NEEDS_VERIFY with
+// what the OCR read; BD checks every field and saves it as VERIFIED. `confidence` is the OCR's 0..1 per field (the screen highlights the unsure
+// ones), `ocrLines` the raw lines it read (BD can tap one to fill a field). `customerId` is set once the card has been turned into a Customer.
+enum BusinessCardStatus {
+  NEEDS_VERIFY
+  VERIFIED
+}
+
+model BusinessCard {
+  id          String             @id @default(uuid())
+  name        String             @default("")
+  designation String             @default("")
+  company     String             @default("")
+  phones      String[]
+  email       String             @default("")
+  website     String             @default("")
+  address     String             @default("")
+  gstNo       String             @default("")
+  categories  String[]
+  notes       String             @default("")
+  status      BusinessCardStatus @default(NEEDS_VERIFY)
+  source      String             @default("SCAN") // SCAN | MANUAL
+  photoPath   String?
+  photoMime   String?
+  confidence  Json?
+  ocrLines    Json?
+  customerId  String?
+  createdById String
+  verifiedAt  DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  customer  Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy User      @relation("BusinessCardCreatedBy", fields: [createdById], references: [id])
+  lead      Lead?
+
+  @@index([createdById, status])
+  @@index([company])
+  @@map("business_cards")
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Lead management (BD). A lead is a company BD is talking to; every conversation is a LeadMeeting. Status is the lead temperature: Hot = an order
+// in about 15 days, Warm 30, Cold 60. CONVERTED is only for a lead whose sample was approved (it comes with the sample request).
+// ---------------------------------------------------------------------------------------------------------------------------------
+enum LeadStatus {
+  DISCUSSION
+  SAMPLING
+  COLD
+  WARM
+  HOT
+  HOLD
+  DROPPED
+  CONVERTED
+}
+
+enum LeadMeetingMode {
+  CALL
+  VIDEO
+  IN_PERSON
+}
+
+model Lead {
+  id                String     @id @default(uuid())
+  brandName         String
+  contactPerson     String     @default("")
+  designation       String     @default("")
+  phones            String[]
+  email             String     @default("")
+  address           String     @default("")
+  city              String     @default("")
+  state             String     @default("")
+  // Chosen from fixed lists (apps/api/src/modules/leads/lead-options.ts)
+  customerTypes     String[]
+  productFormats    String[]
+  powderTypes       String[]
+  leadSource        String?
+  status            LeadStatus @default(DISCUSSION)
+  statusAt          DateTime   @default(now())
+  // When the order is expected, "YYYY-MM"; updated after every meeting
+  closureMonth      String?
+  // Estimated order size, asked once a sample of this lead is approved: free-text quantity / volume ("1 ton", "10,000 pcs") and the value in Lac
+  estimatedQty      String?
+  estimatedValueLac Float?
+  // When the lead was Converted (its sample was approved and an order is coming). Until a PO of its customer is entered after this, it waits for its PO.
+  convertedAt       DateTime?
+  // Null once the lead is Dropped (or Converted)
+  nextFollowUpAt    DateTime?
+  businessCardId    String?    @unique
+  // The customer record made for it when its first sample is asked
+  customerId        String?
+  // The salesman who owns the lead (from the login that created it)
+  pocId             String
+  createdById       String
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  poc            User             @relation("LeadPoc", fields: [pocId], references: [id])
+  createdBy      User             @relation("LeadCreatedBy", fields: [createdById], references: [id])
+  businessCard   BusinessCard?    @relation(fields: [businessCardId], references: [id], onDelete: SetNull)
+  customer       Customer?        @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  sampleRequests SampleRequest[]
+  meetings       LeadMeeting[]
+  reschedules    LeadReschedule[]
+
+  @@index([status])
+  @@index([pocId])
+  @@index([nextFollowUpAt])
+  @@map("leads")
+}
+
+// One conversation with the lead. Notes are mandatory; the follow-up date is mandatory unless the lead was Dropped by it.
+model LeadMeeting {
+  id             String          @id @default(uuid())
+  leadId         String
+  number         Int
+  meetingDate    DateTime
+  mode           LeadMeetingMode @default(CALL)
+  notes          String
+  statusAfter    LeadStatus
+  nextFollowUpAt DateTime?
+  closureMonth   String?
+  createdById    String
+  createdAt      DateTime        @default(now())
+
+  lead      Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  createdBy User @relation("LeadMeetingCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([leadId, number])
+  @@map("lead_meetings")
+}
+
+// A follow-up date that was moved without a meeting, with the reason.
+model LeadReschedule {
+  id        String    @id @default(uuid())
+  leadId    String
+  fromAt    DateTime?
+  toAt      DateTime
+  reason    String
+  byId      String
+  createdAt DateTime  @default(now())
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  by   User @relation("LeadRescheduleBy", fields: [byId], references: [id])
+
+  @@index([leadId])
+  @@map("lead_reschedules")
+}
+
+// BD asks PPIC to put a product on Hold or to cancel it (before Production has made its first batch). PPIC accepts, which does it, or
+// rejects with a reason. One open (PENDING) request per product at a time.
+enum ItemChangeKind {
+  HOLD
+  CANCEL
+}
+
+enum ItemChangeStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model ItemChangeRequest {
+  id                  String           @id @default(uuid())
+  purchaseOrderItemId String
+  kind                ItemChangeKind
+  reason              String
+  status              ItemChangeStatus @default(PENDING)
+  requestedById       String
+  requestedAt         DateTime         @default(now())
+  decidedById         String?
+  decidedAt           DateTime?
+  decisionNote        String?
+
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+  requestedBy       User              @relation("ItemChangeRequestedBy", fields: [requestedById], references: [id])
+  decidedBy         User?             @relation("ItemChangeDecidedBy", fields: [decidedById], references: [id])
+
+  @@index([status])
+  @@index([purchaseOrderItemId])
+  @@map("item_change_requests")
 }

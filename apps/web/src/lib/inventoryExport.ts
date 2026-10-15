@@ -16,8 +16,10 @@ import type {
   PersonRef,
   PlantStockLine,
   PreInventoryRequirement,
+  RndStoreReportRow,
   TransitItem,
 } from "./types";
+import { customerTypeLabel } from "./customerTags";
 
 // Builds and downloads a single-sheet workbook straight from whatever the
 // page already has loaded — no round trip to the server. Each report is
@@ -77,10 +79,11 @@ export function exportFgStockReport(rows: FgStockRow[]) {
     "FG Stock on Hand",
     rows.map((r) => ({
       Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
+      Stage: COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId,
       Product: r.productName,
       "PO Number": r.poNumber ?? "",
       "Batch / Lot": r.label,
-      Stage: COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId,
       Unit: r.unit,
       Produced: r.producedQty,
       Dispatched: r.dispatchedQty,
@@ -97,6 +100,7 @@ export function exportMaterialConsumptionReport(rows: MaterialConsumptionRow[]) 
     rows.map((r) => ({
       "PO Number": r.poNumber ?? "",
       Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
       Product: r.productName,
       "Batch No": r.batchNo ?? "",
       Item: r.itemName,
@@ -111,6 +115,32 @@ export function exportMaterialConsumptionReport(rows: MaterialConsumptionRow[]) 
       "Last Logged": new Date(r.lastLoggedAt).toLocaleDateString(),
     })),
     `FLS_Material_Consumption_${todayStamp()}.xlsx`,
+  );
+}
+
+// R&D's own Log Consumption — Testing/Formulation Trial/Wastage/Rejected
+// against R&D Store's own stock (RndStoreTransaction), item-wise. Kept
+// entirely separate from exportMaterialConsumptionReport above — that
+// one is Production/Plant's own ledger (BatchMaterialConsumption), a
+// different model with a different audience (R&D-only, never shown to
+// PPIC/Production or vice versa — see the client's own "sirf RND
+// department" instruction).
+export function exportRndConsumptionReport(rows: RndStoreReportRow[]) {
+  download(
+    "R&D Consumption",
+    rows.map((r) => ({
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Unit: r.unit,
+      "On Hand": r.onHand,
+      Testing: r.testingQty,
+      "Formulation Trial": r.formulationTrialQty,
+      Wastage: r.wastageQty,
+      Rejected: r.rejectedQty,
+      Dispatched: r.dispatchedQty,
+      Returned: r.returnedQty,
+    })),
+    `FLS_RND_Consumption_${todayStamp()}.xlsx`,
   );
 }
 
@@ -256,6 +286,7 @@ export function exportItemHistoryReport(item: InventoryItem, rows: InventoryTran
     `History — ${item.name}`.slice(0, 31),
     rows.map((r) => ({
       Date: new Date(r.date).toLocaleDateString(),
+      Status: r.type === "RECEIVED" ? (r.receiptStatus ?? "") : "",
       Type: TYPE_LABEL[r.type] ?? r.type,
       Quantity: r.quantity,
       Unit: r.unit,
@@ -263,7 +294,6 @@ export function exportItemHistoryReport(item: InventoryItem, rows: InventoryTran
       "Vendor / Note": r.vendorName ?? "",
       "Batch No": r.batchNo ?? "",
       "GRN No": r.grnNo ?? "",
-      Status: r.type === "RECEIVED" ? (r.receiptStatus ?? "") : "",
       "Rejected Qty": r.rejectedQty ?? "",
       "Logged By": formatPerson(r.createdBy),
       "Logged At": formatTimestamp(r.createdAt),
@@ -277,11 +307,11 @@ export function exportRequestsReport(rows: InventoryRequest[]) {
     "Material Requests",
     rows.map((r) => ({
       Date: new Date(r.createdAt).toLocaleDateString(),
+      Status: r.status,
       Item: r.item.name,
       Category: CATEGORY_LABEL[r.category] ?? r.category,
       Purpose: r.purpose === "ISSUED_PRODUCTION" ? "Issued to Production" : "Issued to Store",
       "Requested Qty": r.requestedQty,
-      Status: r.status,
       "Requested By": formatPerson(r.requestedBy),
       "Requested At": formatTimestamp(r.createdAt),
       "Reviewed By": formatPerson(r.reviewedBy),
@@ -301,6 +331,7 @@ export function exportDispatchReport(rows: DispatchTransfer[], sheetName: string
     rows.map((r) => ({
       Date: new Date(r.date).toLocaleDateString(),
       Customer: r.customer.companyName,
+      "Customer Type": customerTypeLabel(r.customer.companyName),
       "Product Name": r.productName,
       Quantity: r.quantity,
       "Logged By": formatPerson(r.createdBy),
@@ -339,6 +370,7 @@ export function exportCustomerReconciliationReport(rows: CustomerReconciliationR
     "Customer Reconciliation",
     rows.map((r) => ({
       Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
       "Dispatched Qty": r.dispatchedQty,
       "Dispatched Shipments": r.dispatchedCount,
       "Invoiced Qty": r.invoicedQty,
@@ -356,23 +388,36 @@ export function exportCustomerReconciliationReport(rows: CustomerReconciliationR
 export function exportRequirementsReport(rows: PreInventoryRequirement[]) {
   download(
     "Pre-Inventory",
-    rows.map((r) => ({
-      Date: new Date(r.date).toLocaleDateString(),
-      Item: r.item.name,
-      Category: CATEGORY_LABEL[r.category] ?? r.category,
-      "Required Qty": r.requiredQty,
-      Unit: r.unit,
-      "Requested By": formatPerson(r.requestedBy),
-      "Current Stock": r.currentStock,
-      "Short Qty": r.shortQty,
-      "PO Number": r.poNumber ?? "",
-      "Vendor Name": r.vendorName ?? "",
-      ETA: r.eta ? new Date(r.eta).toLocaleDateString() : "",
-      "Ordered By": formatPerson(r.purchaseBy),
-      "Ordered At": formatTimestamp(r.purchaseAt),
-      "PO Updated": r.purchaseCorrectedAt ? "Yes" : "No",
-      "PO Updated At": formatTimestamp(r.purchaseCorrectedAt),
-    })),
+    // One row per PI line - a shortfall split 20 + 40 + 40 Kg is three rows, each with its own PI / vendor / ETA.
+    rows.flatMap((r): Record<string, unknown>[] => {
+      const common = {
+        Date: new Date(r.date).toLocaleDateString(),
+        Item: r.item.name,
+        Category: CATEGORY_LABEL[r.category] ?? r.category,
+        "Required Qty": r.requiredQty,
+        Unit: r.unit,
+        "Requested By": formatPerson(r.requestedBy),
+        "Current Stock": r.currentStock,
+        "Short Qty": r.shortQty,
+        "Left to Log": r.remainingToLog,
+        "Customer PO": r.sourcePo?.poNumber ?? "",
+      };
+      if (r.purchaseLines.length === 0) {
+        return [{ ...common, "PI Qty": "", "PI Number": "", "Vendor Name": "", ETA: "", "PI Status": "", "Ordered By": "", "Ordered At": "", "PI Updated": "No", "PI Updated At": "" }];
+      }
+      return r.purchaseLines.map((l) => ({
+        ...common,
+        "PI Status": l.status === "RECEIVED" ? "Received" : l.receivedQty > 0 ? `${l.receivedQty} of ${l.quantity} arrived` : "On order",
+        "PI Qty": l.quantity,
+        "PI Number": l.piNumber,
+        "Vendor Name": l.vendorName,
+        ETA: new Date(l.eta).toLocaleDateString(),
+        "Ordered By": formatPerson(l.loggedBy),
+        "Ordered At": formatTimestamp(l.loggedAt),
+        "PI Updated": l.correctedAt ? "Yes" : "No",
+        "PI Updated At": formatTimestamp(l.correctedAt),
+      }));
+    }),
     `FLS_PreInventory_Vendor_List_${todayStamp()}.xlsx`,
   );
 }
@@ -387,28 +432,31 @@ export function exportRequirementsReport(rows: PreInventoryRequirement[]) {
 // (the vendor's own promised date, the honest thing to be late against),
 // falling back to the PO's log date otherwise.
 export function exportPurchaseAgingReport(rows: PreInventoryRequirement[]) {
-  const pending = rows.filter((r) => !!r.poNumber && r.shortQty > 0);
+  // One row per PI line still on its way (a shortfall can have several).
+  const pending = rows.filter((r) => r.shortQty > 0).flatMap((r) => r.purchaseLines.filter((l) => l.status === "OPEN").map((l) => ({ r, l })));
   const now = Date.now();
   const dayMs = 1000 * 60 * 60 * 24;
   download(
     "PO Aging",
     pending
-      .map((r) => {
-        const against = r.eta ?? r.purchaseAt;
+      .map(({ r, l }) => {
+        const against = l.eta ?? l.loggedAt;
         const agingDays = against ? Math.round((now - new Date(against).getTime()) / dayMs) : null;
         return {
           Item: r.item.name,
           Category: CATEGORY_LABEL[r.category] ?? r.category,
-          "PO Number": r.poNumber ?? "",
-          "Vendor Name": r.vendorName ?? "",
+          "Customer PO": r.sourcePo?.poNumber ?? "",
+          "PI Number": l.piNumber,
+          "Vendor Name": l.vendorName,
+          "PI Qty": l.quantity - l.receivedQty,
           "Required Qty": r.requiredQty,
           "Current Stock": r.currentStock,
           "Still Short": r.shortQty,
           Unit: r.unit,
-          ETA: r.eta ? new Date(r.eta).toLocaleDateString() : "",
-          "Ordered At": formatTimestamp(r.purchaseAt),
+          ETA: new Date(l.eta).toLocaleDateString(),
+          "Ordered At": formatTimestamp(l.loggedAt),
           "Aging (Days)": agingDays !== null ? Math.max(0, agingDays) : "",
-          "Overdue?": r.eta && new Date(r.eta).getTime() < now ? "Yes" : "No",
+          "Overdue?": new Date(l.eta).getTime() < now ? "Yes" : "No",
         };
       })
       .sort((a, b) => (typeof b["Aging (Days)"] === "number" && typeof a["Aging (Days)"] === "number" ? (b["Aging (Days)"] as number) - (a["Aging (Days)"] as number) : 0)),
@@ -511,12 +559,444 @@ export function downloadRequirementImportTemplate() {
   );
 }
 
+// Available Stock - every RM / PM on hand across Warehouse, Day Stores, R&D Store and Plants.
+export interface AvailableLocation {
+  key: string;
+  label: string;
+  kind: "WAREHOUSE" | "DAY_STORE" | "RND" | "PLANT";
+}
+export interface ItemDetail {
+  earliestExpiry: string | null;
+  expiresInDays: number | null;
+  lastReceived: string | null;
+  batches: number;
+  quarantineQty: number;
+  onOrderQty: number;
+  nextEta: string | null;
+}
+
+// One receipt (batch) behind an item.
+export interface ItemBatch {
+  id: string;
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  batchNo: string | null;
+  grnNo: string | null;
+  mfgDate: string | null;
+  expiryDate: string | null;
+  receivedOn: string;
+  receivedQty: number;
+  vendorName: string | null;
+  invoiceNo: string | null;
+  rate: number | null;
+  status: string;
+}
+
+export interface AvailableStockByItem {
+  itemCode?: string | null;
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string | null;
+  total: number;
+  locations: Record<string, number>;
+  detail?: ItemDetail;
+}
+export interface AvailableStockByLocation {
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string | null;
+  locationKey: string;
+  locationLabel: string;
+  quantity: number;
+}
+
+export function exportAvailableStockReport(view: "item" | "location", rows: (AvailableStockByItem | AvailableStockByLocation)[], locations: AvailableLocation[], batches: ItemBatch[] = []) {
+  if (view === "item") {
+    const sheet = XLSX.utils.json_to_sheet(
+      (rows as AvailableStockByItem[]).map((r) => ({
+        Item: r.itemName,
+        Code: r.itemCode ?? "",
+        Category: CATEGORY_LABEL[r.category] ?? r.category,
+        Unit: r.unit ?? "",
+        ...Object.fromEntries(locations.map((l) => [l.label, r.locations[l.key] ?? 0])),
+        Total: r.total,
+        "Earliest Expiry": r.detail?.earliestExpiry ? day(r.detail.earliestExpiry) : "",
+        "Expires In (Days)": r.detail?.expiresInDays ?? "",
+        Batches: r.detail?.batches || "",
+        "Last Received": r.detail?.lastReceived ? day(r.detail.lastReceived) : "",
+        "Quarantine Qty": r.detail?.quarantineQty || "",
+        "On Order Qty": r.detail?.onOrderQty || "",
+        "Next ETA": r.detail?.nextEta ? day(r.detail.nextEta) : "",
+      })),
+    );
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, sheet, "Available Stock");
+    // One row per item x location - the flat list the old "By location" view gave.
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet(
+        (rows as AvailableStockByItem[]).flatMap((r) =>
+          locations.flatMap((l) => ((r.locations[l.key] ?? 0) > 0 ? [{ Item: r.itemName, Category: CATEGORY_LABEL[r.category] ?? r.category, Location: l.label, Available: r.locations[l.key], Unit: r.unit ?? "" }] : [])),
+        ),
+      ),
+      "By Location",
+    );
+    if (batches.length) {
+      // Received qty per batch, not what is left of it - stock is tracked per item, not per batch.
+      XLSX.utils.book_append_sheet(
+        workbook,
+        XLSX.utils.json_to_sheet(
+          batches.map((b) => ({
+            Item: b.itemName,
+            Status: b.status,
+            Category: CATEGORY_LABEL[b.category] ?? b.category,
+            "Batch No": b.batchNo ?? "",
+            "GRN No": b.grnNo ?? "",
+            "Mfg Date": day(b.mfgDate),
+            "Expiry Date": day(b.expiryDate),
+            "Received On": day(b.receivedOn),
+            "Received Qty": b.receivedQty,
+            Unit: b.unit,
+            Vendor: b.vendorName ?? "",
+            "Invoice No": b.invoiceNo ?? "",
+            Rate: b.rate ?? "",
+          })),
+        ),
+        "Batches",
+      );
+    }
+    XLSX.writeFile(workbook, `FLS_Available_Stock_By_Item_${todayStamp()}.xlsx`);
+    return;
+  }
+  download(
+    "Available Stock",
+    (rows as AvailableStockByLocation[]).map((r) => ({ Item: r.itemName, Category: CATEGORY_LABEL[r.category] ?? r.category, Location: r.locationLabel, Available: r.quantity, Unit: r.unit ?? "" })),
+    `FLS_Available_Stock_By_Location_${todayStamp()}.xlsx`,
+  );
+}
+
+// Incoming Material - one PI line still to arrive.
+export interface IncomingRow {
+  lineId: string;
+  requirementId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  quantity: number;
+  orderedQty: number;
+  piNumber: string;
+  vendorName: string;
+  eta: string;
+  overdue: boolean;
+  customerPo: { poId: string; poNumber: string | null; customerName: string; productName: string } | null;
+}
+
+// Stock Received - one vendor delivery into the Warehouse.
+export interface StockReceivedRow {
+  id: string;
+  date: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  quantity: number;
+  rejectedQty: number | null;
+  vendorName: string | null;
+  invoiceNo: string | null;
+  invoiceDate: string | null;
+  grnNo: string | null;
+  batchNo: string | null;
+  mfgDate: string | null;
+  expiryDate: string | null;
+  rate: number | null;
+  qcStatus: string | null;
+}
+
+const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString() : "");
+
+export function exportStockReceivedReport(rows: StockReceivedRow[]) {
+  download(
+    "Stock Received",
+    rows.map((r) => ({
+      Date: day(r.date),
+      "QC Status": r.qcStatus ?? "",
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Quantity: r.quantity,
+      Unit: r.unit,
+      "Rejected Qty": r.rejectedQty ?? "",
+      "Vendor Name": r.vendorName ?? "",
+      "Invoice No": r.invoiceNo ?? "",
+      "Invoice Date": day(r.invoiceDate),
+      "GRN No": r.grnNo ?? "",
+      "Batch No": r.batchNo ?? "",
+      "Mfg Date": day(r.mfgDate),
+      "Expiry Date": day(r.expiryDate),
+      Rate: r.rate ?? "",
+    })),
+    `FLS_Stock_Received_${todayStamp()}.xlsx`,
+  );
+}
+
+// Quarantine - stock held for QC, on hold, or sent for a lab test.
+export interface QuarantineListRow {
+  id: string;
+  reason: "Awaiting QC" | "Testing" | "On Hold" | "Lab Test";
+  date: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  quantity: number;
+  vendorName: string | null;
+  invoiceNo: string | null;
+  grnNo: string | null;
+  batchNo: string | null;
+  mfgDate: string | null;
+  expiryDate: string | null;
+  sinceAt: string | null;
+}
+
+export function exportQuarantineReport(rows: QuarantineListRow[]) {
+  const now = Date.now();
+  download(
+    "Quarantine",
+    rows.map((r) => ({
+      Reason: r.reason,
+      "Received Date": day(r.date),
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Quantity: r.quantity,
+      Unit: r.unit,
+      "Vendor Name": r.vendorName ?? "",
+      "Invoice No": r.invoiceNo ?? "",
+      "GRN No": r.grnNo ?? "",
+      "Batch No": r.batchNo ?? "",
+      "Mfg Date": day(r.mfgDate),
+      "Expiry Date": day(r.expiryDate),
+      "In Quarantine Since": day(r.sinceAt),
+      "Aging (Days)": r.sinceAt ? Math.max(0, Math.floor((now - new Date(r.sinceAt).getTime()) / 86_400_000)) : "",
+    })),
+    `FLS_Quarantine_${todayStamp()}.xlsx`,
+  );
+}
+
+// Finished Goods - one batch / lot at or past the FG Store with stock left.
+export interface FgListRow {
+  id: string;
+  kind: "BATCH" | "COMBINED_LOT";
+  poNumber: string | null;
+  productName: string;
+  customerName: string;
+  plantName: string | null;
+  label: string;
+  unit: string;
+  producedQty: number;
+  dispatchedQty: number;
+  onHandQty: number;
+  fgStoreDate: string | null;
+}
+
+export function exportFgListReport(rows: FgListRow[]) {
+  const now = Date.now();
+  download(
+    "Finished Goods",
+    rows.map((r) => ({
+      "PO Number": r.poNumber ?? "",
+      Product: r.productName,
+      Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
+      Plant: r.plantName ?? "",
+      "Batch / Lot": r.label,
+      Unit: r.unit,
+      "Produced Qty": r.producedQty,
+      "Dispatched Qty": r.dispatchedQty,
+      "On Hand Qty": r.onHandQty,
+      "In FG Store Since": day(r.fgStoreDate),
+      "Aging (Days)": r.fgStoreDate ? Math.max(0, Math.floor((now - new Date(r.fgStoreDate).getTime()) / 86_400_000)) : "",
+    })),
+    `FLS_Finished_Goods_${todayStamp()}.xlsx`,
+  );
+}
+
+// Stock Issued - one issue out of the Warehouse (to a Day Store, a Plant or the R&D Store).
+export interface StockIssuedRow {
+  id: string;
+  date: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  quantity: number;
+  locationType: "Day Store" | "R&D Store";
+  locationName: string | null;
+  batchNo: string | null;
+  grnNo: string | null;
+  viaRequest: boolean;
+  status: "Delivered" | "In Transit";
+  issuedBy: string;
+  remark: string | null;
+}
+
+export function exportStockIssuedReport(rows: StockIssuedRow[]) {
+  download(
+    "Stock Issued",
+    rows.map((r) => ({
+      Date: day(r.date),
+      Status: r.status,
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Quantity: r.quantity,
+      Unit: r.unit,
+      "Location Type": r.locationType,
+      Location: r.locationName ?? "",
+      "Batch No": r.batchNo ?? "",
+      "GRN No": r.grnNo ?? "",
+      "Issued Against": r.viaRequest ? "Material Request" : "Direct issue",
+      "Issued By": r.issuedBy,
+      Remark: r.remark ?? "",
+    })),
+    `FLS_Stock_Issued_${todayStamp()}.xlsx`,
+  );
+}
+
+// A Day Store login's own movements: what came in from the Warehouse, or what went on to its Plant.
+export interface MyStoreRow {
+  id: string;
+  date: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  quantity: number;
+  storeName: string | null;
+  plantName: string | null;
+  batchNo: string | null;
+  grnNo: string | null;
+  viaRequest: boolean;
+  status: "Delivered" | "In Transit";
+  issuedBy: string;
+}
+
+export function exportMyStoreReport(kind: "received" | "issued-to-plant", rows: MyStoreRow[]) {
+  const toPlant = kind === "issued-to-plant";
+  download(
+    toPlant ? "Issued to Plant" : "Received from Warehouse",
+    rows.map((r) => ({
+      Date: day(r.date),
+      Status: r.status,
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Quantity: r.quantity,
+      Unit: r.unit,
+      "Day Store": r.storeName ?? "",
+      ...(toPlant ? { Plant: r.plantName ?? "" } : {}),
+      "Batch No": r.batchNo ?? "",
+      "GRN No": r.grnNo ?? "",
+      Against: r.viaRequest ? "Material Request" : "Direct",
+      [toPlant ? "Issued By" : "Issued By (Warehouse)"]: r.issuedBy,
+    })),
+    `FLS_${toPlant ? "Issued_To_Plant" : "Received_From_Warehouse"}_${todayStamp()}.xlsx`,
+  );
+}
+
+// Material Requests - what Day Stores and the R&D Store asked the Warehouse for.
+export interface MaterialRequestRow {
+  key: string;
+  source: "store" | "rnd";
+  id: string;
+  requestedAt: string;
+  requesterType: "Day Store" | "R&D Store";
+  requesterName: string;
+  requesterStoreId: string | null;
+  requestedBy: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  requestedQty: number;
+  issuedQty: number;
+  remainingQty: number;
+  neededBy: string | null;
+  statusKey: string;
+  status: string;
+  open: boolean;
+  warehouseOnHand: number;
+  short: boolean;
+  shortBy: number;
+  supply: "NONE" | "WITH_PPIC" | "WITH_PURCHASE" | "ON_ORDER" | "RECEIVED";
+  supplyLabel: string;
+  eta: string | null;
+  piNumber: string | null;
+  requirementId: string | null;
+  note: string | null;
+  forPlan: boolean;
+  forProductionRequestId: string | null;
+  purchaseOrderItemId: string | null;
+  productName: string | null;
+  poNumber: string | null;
+  customerName: string | null;
+  plantName: string | null;
+  overdue: boolean;
+}
+
+export function exportMaterialRequestsReport(rows: MaterialRequestRow[]) {
+  download(
+    "Material Requests",
+    rows.map((r) => ({
+      "Requested On": day(r.requestedAt),
+      Status: r.status,
+      "Requested By": r.requesterName,
+      Person: r.requestedBy,
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Unit: r.unit,
+      "Requested Qty": r.requestedQty,
+      "Issued Qty": r.issuedQty,
+      "Remaining Qty": r.remainingQty,
+      "Needed By": day(r.neededBy),
+      "For Product": r.productName ?? "",
+      "PO Number": r.poNumber ?? "",
+      Plant: r.plantName ?? "",
+      Overdue: r.overdue ? "Yes" : "",
+      "Warehouse On Hand": r.warehouseOnHand,
+      "Short By": r.shortBy || "",
+      "Purchase Trail": r.supply === "NONE" ? "" : r.supplyLabel,
+      "PI Number": r.piNumber ?? "",
+      ETA: day(r.eta),
+      Note: r.note ?? "",
+    })),
+    `FLS_Material_Requests_${todayStamp()}.xlsx`,
+  );
+}
+
+export function exportIncomingReport(rows: IncomingRow[]) {
+  download(
+    "Incoming Material",
+    rows.map((r) => ({
+      Item: r.itemName,
+      Category: CATEGORY_LABEL[r.category] ?? r.category,
+      Unit: r.unit,
+      "Expected Qty": r.quantity,
+      "Ordered Qty": r.orderedQty,
+      "PI Number": r.piNumber,
+      "Vendor Name": r.vendorName,
+      ETA: new Date(r.eta).toLocaleDateString(),
+      Overdue: r.overdue ? "Yes" : "",
+      "Customer PO": r.customerPo?.poNumber ?? "",
+      Customer: r.customerPo?.customerName ?? "",
+      "Customer Type": customerTypeLabel(r.customerPo?.customerName ?? ""),
+      Product: r.customerPo?.productName ?? "",
+    })),
+    `FLS_Incoming_Material_${todayStamp()}.xlsx`,
+  );
+}
+
 export function downloadPurchaseLogImportTemplate() {
   download(
-    "PO Log",
+    "PI Log",
     [
-      { Item: "Whey Protein Concentrate", Category: "RM", "PO Number": "PO-RM-001", "Vendor Name": "Sunrise Ingredients", ETA: "24-08-2026" },
-      { Item: "", Category: "", "PO Number": "", "Vendor Name": "", ETA: "" },
+      { Item: "Whey Protein Concentrate", Category: "RM", "PI Number": "PI-RM-001", Quantity: 40, "Vendor Name": "Sunrise Ingredients", ETA: "24-08-2026" },
+      { Item: "", Category: "", "PI Number": "", Quantity: "", "Vendor Name": "", ETA: "" },
     ],
     "FLS_PreInventory_PO_Log_Template.xlsx",
   );

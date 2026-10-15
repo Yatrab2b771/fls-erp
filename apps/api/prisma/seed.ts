@@ -35,7 +35,7 @@ async function seedAdmin(): Promise<string> {
   }
 
   const passwordHash = await bcrypt.hash(adminPassword, 12);
-  const admin = await prisma.user.create({ data: { email: adminEmail, passwordHash, fullName: "System Admin" } });
+  const admin = await prisma.user.create({ data: { email: adminEmail, loginId: adminEmail.split("@")[0]!.toLowerCase(), passwordHash, fullName: "System Admin" } });
   const adminRole = await prisma.role.findUniqueOrThrow({ where: { name: RoleName.ADMIN } });
   await prisma.userRole.create({ data: { userId: admin.id, roleId: adminRole.id } });
 
@@ -68,9 +68,10 @@ async function seedDemoUsers(): Promise<Partial<Record<RoleName, string>>> {
     let user = await prisma.user.findUnique({ where: { email: demo.email } });
     if (!user) {
       const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 12);
-      user = await prisma.user.create({ data: { email: demo.email, passwordHash, fullName: demo.fullName } });
+      user = await prisma.user.create({ data: { email: demo.email, loginId: demo.email.split("@")[0]!.toLowerCase(), passwordHash, fullName: demo.fullName } });
       const role = await prisma.role.findUniqueOrThrow({ where: { name: demo.role } });
-      await prisma.userRole.create({ data: { userId: user.id, roleId: role.id } });
+      // each demo department user is that department's one admin (the System Admin can move this)
+      await prisma.userRole.create({ data: { userId: user.id, roleId: role.id, isDeptAdmin: true } });
       console.log(`Created demo user: ${demo.email} / ${DEMO_PASSWORD} (${demo.role})`);
     }
     idsByRole[demo.role] = user.id;
@@ -322,11 +323,9 @@ async function seedRmCosting(ppicUserId: string | undefined) {
   }
 
   const totalServing = DEMO_RECIPE_INGREDIENTS.reduce((sum, ing) => sum + ing.gPerServing, 0);
-  const recipe = await prisma.recipe.upsert({
-    where: { name: "CHOCOLATE PLANT NUTRITION" },
-    create: { name: "CHOCOLATE PLANT NUTRITION", totalServing, ingredients: { create: DEMO_RECIPE_INGREDIENTS } },
-    update: {},
-  });
+  const recipe =
+    (await prisma.recipe.findFirst({ where: { name: "CHOCOLATE PLANT NUTRITION", customerId: null } })) ??
+    (await prisma.recipe.create({ data: { name: "CHOCOLATE PLANT NUTRITION", totalServing, ingredients: { create: DEMO_RECIPE_INGREDIENTS } } }));
 
   const plan = await prisma.rmPlan.create({
     data: {

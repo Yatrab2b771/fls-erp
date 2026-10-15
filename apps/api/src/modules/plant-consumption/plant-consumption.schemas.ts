@@ -14,20 +14,25 @@ export const recordPlantConsumptionSchema = z
     wastedQty: z.coerce.number().nonnegative().default(0),
     rejectedQty: z.coerce.number().nonnegative().default(0),
     returnedQty: z.coerce.number().nonnegative().default(0),
+    // D - sent as a sample (QC / retention)
+    sampleQty: z.coerce.number().nonnegative().default(0),
+    // The batch of the run this belongs to (optional - leave out to log it for the run as a whole)
+    productionBatchId: z.string().uuid().optional(),
     unit: z.string().min(1).max(40),
     destinationType: z.enum(["DAY_STORE", "WAREHOUSE"]).optional(),
     destDayStoreId: z.string().uuid().optional(),
     note: z.string().max(500).optional(),
   })
-  .refine((data) => data.consumedQty + data.wastedQty + data.rejectedQty + data.returnedQty > 0, {
+  .refine((data) => data.consumedQty + data.wastedQty + data.rejectedQty + data.returnedQty + data.sampleQty > 0, {
     message: "Enter at least one quantity greater than zero",
     path: ["consumedQty"],
   })
-  .refine((data) => (data.returnedQty > 0 ? !!data.destinationType : true), {
+  // A batch's E · Return is leftover that stays in the Plant's stock (it is sent back to the Day Store later, from Plant Stock): no destination.
+  .refine((data) => (data.returnedQty > 0 && !data.productionBatchId ? !!data.destinationType : true), {
     message: "Select where the returned material is going",
     path: ["destinationType"],
   })
-  .refine((data) => (data.returnedQty > 0 && data.destinationType === "DAY_STORE" ? !!data.destDayStoreId : true), {
+  .refine((data) => (data.returnedQty > 0 && !data.productionBatchId && data.destinationType === "DAY_STORE" ? !!data.destDayStoreId : true), {
     message: "Select a destination Day Store",
     path: ["destDayStoreId"],
   });

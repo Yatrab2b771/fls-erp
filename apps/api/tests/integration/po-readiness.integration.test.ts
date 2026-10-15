@@ -10,7 +10,7 @@ async function createApprovedPo(bdToken: string, poNumber: string) {
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Whey Protein 1Kg Jar", quantity: 500, unit: "SKU" }] });
+    .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Whey Protein 1Kg Jar", productCategory: "Powder", quantity: 500, unit: "SKU" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body;
 }

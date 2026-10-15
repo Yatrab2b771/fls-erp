@@ -11,7 +11,7 @@ async function createApprovedPoItem(bdToken: string) {
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", quantity: 100, unit: "KG" }] });
+    .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }
@@ -23,7 +23,7 @@ describe("POST /api/pre-productions", () => {
     const draftPo = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", quantity: 100, unit: "KG" }] });
+      .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
     const draftItemId = draftPo.body.items[0].id;
 
     const { token: ppicToken } = await createUser(["PPIC"]);
@@ -440,7 +440,7 @@ describe("POST /api/pre-productions — PO Readiness gate", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Medicine A", quantity: 100, unit: "KG" }] });
+      .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
     return { poId: po.body.id as string, itemId: po.body.items[0].id as string };
   }

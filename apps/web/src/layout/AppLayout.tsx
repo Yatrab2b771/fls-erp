@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
+  Wallet,
+  FileText,
   Activity,
   ArrowRightLeft,
   Beaker,
@@ -14,6 +16,7 @@ import {
   Factory,
   FlaskConical,
   History,
+  KeyRound,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -21,19 +24,23 @@ import {
   Microscope,
   Package,
   PackageMinus,
+  PauseCircle,
   Recycle,
   RotateCcw,
   Search,
   ShieldCheck,
   ShoppingBag,
   Truck,
+  ScanLine,
+  Users,
   Warehouse,
   X,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { EmptyState } from "../components/EmptyState";
+import { ChangePasswordDialog } from "../components/ChangePasswordDialog";
 import { formatEmployeeId } from "../lib/format";
-import { useMarkAllNotificationsRead, useMarkNotificationRead, useNotifications } from "../lib/hooks";
+import { useDayStores, useMarkAllNotificationsRead, useMarkNotificationRead, useMyStoreInfo, useNotifications } from "../lib/hooks";
 import type { AppNotification, RoleName } from "../lib/types";
 
 function timeAgo(iso: string): string {
@@ -53,6 +60,10 @@ interface NavItem {
   icon: typeof Truck;
   roles?: RoleName[];
   end?: boolean;
+  /** Shown only to the admin of a department (the System Admin has Users instead). */
+  deptAdminOnly?: boolean;
+  /** When set, the sidebar lists this entry only for these roles; the other `roles` can still open the page (from a tile). */
+  sidebarRoles?: RoleName[];
 }
 
 // Grouped by the department flow the business actually runs, not
@@ -84,15 +95,23 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // the underlying page/API, which stays open to any authenticated
       // user) so it's a one-line change to bring either back.
       { to: "/purchase-orders", label: "Order Tracking", icon: Truck, roles: ["BD", "PPIC", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
+  { to: "/accounts-dispatch", label: "Dispatch Invoices", icon: FileText, roles: ["ACCOUNTS"] },
       { to: "/customers", label: "Customers", icon: Building2, roles: ["BD"] },
+      { to: "/leads", label: "Leads", icon: Users, roles: ["BD"] },
+      { to: "/visiting-cards", label: "Visiting Cards", icon: ScanLine, roles: ["BD"] },
+      // BD asks PPIC to hold / cancel a product here; PPIC decides on the same page but opens it from its "BD Requests" tile, not the sidebar
+      { to: "/bd-requests", label: "Hold / Cancel Requests", icon: PauseCircle, roles: ["BD", "PPIC"], sidebarRoles: ["BD"] },
     ],
   },
   {
     heading: "Planning & Procurement",
     items: [
       { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
-      { to: "/vendors", label: "Vendors", icon: Factory, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
-      { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS"] },
+  { to: "/vendor-payments", label: "Vendor Payments", icon: Wallet, roles: ["ACCOUNTS", "PURCHASE"] },
+      // The supplier directory (contact, GST, address): Purchase keeps it, Store and Accounts use it. PPIC and Production see what is ordered and its ETA in Pre-Inventory / Vendor POs instead.
+      { to: "/vendors", label: "Vendors", icon: Factory, roles: ["STORE", "PURCHASE", "ACCOUNTS"] },
+      // Rates, GST and amounts: not for PPIC (it follows what is ordered, its ETA and what arrived in Pre-Inventory)
+      { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["STORE", "PURCHASE", "ACCOUNTS"] },
       { to: "/po-readiness", label: "PO Readiness", icon: CheckCircle2, roles: ["PPIC"] },
       // PO-independent — search an existing catalog product (Sku/Recipe)
       // whose BOM/RM Plan is already calculated and check its RM/PM
@@ -106,13 +125,13 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Warehouse & Quality",
     items: [
-      // PURCHASE added for Stock on Hand only (read-only, with cost
-      // visible) — see InventoryPage.tsx's own canPurchaseViewStock gate.
-      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "PPIC", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS", "PURCHASE"] },
-      { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE", "PRODUCTION", "PPIC"] },
-      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE", "PPIC"] },
-      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["PRODUCTION", "STORE", "PPIC", "QA_QC"] },
-      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC", "PPIC"] },
+      // Not for PPIC or Purchase: they follow stock and what is short in Material Planning / PO Readiness / Pre-Inventory (Purchase logs its PIs there)
+      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS"] },
+      // Not for PPIC (it could only look): stock moves, plant usage, material usage and the Recycle Store belong to Store, Production and QA
+      { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE", "PRODUCTION"] },
+      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE"] },
+      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["PRODUCTION", "STORE", "QA_QC"] },
+      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC"] },
     ],
   },
   {
@@ -136,12 +155,14 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // Inventory's "Notify Purchase" already tells them exactly what's
       // short, item by item. Hidden from Purchase's nav only (not the
       // underlying page/API), same reasoning as Order Tracking above.
-      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND", "PPIC"] },
+      // The R&D section is R&D's own: PPIC sees what a product needs in Material Planning, Pre-Inventory and Add on Plan instead
+      { to: "/packaging-bom", label: "Packaging BOM", icon: Package, roles: ["RND"] },
       // STORE had read-only access here too (no STORE-specific permission
       // on this route — only RND edits recipes, only PPIC sends to
       // Pre-Inventory), same reasoning as PURCHASE's Packaging BOM above.
-      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND", "PPIC"] },
-      { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND", "PPIC"] },
+      { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND"] },
+      { to: "/sample-requests", label: "Sample Request", icon: Beaker, roles: ["RND", "BD", "REGULATORY"] },
+      { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
     ],
   },
@@ -149,6 +170,7 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Administration",
     items: [
       { to: "/users", label: "Users", icon: ShieldCheck, roles: ["ADMIN"] },
+      { to: "/team", label: "My Team", icon: Users, deptAdminOnly: true },
       { to: "/recycle-bin", label: "Recycle Bin", icon: RotateCcw, roles: ["ADMIN"] },
       { to: "/system-health", label: "System Health", icon: Activity, roles: ["ADMIN"] },
       { to: "/audit-log", label: "Audit Log", icon: History, roles: ["ADMIN"] },
@@ -160,6 +182,9 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
 // topbar — a detail page reached from a list belongs to that list's
 // section, so it borrows its parent's title rather than showing nothing.
 const DETAIL_ROUTE_TITLES: { prefix: string; label: string; section: string }[] = [
+  { prefix: "/po-review/", label: "PO Review", section: "Order to Dispatch" },
+  { prefix: "/qc/", label: "QA / QC", section: "Warehouse & Quality" },
+  { prefix: "/bom-board", label: "BOM", section: "R&D" },
   { prefix: "/purchase-orders/", label: "Purchase Order", section: "Order to Dispatch" },
   { prefix: "/pre-productions/", label: "Production Run", section: "Order to Dispatch" },
   { prefix: "/combined-lots/", label: "Combined Lot", section: "Order to Dispatch" },
@@ -174,16 +199,38 @@ function initials(name: string) {
 
 const SIDEBAR_COLLAPSED_KEY = "fls.sidebar.collapsed";
 
+// The departments an admin can look at the app as. Warehouse is the unrestricted Store seat; one Day Store or one Plant is picked from the lists below.
+const VIEW_AS_OPTIONS: { role: RoleName; label: string }[] = [
+  { role: "BD", label: "BD" },
+  { role: "PPIC", label: "PPIC" },
+  { role: "RND", label: "R&D" },
+  { role: "REGULATORY", label: "Regulatory" },
+  { role: "PURCHASE", label: "Purchase" },
+  { role: "STORE", label: "Warehouse (Store)" },
+  { role: "PRODUCTION", label: "Production (all plants)" },
+  { role: "QA_QC", label: "QA / QC" },
+  { role: "ACCOUNTS", label: "Accounts" },
+  { role: "DISPATCH", label: "Dispatch" },
+];
+
 export function AppLayout({ children }: { children: ReactNode }) {
-  const { user, logout, hasRole } = useAuth();
+  const { user, logout, hasRole, isAdmin, viewAs, viewScope, setViewAs } = useAuth();
+  const { data: viewDayStores } = useDayStores({ enabled: isAdmin });
   const location = useLocation();
   const navigate = useNavigate();
   const displayName = user?.fullName ?? user?.email ?? "";
 
+  // The Stock Transfers screen reads differently per seat: a Day Store login sends / returns its own stock, the
+  // Warehouse seat only receives and confirms what comes back.
+  const { data: myStore } = useMyStoreInfo({ enabled: hasRole("STORE") });
+  const transfersLabel = myStore?.scoped ? "Send / Return Stock" : myStore && hasRole("STORE") && !hasRole("ADMIN") ? "Stock Returns" : "Stock Transfers";
+
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.roles || hasRole(...item.roles)),
+    items: group.items.filter((item) => (item.deptAdminOnly ? !isAdmin && !!user?.deptAdminOf.length : !item.roles || hasRole(...item.roles))).map((item) => (item.to === "/stock-transfers" ? { ...item, label: transfersLabel } : item)),
   })).filter((group) => group.items.length > 0);
+  // What the sidebar lists: an entry with `sidebarRoles` shows there only for those roles (the others still may open its page)
+  const sidebarGroups = visibleGroups.map((group) => ({ ...group, items: group.items.filter((item) => !item.sidebarRoles || hasRole(...item.sidebarRoles)) })).filter((group) => group.items.length > 0);
 
   // Collapsed state persists per browser — an operator who works one
   // module all day shouldn't have to re-collapse the rail every reload.
@@ -206,6 +253,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
   const notifRef = useRef<HTMLDivElement>(null);
@@ -286,13 +334,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
   // a column of unlabelled icons inside a 272px panel.
   const navList = ({ iconsOnly, onNavigate }: { iconsOnly: boolean; onNavigate?: () => void }) => (
     <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
-      {visibleGroups.map((group) => (
+      {sidebarGroups.map((group) => (
         <div key={group.heading}>
           {/* The heading is what turns a flat list into a system — but at
               76px there's no room for it, and a truncated word reads as a
               glitch, so the collapsed rail drops it and leans on the
               spacing between groups instead. */}
-          {!iconsOnly && <p className="mb-1.5 px-3 text-[10px] font-black uppercase tracking-[0.12em] text-slate-400">{group.heading}</p>}
+          {!iconsOnly && <p className="mb-1.5 px-3 text-micro font-black uppercase tracking-[0.12em] text-slate-400">{group.heading}</p>}
           <div className="space-y-0.5">
             {group.items.map((item) => {
               const Icon = item.icon;
@@ -304,7 +352,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                   onClick={onNavigate}
                   title={iconsOnly ? item.label : undefined}
                   className={({ isActive }) =>
-                    `group relative flex items-center rounded-xl text-[13px] font-bold transition-all duration-150 ${iconsOnly ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5"} ${
+                    `group relative flex items-center rounded-xl text-body font-bold transition-all duration-150 ${iconsOnly ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5"} ${
                       isActive ? "bg-brand-50 text-brand-700 shadow-[inset_0_0_0_1px_rgba(79,70,229,.12)]" : "text-slate-500 hover:bg-slate-100/70 hover:text-slate-900"
                     }`
                   }
@@ -350,7 +398,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           {!collapsed && (
             <div className="min-w-0">
               <p className="truncate text-sm font-black leading-none tracking-tight text-slate-900">FLS Mitr</p>
-              <p className="mt-1 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
+              <p className="mt-1 text-micro font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
             </div>
           )}
         </div>
@@ -360,7 +408,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <div className="shrink-0 border-t border-slate-100 p-3">
           <button
             onClick={() => setCollapsed((c) => !c)}
-            className={`flex w-full items-center rounded-xl px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-400 transition-colors hover:bg-slate-100/70 hover:text-slate-700 ${
+            className={`flex w-full items-center rounded-xl px-3 py-2 text-tiny font-bold uppercase tracking-wide text-slate-400 transition-colors hover:bg-slate-100/70 hover:text-slate-700 ${
               collapsed ? "justify-center" : "gap-2"
             }`}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -383,7 +431,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 </div>
                 <div>
                   <p className="text-sm font-black leading-none tracking-tight text-slate-900">FLS Mitr</p>
-                  <p className="mt-1 text-[9px] font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
+                  <p className="mt-1 text-micro font-bold uppercase tracking-[0.15em] text-brand-600">Enterprise Platform</p>
                 </div>
               </div>
               <button className="btn-icon" onClick={() => setMobileOpen(false)} aria-label="Close menu">
@@ -400,7 +448,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-bold leading-tight text-slate-800">{displayName}</p>
-                  <p className="mt-0.5 text-[9px] font-bold uppercase tracking-wide text-slate-400">{user?.roles.join(" · ") || "No role"}</p>
+                  <p className="mt-0.5 text-micro font-bold uppercase tracking-wide text-slate-400">{user?.roles.join(" · ") || "No role"}</p>
                 </div>
                 <button onClick={logout} className="btn-icon shrink-0 hover:!bg-rose-50 hover:!text-rose-600" title="Log out">
                   <LogOut className="h-4 w-4" strokeWidth={2} />
@@ -423,17 +471,66 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 screen below — so the rail and the header never disagree
                 about what this page is called. */}
             <div className="min-w-0">
-              {pageSection && <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-slate-400">{pageSection}</p>}
+              {pageSection && <p className="text-micro font-bold uppercase tracking-[0.12em] text-slate-400">{pageSection}</p>}
               <h1 className="truncate text-[15px] font-black leading-tight tracking-tight text-slate-900">{pageTitle}</h1>
             </div>
 
             <div className="ml-auto flex items-center gap-2">
+              {/* Admin only: look at the app as one department sees it */}
+              {isAdmin && (
+                <label className="hidden items-center gap-1.5 sm:flex">
+                  <span className="text-micro font-bold uppercase tracking-wide text-slate-500">View as</span>
+                  <select
+                    className="field !h-9 !w-auto !py-0 text-xs font-bold"
+                    value={viewScope ? `${viewScope.kind}:${viewScope.id}` : viewAs ? `ROLE:${viewAs}` : ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!v) setViewAs(null);
+                      else if (v.startsWith("ROLE:")) setViewAs(v.slice(5) as RoleName);
+                      else {
+                        const [kind, id] = v.split(":") as ["DAYSTORE" | "PLANT", string];
+                        const store = (viewDayStores ?? []).find((s) => (kind === "DAYSTORE" ? s.id === id : s.pairedPlant?.id === id));
+                        setViewAs(kind === "DAYSTORE" ? "STORE" : "PRODUCTION", { kind, id, label: kind === "DAYSTORE" ? `Day Store: ${store?.name ?? ""}` : `Production: ${store?.pairedPlant?.name ?? store?.name ?? ""}` });
+                      }
+                      navigate("/");
+                    }}
+                  >
+                    <option value="">Admin (everything)</option>
+                    <optgroup label="Departments">
+                      {VIEW_AS_OPTIONS.map((o) => (
+                        <option key={o.role} value={`ROLE:${o.role}`}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                    {(viewDayStores ?? []).length > 0 && (
+                      <optgroup label="One Day Store">
+                        {(viewDayStores ?? []).map((s) => (
+                          <option key={s.id} value={`DAYSTORE:${s.id}`}>
+                            Day Store: {s.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {(viewDayStores ?? []).some((s) => s.pairedPlant) && (
+                      <optgroup label="One Plant (Production)">
+                        {(viewDayStores ?? []).filter((s) => s.pairedPlant).map((s) => (
+                          <option key={s.pairedPlant!.id} value={`PLANT:${s.pairedPlant!.id}`}>
+                            Production: {s.pairedPlant!.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </label>
+              )}
+
               {/* Notification bell */}
               <div className="relative" ref={notifRef}>
                 <button onClick={() => setNotifOpen((o) => !o)} className="btn-icon relative" title="Notifications">
                   <Bell className="h-[18px] w-[18px]" strokeWidth={2.25} />
                   {unreadCount > 0 && (
-                    <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-[9px] font-black text-white shadow-sm">
+                    <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-rose-500 px-1 text-micro font-black text-white shadow-sm">
                       {unreadCount > 99 ? "99+" : unreadCount}
                     </span>
                   )}
@@ -444,7 +541,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                     <div className="flex items-center justify-between border-b border-slate-100 px-3.5 py-2.5">
                       <p className="text-xs font-black text-slate-800">Notifications</p>
                       {unreadCount > 0 && (
-                        <button onClick={() => markAllRead.mutate()} className="text-[10px] font-bold uppercase tracking-wide text-brand-600 hover:text-brand-800">
+                        <button onClick={() => markAllRead.mutate()} className="text-micro font-bold uppercase tracking-wide text-brand-600 hover:text-brand-800">
                           Mark all read
                         </button>
                       )}
@@ -465,8 +562,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
                               {!n.readAt && <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-brand-500" />}
                               <p className={`flex-1 text-xs leading-snug ${n.readAt ? "font-medium text-slate-600" : "font-bold text-slate-800"}`}>{n.title}</p>
                             </div>
-                            {n.body && <p className="pl-3.5 text-[11px] leading-snug text-slate-500">{n.body}</p>}
-                            <p className="pl-3.5 text-[10px] font-semibold text-slate-400">{timeAgo(n.createdAt)}</p>
+                            {n.body && <p className="pl-3.5 text-tiny leading-snug text-slate-500">{n.body}</p>}
+                            <p className="pl-3.5 text-micro font-semibold text-slate-400">{timeAgo(n.createdAt)}</p>
                           </button>
                         ))
                       )}
@@ -483,12 +580,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
                   onClick={() => setProfileOpen((o) => !o)}
                   className="flex items-center gap-2 rounded-xl border border-transparent py-1.5 pl-1.5 pr-2 transition-colors hover:border-slate-200 hover:bg-slate-50 sm:pr-2.5"
                 >
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-slate-700 to-slate-900 text-[11px] font-black text-white shadow-soft">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-slate-700 to-slate-900 text-tiny font-black text-white shadow-soft">
                     {initials(displayName)}
                   </div>
                   <div className="hidden text-left sm:block">
                     <p className="max-w-[9rem] truncate text-xs font-bold leading-tight text-slate-800">{displayName}</p>
-                    <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{user?.roles[0] ?? "No role"}</p>
+                    <p className="text-micro font-bold uppercase tracking-wide text-slate-400">{user?.roles[0] ?? "No role"}</p>
                   </div>
                   <ChevronDown className={`hidden h-3.5 w-3.5 text-slate-400 transition-transform sm:block ${profileOpen ? "rotate-180" : ""}`} strokeWidth={2.5} />
                 </button>
@@ -497,16 +594,25 @@ export function AppLayout({ children }: { children: ReactNode }) {
                   <div className="animate-scale-in absolute right-0 top-full z-50 mt-2 w-56 origin-top-right rounded-2xl border border-slate-200/80 bg-white p-2 shadow-lift">
                     <div className="px-2.5 py-2">
                       <p className="truncate text-xs font-bold text-slate-800">{displayName}</p>
-                      {user && <p className="mt-0.5 font-mono text-[10px] font-bold text-slate-400">{formatEmployeeId(user.employeeId)}</p>}
+                      {user && <p className="mt-0.5 font-mono text-micro font-bold text-slate-400">{formatEmployeeId(user.employeeId)}</p>}
                       <div className="mt-1.5 flex flex-wrap gap-1">
                         {(user?.roles.length ? user.roles : ["No roles"]).map((r) => (
-                          <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-700">
+                          <span key={r} className="rounded border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-micro font-bold uppercase tracking-wide text-brand-700">
                             {r}
                           </span>
                         ))}
                       </div>
                     </div>
                     <div className="my-1 border-t border-slate-100" />
+                    <button
+                      onClick={() => {
+                        setProfileOpen(false);
+                        setChangePasswordOpen(true);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs font-bold text-slate-700 transition-colors hover:bg-slate-50"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" strokeWidth={2.25} /> Change password
+                    </button>
                     <button onClick={logout} className="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left text-xs font-bold text-rose-600 transition-colors hover:bg-rose-50">
                       <LogOut className="h-3.5 w-3.5" strokeWidth={2.25} /> Log out
                     </button>
@@ -516,13 +622,30 @@ export function AppLayout({ children }: { children: ReactNode }) {
             </div>
           </div>
         </header>
+        {viewAs && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-bold text-amber-800 md:px-6">
+            <span>
+              Viewing as {viewScope?.label ?? VIEW_AS_OPTIONS.find((o) => o.role === viewAs)?.label ?? viewAs}: you see what {viewScope ? "that login" : "this department"} sees. Your actions still go through as Admin.
+            </span>
+            <button
+              type="button"
+              className="rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-xs font-bold text-amber-800 hover:bg-amber-100"
+              onClick={() => {
+                setViewAs(null);
+                navigate("/");
+              }}
+            >
+              Back to Admin view
+            </button>
+          </div>
+        )}
 
         <main className="mx-auto max-w-[1600px] p-4 md:p-6 xl:p-8">
           <div key={location.pathname} className="animate-fade-in">
             {isRestricted ? (
               <EmptyState
                 icon={Lock}
-                title={`${matchedAnyNav?.label} is restricted to ${matchedAnyNav?.roles?.join(" / ") ?? "another role"}`}
+                title={`${matchedAnyNav?.label} is restricted to ${matchedAnyNav?.roles?.join(" / ") ?? "the department admin"}`}
                 hint="Your account doesn't have that role, so this screen isn't in your sidebar. Pick a module from the left, or ask an administrator if you need access."
                 accent="slate"
               />
@@ -532,6 +655,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </main>
       </div>
+      {changePasswordOpen && <ChangePasswordDialog onClose={() => setChangePasswordOpen(false)} />}
     </div>
   );
 }

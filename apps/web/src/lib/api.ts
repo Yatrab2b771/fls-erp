@@ -6,7 +6,7 @@
 // dev server proxies to localhost:4000 — see vite.config.ts. Prod build:
 // set VITE_API_URL to the deployed API's origin (no trailing slash),
 // since the built static site and the API live on different hosts then.
-const API_BASE = import.meta.env.VITE_API_URL ?? "";
+export const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 const TOKEN_KEY = "fls_token";
 
@@ -18,6 +18,12 @@ export function setToken(token: string): void {
 }
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+}
+
+// An admin viewing as one Day Store / Plant: sent with every request so the server scopes the admin like that store's / plant's own login.
+let viewScopeHeader: string | null = null;
+export function setViewScopeHeader(value: string | null): void {
+  viewScopeHeader = value;
 }
 
 let onUnauthorized = () => {};
@@ -46,6 +52,7 @@ export async function api<T = unknown>(path: string, opts: ApiOptions = {}): Pro
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (viewScopeHeader) headers["X-View-As-Scope"] = viewScopeHeader;
   if (!opts.isFormData) headers["Content-Type"] = "application/json";
 
   const res = await fetch(`${API_BASE}${path}`, {
@@ -81,6 +88,7 @@ export async function apiCount(path: string): Promise<number> {
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (viewScopeHeader) headers["X-View-As-Scope"] = viewScopeHeader;
 
   const res = await fetch(`${API_BASE}${path}`, { headers });
 
@@ -98,7 +106,7 @@ export async function apiCount(path: string): Promise<number> {
 /** Triggers a browser download from an authenticated endpoint — a plain <a href> can't carry the Authorization header. */
 export async function downloadFile(path: string, filename: string): Promise<void> {
   const token = getToken();
-  const res = await fetch(`${API_BASE}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  const res = await fetch(`${API_BASE}${path}`, { headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(viewScopeHeader ? { "X-View-As-Scope": viewScopeHeader } : {}) } });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new ApiError(data.error ?? `Download failed (${res.status})`, res.status);
@@ -112,4 +120,39 @@ export async function downloadFile(path: string, filename: string): Promise<void
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/** A paginated GET: the page of rows plus the total row count (the X-Total-Count header). */
+export async function apiPage<T>(path: string): Promise<{ rows: T[]; total: number }> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (viewScopeHeader) headers["X-View-As-Scope"] = viewScopeHeader;
+
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (res.status === 401) {
+    onUnauthorized();
+    throw new ApiError("Session expired - please log in again.", 401);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `Request failed (${res.status})`, res.status, (data as { details?: unknown }).details);
+  const rows = data as T[];
+  return { rows, total: Number(res.headers.get("X-Total-Count") ?? rows.length) };
+}
+
+/**
+ * Every row of a paginated list, fetched page by page (200 at a time) - for
+ * dropdown pickers and derived views that genuinely need the whole list. Never
+ * silently stops at the first page the way a plain pageSize=200 request does.
+ * Tables people browse should use usePagedList instead.
+ */
+export async function apiAll<T>(path: string): Promise<T[]> {
+  const sep = path.includes("?") ? "&" : "?";
+  const all: T[] = [];
+  for (let page = 1; page <= 500; page += 1) {
+    const { rows, total } = await apiPage<T>(`${path}${sep}page=${page}&pageSize=200`);
+    all.push(...rows);
+    if (rows.length === 0 || all.length >= total) break;
+  }
+  return all;
 }

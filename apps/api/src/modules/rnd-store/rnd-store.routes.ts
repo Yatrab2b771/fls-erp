@@ -15,14 +15,12 @@ import {
   createRndSampleRequestSchema,
   rejectRndSampleRequestSchema,
   importRndSampleRequestsSchema,
-  rndDirectPurchaseSchema,
   type CreateRndTransferInput,
   type ConsumeAtRndInput,
   type DispatchToCustomerInput,
   type CreateRndSampleRequestInput,
   type RejectRndSampleRequestInput,
   type ImportRndSampleRequestsInput,
-  type RndDirectPurchaseInput,
 } from "./rnd-store.schemas";
 
 // R&D Store — a second stock ledger for R&D's own sample lifecycle, per
@@ -264,12 +262,13 @@ function serializeRequest(r: {
 // Store sees it and fulfills or rejects it below.
 rndStoreRouter.post("/requests", requireRole("RND"), validateBody(createRndSampleRequestSchema), async (req: AuthedRequest, res, next) => {
   try {
-    const { itemId, quantity, unit, note } = req.body as CreateRndSampleRequestInput;
+    const { itemId, quantity, unit, note, sampleRequestId } = req.body as CreateRndSampleRequestInput;
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
+    if (sampleRequestId && !(await prisma.sampleRequest.findUnique({ where: { id: sampleRequestId }, select: { id: true } }))) return res.status(400).json({ error: "Unknown sample request" });
 
     const request = await prisma.rndSampleRequest.create({
-      data: { itemId, quantity, unit, note, requestedById: req.user!.id },
+      data: { itemId, quantity, unit, note, sampleRequestId, requestedById: req.user!.id },
       include: requestInclude,
     });
 
@@ -424,6 +423,252 @@ rndStoreRouter.post("/requests/:id/cancel", requireRole("RND"), async (req: Auth
   }
 });
 
+// --- "Received Material": R&D's whole journey of asking the Warehouse for material and receiving it. One row per request (and per direct
+// push from the Warehouse with no request behind it). Status: Requested (waiting on the Warehouse) -> Issued (sent, R&D has to confirm
+// receipt) -> Received, or Rejected / Cancelled. Each row carries the vendors this material came from (accepted Warehouse receipts,
+// newest first, with batch / GRN / dates) and what the Warehouse has on hand now. ---
+
+type VendorLine = { vendorName: string | null; batchNo: string | null; grnNo: string | null; mfgDate: Date | null; expiryDate: Date | null; quantity: number; unit: string; receivedAt: Date };
+
+async function vendorsByItem(itemIds: string[]): Promise<Map<string, VendorLine[]>> {
+  const out = new Map<string, VendorLine[]>();
+  if (itemIds.length === 0) return out;
+  const receipts = await prisma.inventoryTransaction.findMany({
+    where: { itemId: { in: itemIds }, type: "RECEIVED", deletedAt: null, receiptStatus: "ACCEPTED", isRndReturn: false, isStockTransferReceipt: false, isOpeningStock: false },
+    orderBy: { date: "desc" },
+    select: { itemId: true, vendorName: true, batchNo: true, grnNo: true, mfgDate: true, expiryDate: true, quantity: true, unit: true, date: true },
+  });
+  for (const r of receipts) {
+    const list = out.get(r.itemId) ?? [];
+    if (list.length < 8) list.push({ vendorName: r.vendorName, batchNo: r.batchNo, grnNo: r.grnNo, mfgDate: r.mfgDate, expiryDate: r.expiryDate, quantity: r.quantity, unit: r.unit, receivedAt: r.date });
+    out.set(r.itemId, list);
+  }
+  return out;
+}
+
+rndStoreRouter.get("/received-material", requireRole("RND"), async (_req, res, next) => {
+  try {
+    const [requests, directTransfers] = await Promise.all([
+      prisma.rndSampleRequest.findMany({
+        orderBy: { requestedAt: "desc" },
+        take: 1000,
+        include: {
+          item: { select: { id: true, name: true, category: true } },
+          requestedBy: { select: { fullName: true, email: true } },
+          reviewedBy: { select: { fullName: true, email: true } },
+          transfer: { include: { sentBy: { select: { fullName: true, email: true } }, confirmedBy: { select: { fullName: true, email: true } } } },
+        },
+      }),
+      prisma.rndTransfer.findMany({
+        where: { direction: "TO_RND", deletedAt: null, sampleRequest: null },
+        orderBy: { sentAt: "desc" },
+        take: 300,
+        include: { item: { select: { id: true, name: true, category: true } }, sentBy: { select: { fullName: true, email: true } }, confirmedBy: { select: { fullName: true, email: true } } },
+      }),
+    ]);
+
+    const itemIds = [...new Set([...requests.map((r) => r.itemId), ...directTransfers.map((t) => t.itemId)])];
+    const [vendors, onHand] = await Promise.all([vendorsByItem(itemIds), itemIds.length ? getOnHandByItemId(itemIds) : Promise.resolve(new Map<string, number>())]);
+    const name = (u: { fullName: string; email: string } | null | undefined) => (u ? u.fullName || u.email : null);
+    const common = (itemId: string) => ({ vendors: vendors.get(itemId) ?? [], warehouseOnHand: onHand.get(itemId) ?? 0 });
+
+    const rows = [
+      ...requests.map((r) => {
+        const tr = r.transfer;
+        const status = r.status === "REJECTED" ? "REJECTED" : r.status === "CANCELLED" ? "CANCELLED" : r.status === "FULFILLED" ? (tr?.confirmedAt ? "RECEIVED" : "ISSUED") : "REQUESTED";
+        return {
+          key: `req-${r.id}`,
+          requestId: r.id,
+          transferId: tr?.id ?? null,
+          itemId: r.itemId,
+          itemName: r.item.name,
+          category: r.item.category,
+          quantity: r.quantity,
+          unit: r.unit,
+          note: r.note,
+          status,
+          requestedAt: r.requestedAt,
+          requestedByName: name(r.requestedBy),
+          issuedAt: tr?.sentAt ?? null,
+          issuedByName: name(tr?.sentBy),
+          receivedAt: tr?.confirmedAt ?? null,
+          receivedByName: name(tr?.confirmedBy),
+          rejectionReason: r.rejectionReason,
+          ...common(r.itemId),
+        };
+      }),
+      ...directTransfers.map((t) => ({
+        key: `tr-${t.id}`,
+        requestId: null,
+        transferId: t.id,
+        itemId: t.itemId,
+        itemName: t.item.name,
+        category: t.item.category,
+        quantity: t.quantity,
+        unit: t.unit,
+        note: t.note,
+        status: t.confirmedAt ? "RECEIVED" : "ISSUED",
+        requestedAt: t.sentAt,
+        requestedByName: null,
+        issuedAt: t.sentAt,
+        issuedByName: name(t.sentBy),
+        receivedAt: t.confirmedAt,
+        receivedByName: name(t.confirmedBy),
+        rejectionReason: null,
+        ...common(t.itemId),
+      })),
+    ].sort((a, b) => b.requestedAt.getTime() - a.requestedAt.getTime());
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- "Material Utilization": for every material that has reached the R&D Store, where it came from, how much came in and when, and what
+// became of it: Testing, Formulation trial, Customer sample (dispatched), Rejected, Returned to the Warehouse, Wastage - and what is left
+// in stock. The R&D ledger is per material, not per lot, so the split is per material; the lots (receipts) and every usage entry are
+// listed alongside. ---
+rndStoreRouter.get("/utilization", requireRole("RND"), async (_req, res, next) => {
+  try {
+    const rows = await prisma.rndStoreTransaction.findMany({
+      where: { deletedAt: null },
+      orderBy: { createdAt: "asc" },
+      take: 10000,
+      include: {
+        item: { select: { id: true, name: true, category: true, unit: true } },
+        customer: { select: { id: true, companyName: true } },
+        transfer: { select: { sentAt: true, confirmedAt: true } },
+      },
+    });
+
+    const byItem = new Map<string, typeof rows>();
+    for (const r of rows) byItem.set(r.itemId, [...(byItem.get(r.itemId) ?? []), r]);
+    const itemIds = [...byItem.entries()].filter(([, list]) => list.some((r) => r.type === "INBOUND")).map(([id]) => id);
+    const warehouseVendors = await vendorsByItem(itemIds);
+    const r3 = (n: number) => Math.round(n * 1000) / 1000;
+
+    const out = itemIds.map((itemId) => {
+      const list = byItem.get(itemId)!;
+      const item = list[0]!.item;
+      const sum = (pick: (r: (typeof rows)[number]) => boolean) => r3(list.filter(pick).reduce((s, r) => s + r.quantity, 0));
+      const lots = list
+        .filter((r) => r.type === "INBOUND")
+        .map((r) => ({
+          id: r.id,
+          receivedAt: r.date ?? r.transfer?.confirmedAt ?? r.createdAt,
+          quantity: r.quantity,
+          unit: r.unit,
+          source: r.transferId ? "Warehouse" : "Direct purchase",
+          vendorName: r.transferId ? null : r.vendorName,
+          invoiceNo: r.invoiceNo,
+          batchNo: r.batchNo,
+          expiryDate: r.expiryDate,
+        }))
+        .sort((a, b) => b.receivedAt.getTime() - a.receivedAt.getTime());
+      const received = sum((r) => r.type === "INBOUND");
+      const testing = sum((r) => r.type === "CONSUMED" && r.consumeReason === "TESTING");
+      const formulation = sum((r) => r.type === "CONSUMED" && r.consumeReason === "FORMULATION_TRIAL");
+      const wastage = sum((r) => r.type === "CONSUMED" && r.consumeReason === "WASTAGE");
+      const rejected = sum((r) => r.type === "CONSUMED" && r.consumeReason === "REJECTED");
+      const customerSample = sum((r) => r.type === "DISPATCHED");
+      const returned = sum((r) => r.type === "RETURNED");
+      const log = list
+        .filter((r) => r.type !== "INBOUND")
+        .map((r) => ({
+          id: r.id,
+          kind: r.type === "DISPATCHED" ? "CUSTOMER_SAMPLE" : r.type === "RETURNED" ? "RETURN" : (r.consumeReason ?? "TESTING"),
+          quantity: r.quantity,
+          unit: r.unit,
+          date: r.date ?? r.transfer?.confirmedAt ?? r.createdAt,
+          projectName: r.projectName,
+          formulationRef: r.formulationRef,
+          batchNo: r.batchNo,
+          customerName: r.customer?.companyName ?? null,
+          brandName: r.brandName,
+          note: r.note,
+        }))
+        .sort((a, b) => b.date.getTime() - a.date.getTime());
+      return {
+        itemId,
+        itemName: item.name,
+        category: item.category,
+        unit: item.unit ?? lots[0]?.unit ?? "",
+        receivedQty: received,
+        firstReceivedAt: lots.length ? lots[lots.length - 1]!.receivedAt : null,
+        lastReceivedAt: lots[0]?.receivedAt ?? null,
+        lots,
+        warehouseVendors: warehouseVendors.get(itemId) ?? [],
+        testingQty: testing,
+        formulationQty: formulation,
+        customerSampleQty: customerSample,
+        rejectedQty: rejected,
+        returnedQty: returned,
+        wastageQty: wastage,
+        stockQty: r3(received - testing - formulation - wastage - rejected - customerSample - returned),
+        log,
+      };
+    });
+    out.sort((a, b) => (b.lastReceivedAt?.getTime() ?? 0) - (a.lastReceivedAt?.getTime() ?? 0));
+    res.json(out);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// --- "Return Material": what R&D sent back to the Warehouse. Sent -> the Warehouse confirms receiving it -> Returned. Each row carries what
+// R&D still has on hand, what the Warehouse has now, and the vendors the material came from. New returns are made with
+// POST /transfers (direction TO_WAREHOUSE), which refuses more than the R&D Store has on hand. ---
+rndStoreRouter.get("/returns", requireRole("RND"), async (_req, res, next) => {
+  try {
+    const transfers = await prisma.rndTransfer.findMany({
+      where: { direction: "TO_WAREHOUSE", deletedAt: null },
+      orderBy: { sentAt: "desc" },
+      take: 1000,
+      include: { item: { select: { id: true, name: true, category: true } }, sentBy: { select: { fullName: true, email: true } }, confirmedBy: { select: { fullName: true, email: true } } },
+    });
+    const itemIds = [...new Set(transfers.map((t) => t.itemId))];
+    const [vendors, warehouse, rnd] = await Promise.all([
+      vendorsByItem(itemIds),
+      itemIds.length ? getOnHandByItemId(itemIds) : Promise.resolve(new Map<string, number>()),
+      itemIds.length ? getRndStoreOnHand(itemIds) : Promise.resolve(new Map<string, number>()),
+    ]);
+    const name = (u: { fullName: string; email: string } | null | undefined) => (u ? u.fullName || u.email : null);
+    res.json(
+      transfers.map((t) => ({
+        id: t.id,
+        itemId: t.itemId,
+        itemName: t.item.name,
+        category: t.item.category,
+        quantity: t.quantity,
+        unit: t.unit,
+        reason: t.note,
+        status: t.confirmedAt ? "RETURNED" : "SENT",
+        sentAt: t.sentAt,
+        sentByName: name(t.sentBy),
+        returnedAt: t.confirmedAt,
+        confirmedByName: name(t.confirmedBy),
+        rndOnHand: rnd.get(t.itemId) ?? 0,
+        warehouseOnHand: warehouse.get(t.itemId) ?? 0,
+        vendors: vendors.get(t.itemId) ?? [],
+      })),
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// What R&D sees while raising a request: what the Warehouse has on hand now, and the vendors this material came from.
+rndStoreRouter.get("/item-info/:itemId", requireRole("RND"), async (req: AuthedRequest<{ itemId: string }>, res, next) => {
+  try {
+    const item = await prisma.inventoryItem.findUnique({ where: { id: req.params.itemId }, select: { id: true, name: true, category: true, unit: true } });
+    if (!item) return res.status(404).json({ error: "Unknown inventory item" });
+    const [vendors, onHand] = await Promise.all([vendorsByItem([item.id]), getOnHandByItemId([item.id])]);
+    res.json({ ...item, warehouseOnHand: onHand.get(item.id) ?? 0, vendors: vendors.get(item.id) ?? [] });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Step 3 — research uses/wastes/rejects part of what's on hand at R&D.
 rndStoreRouter.post("/consume", requireRole("RND"), validateBody(consumeAtRndSchema), async (req: AuthedRequest, res, next) => {
   try {
@@ -443,47 +688,6 @@ rndStoreRouter.post("/consume", requireRole("RND"), validateBody(consumeAtRndSch
     });
 
     await recordAudit({ actorId: req.user!.id, action: "rnd_store.consumed", entityType: "RndStoreTransaction", entityId: txn.id, metadata: { itemId, quantity, reason } });
-    res.status(201).json(txn);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Direct Purchase — R&D buying and receiving material entirely on its
-// own, no Warehouse/Store transfer involved at all (this never creates
-// an InventoryTransaction or touches Warehouse stock — see the
-// vendorName field's own schema.prisma comment). Resolve-or-create the
-// item by (category, itemName), same convention as the bulk request
-// import above — R&D naming something the catalog has never seen is the
-// normal case here, not an edge case. No approval gate: R&D logs it and
-// it's immediately on hand at the R&D Store. Store is only notified for
-// awareness, matching the "so Store/inventory knows about it" ask —
-// nothing for Store to act on or approve.
-rndStoreRouter.post("/direct-purchase", requireRole("RND"), validateBody(rndDirectPurchaseSchema), async (req: AuthedRequest, res, next) => {
-  try {
-    const { category, itemName, quantity, unit, vendorName, date, invoiceNo, batchNo, expiryDate, note } = req.body as RndDirectPurchaseInput;
-
-    let item = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name: itemName } } });
-    if (!item) item = await prisma.inventoryItem.create({ data: { category, name: itemName } });
-
-    const txn = await prisma.rndStoreTransaction.create({
-      data: { itemId: item.id, type: "INBOUND", quantity, unit, vendorName, date: date ?? new Date(), invoiceNo, batchNo, expiryDate, note, createdById: req.user!.id },
-      include: { item: { select: { id: true, category: true, name: true } } },
-    });
-
-    await recordAudit({
-      actorId: req.user!.id,
-      action: "rnd_store.direct_purchase",
-      entityType: "RndStoreTransaction",
-      entityId: txn.id,
-      metadata: { itemId: item.id, quantity, unit, vendorName },
-    });
-    await notifyRoles(
-      ["STORE"],
-      { title: `R&D directly purchased ${item.name}`, body: `${quantity} ${unit} from ${vendorName} — for your inventory records.`, link: "/rnd-store" },
-      req.user!.id,
-    ).catch((err) => req.log?.error({ err }, "notify failed: rnd_store.direct_purchase"));
-
     res.status(201).json(txn);
   } catch (err) {
     next(err);
@@ -586,14 +790,30 @@ rndStoreRouter.get("/stock", requireRole("STORE", "RND"), async (_req, res, next
 // much was genuinely used vs wasted vs rejected in research, how much
 // went straight to a customer, how much came back to the Warehouse, and
 // what's still sitting at the R&D Store right now.
-rndStoreRouter.get("/report", requireRole("STORE", "RND"), async (_req, res, next) => {
+rndStoreRouter.get("/report", requireRole("STORE", "RND"), async (req: AuthedRequest, res, next) => {
   try {
+    const { dateFrom, dateTo } = req.query as { dateFrom?: string; dateTo?: string };
+    // Both ends inclusive — dateTo covers the whole day, not just its
+    // midnight instant, same "calendar date, not timestamp" rule the
+    // rest of this app's date-range filters use. Filtered on createdAt
+    // (when the row was actually logged) rather than the optional,
+    // type-dependent `date` field, so every row type filters uniformly.
+    const dateFilter =
+      dateFrom || dateTo
+        ? {
+            createdAt: {
+              ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+              ...(dateTo ? { lt: new Date(new Date(dateTo).getTime() + 24 * 60 * 60 * 1000) } : {}),
+            },
+          }
+        : {};
+
     const rows = await prisma.rndStoreTransaction.groupBy({
       by: ["itemId", "type", "consumeReason"],
-      where: { deletedAt: null },
+      where: { deletedAt: null, ...dateFilter },
       _sum: { quantity: true },
     });
-    const inboundRows = await prisma.rndStoreTransaction.groupBy({ by: ["itemId"], where: { deletedAt: null, type: "INBOUND" }, _sum: { quantity: true } });
+    const inboundRows = await prisma.rndStoreTransaction.groupBy({ by: ["itemId"], where: { deletedAt: null, type: "INBOUND", ...dateFilter }, _sum: { quantity: true } });
 
     const itemIds = new Set([...rows.map((r) => r.itemId), ...inboundRows.map((r) => r.itemId)]);
     const items = await prisma.inventoryItem.findMany({ where: { id: { in: [...itemIds] } } });
@@ -659,10 +879,16 @@ rndStoreRouter.get("/report", requireRole("STORE", "RND"), async (_req, res, nex
       }
     }
 
+    // onHand is always the live, all-time balance — never scoped to
+    // dateFrom/dateTo — since "how much is physically there right now"
+    // isn't a period metric the way testing/wastage/etc. quantities are;
+    // a date-filtered onHand would silently misreport actual stock.
+    const onHandByItemId = dateFrom || dateTo ? await getRndStoreOnHand([...itemIds]) : null;
+
     res.json(
       [...report.values()].map((r) => ({
         ...r,
-        onHand: r.inboundQty - r.testingQty - r.formulationTrialQty - r.wastageQty - r.rejectedQty - r.dispatchedQty - r.returnedQty,
+        onHand: onHandByItemId ? onHandByItemId.get(r.itemId) ?? 0 : r.inboundQty - r.testingQty - r.formulationTrialQty - r.wastageQty - r.rejectedQty - r.dispatchedQty - r.returnedQty,
       })),
     );
   } catch (err) {

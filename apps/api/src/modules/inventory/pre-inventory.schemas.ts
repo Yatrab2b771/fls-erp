@@ -11,6 +11,8 @@ export const createRequirementSchema = z.object({
   requiredQty: z.coerce.number().positive(),
   size: z.string().max(120).optional(),
   note: z.string().max(500).optional(),
+  // Optional: the customer PO product this requirement is for (picked in the form).
+  purchaseOrderItemId: z.string().uuid().optional(),
 });
 
 // Bulk upload of requirement rows — same resolve-or-create-item pattern
@@ -43,6 +45,18 @@ export const setPurchaseSchema = z.object({
   poNumber: z.string().min(1).max(100),
   vendorName: z.string().min(1).max(200),
   eta: z.coerce.date(),
+  // How much of the shortfall this PI covers. Left out = everything still to log (the
+  // original single-PI flow); when the requirement already has PI lines and no quantity
+  // is sent, the request corrects the latest line instead of adding one.
+  quantity: z.coerce.number().positive().optional(),
+});
+
+// Editing one already-logged PI line (quantity is optional - only sent when it changes).
+export const updatePurchaseLineSchema = z.object({
+  poNumber: z.string().min(1).max(100),
+  vendorName: z.string().min(1).max(200),
+  eta: z.coerce.date(),
+  quantity: z.coerce.number().positive().optional(),
 });
 
 // Bulk upload of PO rows — each row is matched to an existing, still-open
@@ -58,6 +72,8 @@ export const importPurchaseLogSchema = z.object({
         poNumber: z.string().min(1).max(100),
         vendorName: z.string().min(1).max(200),
         eta: z.coerce.date(),
+        // Optional: the quantity this PI covers (default: everything still to log).
+        quantity: z.coerce.number().positive().optional(),
       }),
     )
     .min(1)
@@ -67,4 +83,5 @@ export const importPurchaseLogSchema = z.object({
 export type CreateRequirementInput = z.infer<typeof createRequirementSchema>;
 export type ImportRequirementsInput = z.infer<typeof importRequirementsSchema>;
 export type SetPurchaseInput = z.infer<typeof setPurchaseSchema>;
+export type UpdatePurchaseLineInput = z.infer<typeof updatePurchaseLineSchema>;
 export type ImportPurchaseLogInput = z.infer<typeof importPurchaseLogSchema>;

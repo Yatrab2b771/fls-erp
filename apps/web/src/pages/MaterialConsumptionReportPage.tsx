@@ -6,6 +6,9 @@ import { EmptyState } from "../components/EmptyState";
 import { ItemPicker } from "../components/ItemPicker";
 import { exportMaterialConsumptionReport } from "../lib/inventoryExport";
 import type { MaterialConsumptionRow } from "../lib/types";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
+import { CustomerName } from "../components/CustomerName";
 
 const CATEGORY_LABEL: Record<string, string> = { RM: "Raw Material", PM: "Packaging Material" };
 
@@ -89,6 +92,8 @@ export function MaterialConsumptionReportPage() {
   const poCount = new Set(filteredRows.map((r) => r.poId)).size;
   const isFiltered = !!poId || !!productId || !!itemId || !!purpose || !!dateFrom || !!dateTo;
 
+  const pg = useClientPaging(filteredRows);
+
   return (
     <div className="space-y-5">
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
@@ -124,7 +129,7 @@ export function MaterialConsumptionReportPage() {
         />
         <ItemPicker items={productOptions} value={productId} onChange={setProductId} placeholder="— Filter by product / batch —" />
         <ItemPicker items={itemOptions} value={itemId} onChange={setItemId} placeholder="— Filter by item —" />
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+        <label className="flex flex-col gap-1 text-micro font-bold uppercase tracking-wide text-slate-500">
           Category
           <select value={purpose} onChange={(e) => setPurpose(e.target.value as Purpose | "")} className="field text-xs">
             <option value="">All</option>
@@ -134,11 +139,11 @@ export function MaterialConsumptionReportPage() {
             <option value="REJECTED">Rejected</option>
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+        <label className="flex flex-col gap-1 text-micro font-bold uppercase tracking-wide text-slate-500">
           Date From
           <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="field text-xs" />
         </label>
-        <label className="flex flex-col gap-1 text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+        <label className="flex flex-col gap-1 text-micro font-bold uppercase tracking-wide text-slate-500">
           Date To
           <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="field text-xs" />
         </label>
@@ -168,7 +173,7 @@ export function MaterialConsumptionReportPage() {
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
-              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-[10.5px] font-bold uppercase tracking-wide text-slate-500">
+              <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
                 <th className="px-4 py-3">PO Number</th>
                 <th className="px-4 py-3">Customer</th>
                 <th className="px-4 py-3">Product</th>
@@ -185,12 +190,12 @@ export function MaterialConsumptionReportPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {filteredRows.map((r) => {
+              {pg.rows.map((r) => {
                 const pctConsumed = r.requiredQty ? Math.round((r.consumedQty / r.requiredQty) * 1000) / 10 : null;
                 return (
                   <tr key={`${r.preProductionId}-${r.itemId}`} className="transition hover:bg-slate-50">
                     <td className="px-4 py-3 font-bold text-slate-700">{r.poNumber ?? "—"}</td>
-                    <td className="px-4 py-3 text-slate-500">{r.customerName}</td>
+                    <td className="px-4 py-3 text-slate-500"><CustomerName name={r.customerName} /></td>
                     <td className="px-4 py-3 text-slate-500">{r.productName}</td>
                     <td className="px-4 py-3 text-slate-500">{r.batchNo ?? "—"}</td>
                     <td className="px-4 py-3 font-bold text-slate-700">{r.itemName}</td>
@@ -221,6 +226,7 @@ export function MaterialConsumptionReportPage() {
               })}
             </tbody>
           </table>
+          <ClientPager pg={pg} />
         </div>
       )}
     </div>

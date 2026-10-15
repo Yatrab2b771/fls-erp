@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, BATCH_START } from "./helpers";
 
 const app = createApp();
 
@@ -15,7 +15,7 @@ async function createApprovedPoItem(bdToken: string) {
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
-    .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", quantity: 100, unit: "KG" }] });
+    .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
   return po.body.items[0].id as string;
 }
@@ -94,7 +94,7 @@ describe("Notification wiring — Purchase Orders", () => {
     const po = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 10, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
 
     const bdInbox = await notifsFor(bdToken);
@@ -105,7 +105,7 @@ describe("Notification wiring — Purchase Orders", () => {
     const po2 = await request(app)
       .post("/api/purchase-orders")
       .set(authHeader(bdToken))
-      .send({ customerId: customer.body.id, items: [{ productName: "Medicine B", quantity: 10, unit: "KG" }] });
+      .send({ customerId: customer.body.id, items: [{ productName: "Medicine B", productCategory: "Powder", quantity: 10, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po2.body.id}/review`).set(authHeader(bdToken)).send({ status: "REJECTED", rejectionReason: "Wrong pricing" });
 
     const bdInboxAfterReject = await notifsFor(bdToken);
@@ -145,7 +145,7 @@ describe("Notification wiring — Pre-Production / Combined Lot", () => {
     // sampleQcStatus is literally "Approved" too (see
     // production-batches.routes.ts's own gate).
     await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(adminToken)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
-    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ plannedQty: 100 })).body;
+    const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(productionToken)).send({ outputQty: 100 });
     const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
     const lotId = completed.body.combinedLot.id as string;
@@ -172,7 +172,7 @@ describe("Notification wiring — Inventory", () => {
     expect(rndInbox.notifications.some((n) => n.title.includes("inward QC"))).toBe(true);
 
     await request(app).post("/api/notifications/read-all").set(authHeader(storeToken));
-    await request(app).patch(`/api/inventory/transactions/${txn.body.id}/qc`).set(authHeader(rndToken)).send({ action: "APPROVE" });
+    await request(app).patch(`/api/inventory/transactions/${txn.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
     const storeInbox = await notifsFor(storeToken);
     expect(storeInbox.notifications.some((n) => n.title.includes("QC-approved"))).toBe(true);
   });

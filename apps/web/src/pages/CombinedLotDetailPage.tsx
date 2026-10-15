@@ -12,6 +12,7 @@ import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ApiError, downloadFile } from "../lib/api";
 import type { CombinedLot, CombinedLotStageId } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
 
 // --- Tier 3 of the three-tier production pipeline — see types.ts's own
 // comment block above PreProduction/ProductionBatch/CombinedLot. Created
@@ -64,7 +65,7 @@ export function CombinedLotDetailPage() {
                 <DelayBadge delay={lot.delay} />
               </div>
               <p className="text-sm text-slate-500">
-                {po.customer.companyName} {po.poNumber && `· ${po.poNumber}`} · Combined {lot.preProduction.combinedQty} / {lot.preProduction.plannedQty}
+                <CustomerName name={po.customer.companyName} /> {po.poNumber && `· ${po.poNumber}`} · Combined {lot.preProduction.combinedQty} / {lot.preProduction.plannedQty}
               </p>
             </div>
           </div>
@@ -107,7 +108,7 @@ function StageProgressStrip({ lot }: { lot: CombinedLot }) {
   return (
     <div className="card p-4 sm:p-5">
       {isAdmin && (
-        <p className="mb-2.5 flex items-center gap-1.5 text-[10.5px] font-bold text-slate-400">
+        <p className="mb-2.5 flex items-center gap-1.5 text-micro font-bold text-slate-400">
           <Shuffle className="h-3 w-3" strokeWidth={2.5} /> Admin: click any stage to move this lot there directly.
         </p>
       )}
@@ -115,7 +116,7 @@ function StageProgressStrip({ lot }: { lot: CombinedLot }) {
         {COMBINED_LOT_STAGE_ORDER.map((stage, idx) => {
           const isDone = idx < currentIndex;
           const isCurrent = idx === currentIndex;
-          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10.5px] font-bold whitespace-nowrap ${
+          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-micro font-bold whitespace-nowrap ${
             isCurrent ? "border-brand-300 bg-brand-50 text-brand-700 shadow-soft" : isDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-400"
           }`;
           const icon = isDone ? <Check className="h-3 w-3" strokeWidth={3} /> : isCurrent ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" /> : <Lock className="h-2.5 w-2.5" strokeWidth={2.5} />;
@@ -256,7 +257,7 @@ function CurrentStageCard({ lot }: { lot: CombinedLot }) {
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
           <ClipboardEdit className="h-3.5 w-3.5" /> {COMBINED_LOT_STAGE_LABEL[stage]}
         </h3>
-        <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
           {roleLabel}
         </span>
       </div>
@@ -337,7 +338,7 @@ function BulkReconciliationReadout({ values, saved }: { values: Record<string, s
         <Beaker className="h-3.5 w-3.5" /> Bulk Reconciliation — Yield {"{(b+c)/a×100}"}
       </p>
       <span className={`font-mono text-sm font-black ${yieldPct >= 99 ? "text-emerald-700" : "text-amber-700"}`}>{yieldPct}%</span>
-      <span className="text-[10.5px] font-semibold text-violet-600">{yieldPct >= 99 ? "Meets NLT 99.0%" : "Below the doc's NLT 99.0% floor"}</span>
+      <span className="text-micro font-semibold text-violet-600">{yieldPct >= 99 ? "Meets NLT 99.0%" : "Below the doc's NLT 99.0% floor"}</span>
       {processLoss !== null && <span className="font-mono text-xs text-slate-500">Process loss: {processLoss}</span>}
     </div>
   );
@@ -423,7 +424,7 @@ function CoaPanel({ lot }: { lot: CombinedLot }) {
       </div>
 
       <div className="space-y-2 bg-white p-3">
-        <div className="flex items-center gap-2 px-1 text-[9px] font-bold uppercase tracking-wide text-slate-400">
+        <div className="flex items-center gap-2 px-1 text-micro font-bold uppercase tracking-wide text-slate-400">
           <span className="flex-1">Test Parameter</span>
           <span className="w-40">Specification</span>
           <span className="w-40">Observation</span>
@@ -550,7 +551,7 @@ function StageHistory({ lot }: { lot: CombinedLot }) {
                 {COMBINED_LOT_STAGE_LABEL[e.fromStageId]} <span className="text-slate-300">→</span> {COMBINED_LOT_STAGE_LABEL[e.toStageId]}
               </p>
               {e.note && <p className="mt-0.5 text-xs text-slate-500">{e.note}</p>}
-              <p className="mt-0.5 text-[10px] text-slate-400">
+              <p className="mt-0.5 text-micro text-slate-400">
                 {e.actorName} · {new Date(e.createdAt).toLocaleString()}
               </p>
             </div>

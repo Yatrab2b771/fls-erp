@@ -345,7 +345,7 @@ export function parseRequirementWorkbook(buffer: ArrayBuffer, defaultCategory: "
 // category. No Date/Unit column here (a PO isn't a delivery), but PO
 // Number / Vendor / ETA are all required, same as the single Log PO form. ---
 
-const PO_NUMBER_COLUMNS = ["PO Number", "PO No", "PO"];
+const PO_NUMBER_COLUMNS = ["PI Number", "PI No", "PI", "PO Number", "PO No", "PO"];
 const ETA_COLUMNS = ["ETA", "Expected Date", "Delivery Date"];
 
 export interface ImportPurchaseLogRow {
@@ -354,6 +354,8 @@ export interface ImportPurchaseLogRow {
   poNumber: string;
   vendorName: string;
   eta: string;
+  // Optional: how much of the shortfall this PI covers (left out = everything still to log).
+  quantity?: number;
 }
 
 export interface ParsedPurchaseLogImport {
@@ -386,11 +388,19 @@ export function parsePurchaseLogWorkbook(buffer: ArrayBuffer, defaultCategory: "
 
       const category = normalizeCategory(asText(row, CATEGORY_COLUMNS), defaultCategory);
 
-      rows.push({ itemName, category, poNumber, vendorName, eta });
+      // An optional Quantity column splits a shortfall across several PIs (one row per PI).
+      const quantity = parsePositiveNumber(firstNonEmpty(row, ["Quantity", "Qty", "PI Qty", "PI Quantity"]));
+      rows.push({ itemName, category, poNumber, vendorName, eta, ...(quantity !== undefined ? { quantity } : {}) });
     }
   }
 
   return { rows, skipped, sheetNames: workbook.SheetNames, detectedHeaders: [...detectedHeaders] };
+}
+
+function parsePositiveNumber(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const n = typeof raw === "number" ? raw : Number(String(raw).replace(/,/g, "").trim());
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 // --- Item Master import ("SKU Namkaran") — the naming-reconciliation

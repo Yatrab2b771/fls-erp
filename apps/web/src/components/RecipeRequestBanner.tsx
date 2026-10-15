@@ -73,7 +73,7 @@ export function RecipeRequestBanner({ purchaseOrderItemId }: { purchaseOrderItem
               ? `Awaiting R&D — ETA ${new Date(request.etaDate).toLocaleDateString()}`
               : "Awaiting R&D — no ETA given yet"}
         </p>
-        {request.etaNote && <p className="mt-0.5 pl-5 text-[11px] text-amber-600">{request.etaNote}</p>}
+        {request.etaNote && <p className="mt-0.5 pl-5 text-tiny text-amber-600">{request.etaNote}</p>}
       </div>
       {isRnd && (
         <Link to="/rnd" className="btn-primary btn-sm shrink-0">

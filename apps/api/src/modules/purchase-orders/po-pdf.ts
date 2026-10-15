@@ -17,6 +17,8 @@ type PoForPdf = {
   reviewedBy: { fullName: string } | null;
   items: {
     productName: string;
+    cancelledAt?: Date | null;
+    productCategory: string | null;
     dosageForm: string | null;
     quantity: number;
     unit: string;
@@ -75,8 +77,10 @@ export function buildPurchaseOrderPdf(po: PoForPdf): PDFKit.PDFDocument {
   doc.fillColor("#000000");
 
   const itemRows = po.items.map((i) => [
-    i.productName,
-    i.dosageForm ?? "—",
+    i.cancelledAt ? `${i.productName} (CANCELLED)` : i.productName,
+    // Older lines predate Product Category — fall back to their free-text
+    // dosage form so a reprinted old PO doesn't lose that column's value.
+    i.productCategory ?? i.dosageForm ?? "—",
     `${i.quantity} ${i.unit}`,
     i.volume != null ? String(i.volume) : "—",
     i.packSize ?? "—",
@@ -92,7 +96,7 @@ export function buildPurchaseOrderPdf(po: PoForPdf): PDFKit.PDFDocument {
       startY: doc.y + 8,
       columns: [
         { header: "Product", width: 150 },
-        { header: "Dosage Form", width: 80 },
+        { header: "Product Category", width: 80 },
         { header: "Quantity", width: 80, align: "right" },
         { header: "Volume", width: 60, align: "right" },
         { header: "Pack Size", width: 60 },

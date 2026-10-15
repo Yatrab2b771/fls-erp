@@ -11,7 +11,10 @@ const EXPECTED_DELIVERY_DATE_COLUMNS = ["Expected Delivery Date", "Delivery Date
 const REGULATORY_BODY_COLUMNS = ["Regulatory Body", "Reg Body", "Body"];
 const REGULATORY_STATUS_COLUMNS = ["Regulatory Status", "Reg Status", "Status"];
 const PRODUCT_COLUMNS = ["Product Name", "Product", "Item"];
-const DOSAGE_FORM_COLUMNS = ["Dosage Form", "Dosage"];
+// Product Category replaced the old free-text Dosage Form column — an older
+// sheet that still uses the "Dosage Form" header is read as the category so
+// it keeps working, as long as its values are real category names.
+const PRODUCT_CATEGORY_COLUMNS = ["Product Category", "Product Type", "Category", "Dosage Form", "Dosage"];
 const QUANTITY_COLUMNS = ["Quantity", "Qty", "Count"];
 const UNIT_COLUMNS = ["Unit"];
 const VOLUME_COLUMNS = ["Volume"];
@@ -67,7 +70,7 @@ export interface ImportPurchaseOrderRow {
   regulatoryBody?: string;
   regulatoryStatus?: string;
   productName: string;
-  dosageForm?: string;
+  productCategory: string;
   quantity: number;
   unit: string;
   volume?: number;
@@ -100,11 +103,12 @@ export function parsePurchaseOrderWorkbook(buffer: ArrayBuffer): ParsedPurchaseO
       const poNumber = asText(row, PO_NUMBER_COLUMNS);
       const customerName = asText(row, CUSTOMER_COLUMNS);
       const productName = asText(row, PRODUCT_COLUMNS);
+      const productCategory = asText(row, PRODUCT_CATEGORY_COLUMNS);
       const unit = asText(row, UNIT_COLUMNS);
       const quantityRaw = firstNonEmpty(row, QUANTITY_COLUMNS);
       const quantity = quantityRaw === undefined ? NaN : Number(quantityRaw);
 
-      if (!poNumber || !customerName || !productName || !unit || !Number.isFinite(quantity) || quantity <= 0) {
+      if (!poNumber || !customerName || !productName || !productCategory || !unit || !Number.isFinite(quantity) || quantity <= 0) {
         skipped += 1;
         continue;
       }
@@ -120,7 +124,7 @@ export function parsePurchaseOrderWorkbook(buffer: ArrayBuffer): ParsedPurchaseO
         regulatoryBody: matchEnum(asText(row, REGULATORY_BODY_COLUMNS), REGULATORY_BODIES),
         regulatoryStatus: matchEnum(asText(row, REGULATORY_STATUS_COLUMNS), REGULATORY_STATUSES),
         productName,
-        dosageForm: asText(row, DOSAGE_FORM_COLUMNS),
+        productCategory,
         quantity,
         unit,
         volume: Number.isFinite(volume) && volume! > 0 ? volume : undefined,
@@ -142,7 +146,7 @@ export function downloadPurchaseOrderImportTemplate() {
       "Regulatory Body": "FSSAI",
       "Regulatory Status": "Applied",
       "Product Name": "Whey Protein Powder",
-      "Dosage Form": "Powder",
+      "Product Category": "Powder",
       Quantity: 500,
       Unit: "KG",
       Volume: "",
@@ -156,7 +160,7 @@ export function downloadPurchaseOrderImportTemplate() {
       "Regulatory Body": "",
       "Regulatory Status": "",
       "Product Name": "Multivitamin Capsules",
-      "Dosage Form": "Capsule",
+      "Product Category": "Capsule",
       Quantity: 2000,
       Unit: "SKU",
       Volume: "",
@@ -170,7 +174,7 @@ export function downloadPurchaseOrderImportTemplate() {
       "Regulatory Body": "",
       "Regulatory Status": "",
       "Product Name": "",
-      "Dosage Form": "",
+      "Product Category": "",
       Quantity: "",
       Unit: "",
       Volume: "",

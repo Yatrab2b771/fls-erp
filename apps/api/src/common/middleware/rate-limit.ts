@@ -13,7 +13,8 @@ import type { Request } from "express";
 // victim's own. req.ip is already the real client IP here, not the
 // proxy's — see app.set("trust proxy", 1) in app.ts.
 function loginKey(req: Request): string {
-  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const raw = req.body?.login ?? req.body?.email;
+  const email = typeof raw === "string" ? raw.trim().toLowerCase() : "";
   return `${req.ip ?? "unknown"}:${email}`;
 }
 

@@ -2,11 +2,21 @@ import type { NextFunction, ParamsDictionary, Request, Response } from "express-
 import { verifyAccessToken } from "../lib/jwt";
 import { prisma } from "../lib/prisma";
 import type { RoleName } from "@prisma/client";
+import { viewScopeStore, type ViewScope } from "../lib/view-scope";
 
 // Generic over route params so `req.params.foo` types as `string`, not the
 // library's default `string | string[]` fallback.
 export interface AuthedRequest<P extends ParamsDictionary = ParamsDictionary> extends Request<P> {
   user?: { id: string; roles: RoleName[] };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function parseViewScope(raw: string | string[] | undefined): ViewScope | undefined {
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  const m = v?.match(/^(DAYSTORE|PLANT):(.+)$/);
+  if (!m || !UUID.test(m[2]!)) return undefined;
+  return m[1] === "DAYSTORE" ? { dayStoreIds: [m[2]!] } : { plantIds: [m[2]!] };
 }
 
 /**
@@ -28,6 +38,9 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
       return res.status(401).json({ error: "Invalid or expired token" });
     }
     req.user = { id: payload.sub, roles: payload.roles };
+    // An admin viewing as one Day Store / Plant: scope this request like that store's / plant's own login.
+    const scope = payload.roles.includes("ADMIN") ? parseViewScope(req.headers["x-view-as-scope"]) : undefined;
+    if (scope) return viewScopeStore.run(scope, () => next());
     next();
   } catch {
     return res.status(401).json({ error: "Invalid or expired token" });

@@ -7,6 +7,8 @@ import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import { useGiveRecipeRequestEta, useRecipeRequests } from "../lib/hooks";
 import type { RecipeRequest } from "../lib/types";
+import { ExpandTable } from "../components/ExpandTable";
+import { CustomerName } from "../components/CustomerName";
 
 // R&D's home page — tracking what PPIC has asked for that has no
 // Recipe/BOM yet, and giving an ETA on each. Authoring the catalog data
@@ -52,7 +54,7 @@ export function RndPage() {
 
       <div className="space-y-4">
         <div>
-          <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+          <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
             <Clock className="h-3.5 w-3.5" /> {canManage ? "Open Requests" : "My Open Requests"} ({openRequests.length})
           </h2>
           {isLoading ? (
@@ -65,31 +67,55 @@ export function RndPage() {
               accent="emerald"
             />
           ) : (
-            <div className="space-y-3">
-              {openRequests.map((r) => (
-                <RequestCard key={r.id} request={r} canManage={canManage} />
-              ))}
-            </div>
+            <ExpandTable
+              rows={openRequests}
+              rowKey={(r) => r.id}
+              openLabel={canManage ? "Open / give ETA" : "Open"}
+              renderExpanded={(r) => <RequestCard request={r} canManage={canManage} />}
+              columns={[
+                { header: "Product", cell: (r) => r.productName, className: "font-bold text-slate-800" },
+                { header: "Customer", cell: (r) => r.customerName ?? "-" },
+                { header: "PO", cell: (r) => r.poNumber ?? "-" },
+                { header: "Needed", cell: (r) => [r.bomNeeded && "BOM/SKU", r.rmNeeded && "Recipe"].filter(Boolean).join(" + ") || "-" },
+                { header: "Status", cell: (r) => <span className="pill border-amber-200 bg-amber-50 text-amber-700">{r.status === "ETA_GIVEN" ? "ETA given" : "Waiting for R&D"}</span> },
+                { header: "ETA", cell: (r) => (r.etaDate ? new Date(r.etaDate).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-") },
+                { header: "ETA Note", cell: (r) => r.etaNote ?? "-", className: "max-w-[16rem] truncate" },
+                { header: "Requested By", cell: (r) => `${r.requestedByName} · ${new Date(r.requestedAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })}` },
+              ]}
+            />
           )}
         </div>
 
         {readyRequests.length > 0 && (
           <div>
-            <h2 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+            <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
               <CheckCircle2 className="h-3.5 w-3.5" /> Delivered ({readyRequests.length})
             </h2>
-            <div className="space-y-2">
-              {readyRequests.map((r) => (
-                <div key={r.id} className="card flex items-center justify-between p-3.5">
-                  <div>
-                    <p className="text-xs font-bold text-slate-700">{r.productName}</p>
-                    <p className="text-[10px] text-slate-400">
-                      {r.poNumber ?? "PO"} · delivered {r.readyAt ? new Date(r.readyAt).toLocaleDateString() : ""}
-                    </p>
-                  </div>
-                  <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Ready</span>
-                </div>
-              ))}
+            <div className="card overflow-x-auto">
+              <table className="w-full whitespace-nowrap text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
+                    <th className="px-4 py-3">Product</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Customer</th>
+                    <th className="px-4 py-3">PO</th>
+                    <th className="px-4 py-3">Delivered</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {readyRequests.map((r) => (
+                    <tr key={r.id} className="transition hover:bg-slate-50">
+                      <td className="px-4 py-3 font-bold text-slate-800">{r.productName}</td>
+                      <td className="px-4 py-3">
+                        <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Ready</span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600"><CustomerName name={r.customerName} /></td>
+                      <td className="px-4 py-3 text-slate-600">{r.poNumber ?? "-"}</td>
+                      <td className="px-4 py-3 text-slate-600">{r.readyAt ? new Date(r.readyAt).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
@@ -125,12 +151,16 @@ function RequestCard({ request, canManage }: { request: RecipeRequest; canManage
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <p className="text-xs font-bold text-slate-700">{request.productName}</p>
-          <p className="text-[10px] text-slate-400">
-            {request.customerName && <>{request.customerName} · </>}
+          <p className="text-micro text-slate-400">
+            {request.customerName && (
+          <>
+            <CustomerName name={request.customerName} /> ·{" "}
+          </>
+        )}
             Needs: {needed}
             {canManage && <> · requested by {request.requestedByName}</>}
           </p>
-          <Link to={`/purchase-orders/${request.purchaseOrderId}`} className="text-[10px] font-bold text-violet-600 hover:underline">
+          <Link to={`/purchase-orders/${request.purchaseOrderId}`} className="text-micro font-bold text-violet-600 hover:underline">
             {request.poNumber ?? "View PO"}
           </Link>
         </div>
@@ -140,7 +170,7 @@ function RequestCard({ request, canManage }: { request: RecipeRequest; canManage
       </div>
 
       {request.status === "ETA_GIVEN" && request.etaDate && (
-        <p className="text-[11px] text-slate-500">
+        <p className="text-tiny text-slate-500">
           ETA: <span className="font-bold text-slate-700">{new Date(request.etaDate).toLocaleDateString()}</span>
           {request.etaNote && <> — {request.etaNote}</>}
         </p>

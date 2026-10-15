@@ -43,7 +43,7 @@
 @layer components {
   /* --- Buttons --- */
   .btn {
-    @apply relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-2.5 text-[13px] font-bold tracking-tight transition-all duration-150 ease-out disabled:pointer-events-none disabled:opacity-40;
+    @apply relative inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl px-4 py-2.5 text-body font-bold tracking-tight transition-all duration-150 ease-out disabled:pointer-events-none disabled:opacity-40;
   }
   .btn-primary {
     @apply btn bg-gradient-to-b from-brand-600 to-brand-700 text-white shadow-[0_1px_0_rgba(255,255,255,.15)_inset,0_4px_12px_-2px_rgba(79,70,229,.5)] hover:shadow-[0_1px_0_rgba(255,255,255,.15)_inset,0_6px_18px_-2px_rgba(79,70,229,.6)] hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_0_rgba(255,255,255,.1)_inset,0_2px_6px_-2px_rgba(79,70,229,.5)];
@@ -55,7 +55,7 @@
     @apply btn border border-rose-200 bg-rose-50 text-rose-600 hover:border-rose-300 hover:bg-rose-100;
   }
   .btn-sm {
-    @apply px-3 py-1.5 text-[11px];
+    @apply px-3 py-1.5 text-tiny;
   }
   .btn-icon {
     @apply inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700;
@@ -63,13 +63,13 @@
 
   /* --- Form fields --- */
   .field {
-    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-[13px] font-medium text-slate-800 shadow-soft outline-none transition-all duration-150 placeholder:text-slate-400 focus:border-brand-400 focus:shadow-[0_0_0_4px_rgba(99,102,241,.12)];
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-body font-medium text-slate-800 shadow-soft outline-none transition-all duration-150 placeholder:text-slate-400 focus:border-brand-400 focus:shadow-[0_0_0_4px_rgba(99,102,241,.12)];
   }
   .field:disabled {
     @apply cursor-not-allowed border-slate-100 bg-slate-50 text-slate-400 shadow-none;
   }
   .label {
-    @apply mb-1.5 block text-[10.5px] font-bold uppercase tracking-wider text-slate-400;
+    @apply mb-1.5 block text-micro font-bold uppercase tracking-wider text-slate-400;
   }
 
   /* --- Surfaces --- */
@@ -93,7 +93,7 @@
 
   /* --- Badges / pills --- */
   .pill {
-    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide;
+    @apply inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-micro font-bold uppercase tracking-wide;
   }
 
   /* --- Tables --- */
@@ -102,13 +102,13 @@
      into a guess. Sticks to the top of its own scroll container, so a
      table inside a card still behaves. */
   .table-modern thead {
-    @apply sticky top-0 z-10 bg-slate-50/95 text-[10px] font-bold uppercase tracking-wider text-slate-400 backdrop-blur-sm;
+    @apply sticky top-0 z-10 bg-slate-50/95 text-micro font-bold uppercase tracking-wider text-slate-400 backdrop-blur-sm;
   }
   .table-modern th {
     @apply px-4 py-3 text-left;
   }
   .table-modern td {
-    @apply px-4 py-3 text-[13px];
+    @apply px-4 py-3 text-body;
   }
   .table-modern tbody tr {
     @apply border-t border-slate-100 transition-colors hover:bg-brand-50/40;
@@ -117,7 +117,7 @@
   /* --- Section heading — the label above a group of cards/fields, so a
      long page reads as sections instead of one undifferentiated column. --- */
   .section-title {
-    @apply flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.12em] text-slate-400;
+    @apply flex items-center gap-2 text-tiny font-black uppercase tracking-[0.12em] text-slate-400;
   }
 
   /* --- Key figure — the one number a tile exists to show. Tabular by

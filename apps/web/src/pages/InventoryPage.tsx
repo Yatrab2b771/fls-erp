@@ -43,11 +43,8 @@ import {
   useConfirmDispatch,
   useCreateDayStore,
   useCreateDispatchTransfer,
-  useCreateInventoryItem,
   useCreateInventoryRequest,
-  useCreateInventoryTransaction,
   useConfirmDelivery,
-  useCreatePlant,
   useCustomers,
   useDayStoreAssignments,
   useDayStores,
@@ -62,12 +59,11 @@ import {
   useImportItemMaster,
   useInventoryItems,
   useInventoryRequests,
-  useInventoryStock,
+  useInventoryStockSummary,
   useFgStock,
   useQuarantineStock,
   useReleaseExpiry,
   useInventoryTransactions,
-  useInventoryVendors,
   useInvoiceDispatchTransfer,
   useIssueInventoryRequest,
   useMaterialReconciliation,
@@ -84,7 +80,6 @@ import {
   useTransit,
   useUnassignDayStoreUser,
   useUpdateInventoryTransaction,
-  useVendors,
   useWarehouses,
 } from "../lib/hooks";
 import type {
@@ -107,6 +102,7 @@ import type {
   Warehouse as WarehouseLocation,
 } from "../lib/types";
 import { PickerWithAdd } from "../components/PickerWithAdd";
+import { LogEntryForm } from "../components/LogEntryForm";
 import { ItemPicker } from "../components/ItemPicker";
 import { parseDispatchTransferWorkbook, parseInventoryRequestWorkbook, parseInventoryTransactionWorkbook, parseItemMasterWorkbook } from "../lib/inventoryImport";
 import {
@@ -126,7 +122,9 @@ import {
   exportTransactionReport,
   exportTransitReport,
 } from "../lib/inventoryExport";
-import { ApiError, api, downloadFile } from "../lib/api";
+import { ApiError, api, apiAll, downloadFile } from "../lib/api";
+import { usePagedList } from "../lib/usePagedList";
+import { Pagination } from "../components/Pagination";
 import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
 import type { CustomerReconciliationRow, ItemStockByLocation } from "../lib/types";
 import { StatTile } from "../components/StatTile";
@@ -135,6 +133,11 @@ import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { useToast } from "../components/Toast";
 import { RequestStatusBadge } from "../components/Badges";
+import { ReceivedTable } from "../components/ReceivedTable";
+import { ExpandTable } from "../components/ExpandTable";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
+import { CustomerName } from "../components/CustomerName";
 
 // Calendar bound for every Mfg Date/Expiry Date pair in this file — Mfg
 // Date can't be later than today, Expiry Date can't be before Mfg Date
@@ -232,7 +235,7 @@ function QuickAddDayStore({ onCreated }: { onCreated: (id: string) => void }) {
     <div className="flex items-center gap-1.5">
       <input
         autoFocus
-        className="field w-36 px-2 py-1.5 text-[11px]"
+        className="field w-36 px-2 py-1.5 text-tiny"
         placeholder="Store name"
         value={name}
         onChange={(e) => setName(e.target.value)}
@@ -240,60 +243,6 @@ function QuickAddDayStore({ onCreated }: { onCreated: (id: string) => void }) {
       />
       <button type="button" className="btn-primary btn-sm" disabled={createDayStore.isPending} onClick={handleCreate}>
         {createDayStore.isPending ? "…" : "Add"}
-      </button>
-      <button
-        type="button"
-        className="btn-ghost btn-sm"
-        onClick={() => {
-          setShow(false);
-          setName("");
-        }}
-      >
-        Cancel
-      </button>
-    </div>
-  );
-}
-
-// Same as QuickAddDayStore, for Plants — the Stock on Hand Location
-// dropdown covers both, so both need their own quick-create.
-function QuickAddPlant({ onCreated }: { onCreated: (id: string) => void }) {
-  const toast = useToast();
-  const createPlant = useCreatePlant();
-  const [show, setShow] = useState(false);
-  const [name, setName] = useState("");
-
-  async function handleCreate() {
-    if (!name.trim()) return;
-    try {
-      const created = await createPlant.mutateAsync(name.trim());
-      onCreated(created.id);
-      setShow(false);
-      setName("");
-    } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not create plant — it may already exist.");
-    }
-  }
-
-  if (!show) {
-    return (
-      <button type="button" className="btn-ghost btn-sm" onClick={() => setShow(true)} title="Add a new Plant">
-        <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New Plant
-      </button>
-    );
-  }
-  return (
-    <div className="flex items-center gap-1.5">
-      <input
-        autoFocus
-        className="field w-36 px-2 py-1.5 text-[11px]"
-        placeholder="Plant name"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-      />
-      <button type="button" className="btn-primary btn-sm" disabled={createPlant.isPending} onClick={handleCreate}>
-        {createPlant.isPending ? "…" : "Add"}
       </button>
       <button
         type="button"
@@ -349,7 +298,7 @@ function RenameDayStore({ dayStore }: { dayStore: DayStore }) {
   }
   return (
     <div className="flex items-center gap-1.5">
-      <input autoFocus className="field w-36 px-2 py-1.5 text-[11px]" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+      <input autoFocus className="field w-36 px-2 py-1.5 text-tiny" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
       <button type="button" className="btn-primary btn-sm" disabled={renameDayStore.isPending} onClick={handleSave}>
         {renameDayStore.isPending ? "…" : "Save"}
       </button>
@@ -408,12 +357,12 @@ function StoreAssignmentPanel({ dayStore }: { dayStore: DayStore }) {
 
       {show && (
         <div className="animate-scale-in absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-lift">
-          <p className="mb-2 text-[11px] font-bold text-slate-500">
+          <p className="mb-2 text-tiny font-bold text-slate-500">
             {assignments?.length ? "Only these users can manage this store:" : "Nobody's assigned yet — every Store user can manage this store."}
           </p>
           <div className="mb-2 flex flex-wrap gap-1.5">
             {(assignments ?? []).map((a) => (
-              <span key={a.userId} className="flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-2 py-1 text-[11px] font-bold text-brand-700">
+              <span key={a.userId} className="flex items-center gap-1 rounded-full border border-brand-200 bg-brand-50 px-2 py-1 text-tiny font-bold text-brand-700">
                 {a.user.fullName}
                 <button type="button" onClick={() => handleUnassign(a.userId, a.user.fullName)} title="Remove" className="hover:text-rose-600">
                   <X className="h-3 w-3" strokeWidth={2.5} />
@@ -473,7 +422,7 @@ function RenamePlant({ plant }: { plant: Plant }) {
   }
   return (
     <div className="flex items-center gap-1.5">
-      <input autoFocus className="field w-36 px-2 py-1.5 text-[11px]" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+      <input autoFocus className="field w-36 px-2 py-1.5 text-tiny" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
       <button type="button" className="btn-primary btn-sm" disabled={renamePlant.isPending} onClick={handleSave}>
         {renamePlant.isPending ? "…" : "Save"}
       </button>
@@ -523,7 +472,7 @@ function RenameWarehouse({ warehouse }: { warehouse: WarehouseLocation }) {
   }
   return (
     <div className="flex items-center gap-1.5">
-      <input autoFocus className="field w-36 px-2 py-1.5 text-[11px]" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
+      <input autoFocus className="field w-36 px-2 py-1.5 text-tiny" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSave()} />
       <button type="button" className="btn-primary btn-sm" disabled={renameWarehouse.isPending} onClick={handleSave}>
         {renameWarehouse.isPending ? "…" : "Save"}
       </button>
@@ -536,7 +485,7 @@ function RenameWarehouse({ warehouse }: { warehouse: WarehouseLocation }) {
 
 // ISSUED_RND deliberately excluded — that ledger has its own page
 // (/rnd-store), not a tab here.
-type ViewTab = "stock" | "fg-stock" | "quarantine" | Exclude<InventoryTxnType, "ISSUED_RND"> | DispatchTransferType | "requests" | "transit" | "reconciliation";
+type ViewTab = "stock" | "fg-stock" | "quarantine" | Exclude<InventoryTxnType, "ISSUED_RND" | "ISSUED_PRODUCTION"> | DispatchTransferType | "requests" | "transit" | "reconciliation";
 
 const MATERIAL_TABS: { key: ViewTab; label: string; icon: typeof Warehouse }[] = [
   { key: "stock", label: "Stock on Hand", icon: Warehouse },
@@ -544,7 +493,6 @@ const MATERIAL_TABS: { key: ViewTab; label: string; icon: typeof Warehouse }[] =
   { key: "quarantine", label: "Quarantine Store", icon: ShieldAlert },
   { key: "RECEIVED", label: "Material Received", icon: ArrowDownToLine },
   { key: "ISSUED_DAY_STORE", label: "Issued to Store", icon: ArrowUpFromLine },
-  { key: "ISSUED_PRODUCTION", label: "Issued to Production", icon: ArrowUpFromLine },
   { key: "requests", label: "Material Requests", icon: ClipboardList },
   { key: "transit", label: "Transit", icon: Route },
   { key: "reconciliation", label: "Reconciliation", icon: Scale },
@@ -611,7 +559,6 @@ export function InventoryPage() {
     // the two Issued tabs, those stay Store's own ledger.
     RECEIVED: canWrite || canInwardQc || canInvoice || canRequest,
     ISSUED_DAY_STORE: canWrite,
-    ISSUED_PRODUCTION: canWrite,
     requests: canWrite || canRequest,
     // PRODUCTION + RND both belong here too — see canSeeTransit/
     // canInwardQc above, matching GET /transit's own role list exactly.
@@ -685,25 +632,50 @@ export function InventoryPage() {
   const isTransitTab = tab === "transit";
   const isReconciliationTab = tab === "reconciliation";
   const materialTab = !dispatchTab && !isRequestsTab && !isTransitTab && !isReconciliationTab && tab !== "stock";
-  const canLogDirectly = materialTab && tab !== "ISSUED_PRODUCTION" && tab !== "RECEIVED"; // Issued to Day Store only — Received now goes through the QC/accept flow too, but Store still logs the initial entry via this same form
+  const canLogDirectly = materialTab && tab !== "RECEIVED"; // Issued to Day Store only — Received now goes through the QC/accept flow too, but Store still logs the initial entry via this same form
 
   const { data: transit, isLoading: transitLoading } = useTransit({ enabled: isTransitTab });
   const confirmDelivery = useConfirmDelivery();
   const { data: materialReconciliation, isLoading: materialReconciliationLoading } = useMaterialReconciliation(undefined, { enabled: isReconciliationTab });
 
-  const { data: stock, isLoading: stockLoading } = useInventoryStock(undefined, { enabled: tabVisible.stock });
+  // Stock on Hand and the material ledgers can run to thousands of rows, so the
+  // tables page through the server (search + paging are server-side); the tiles
+  // come from a summary call over every item instead of the page on screen.
+  const stockPaged = usePagedList<InventoryStockLine>({
+    key: ["inventory", "stock", "paged"],
+    path: "/api/inventory/stock",
+    prefix: "st_",
+    enabled: tabVisible.stock && tab === "stock" && !stockLocation,
+  });
+  const stock = stockPaged.rows;
+  const stockLoading = stockPaged.isLoading;
+  const { data: stockSummary } = useInventoryStockSummary(stockWarehouseId ? selectedWarehouse?.category : undefined, {
+    enabled: tabVisible.stock && !stockDayStoreId && !stockPlantId && (!stockWarehouseId || !!selectedWarehouse),
+  });
   // A Warehouse's "stock" is just this same query, filtered to its own
   // category — kept as a separate call (rather than reusing `stock`
   // above) so the StatTiles above stay company-wide even while a
   // Warehouse is selected in the Location picker.
-  const { data: warehouseStock, isLoading: warehouseStockLoading } = useInventoryStock(selectedWarehouse?.category, {
-    enabled: tabVisible.stock && !!stockWarehouseId,
+  const whPaged = usePagedList<InventoryStockLine>({
+    key: ["inventory", "stock", "paged", "warehouse"],
+    path: "/api/inventory/stock",
+    params: { category: selectedWarehouse?.category },
+    prefix: "wh_",
+    enabled: tabVisible.stock && tab === "stock" && !!stockWarehouseId && !!selectedWarehouse,
   });
+  const warehouseStock = whPaged.rows;
+  const warehouseStockLoading = whPaged.isLoading;
   const { data: fgStock, isLoading: fgStockLoading } = useFgStock({ enabled: tabVisible["fg-stock"] && tab === "fg-stock" });
   const { data: quarantineStock, isLoading: quarantineLoading } = useQuarantineStock({ enabled: tabVisible.quarantine && tab === "quarantine" });
-  const { data: transactions, isLoading: txnLoading } = useInventoryTransactions(materialTab ? { type: tab as InventoryTxnType } : undefined, {
+  const txnPaged = usePagedList<InventoryTransaction>({
+    key: ["inventory", "transactions", "paged"],
+    path: "/api/inventory/transactions",
+    params: { type: materialTab ? tab : undefined },
+    prefix: "tx_",
     enabled: materialTab && tabVisible[tab],
   });
+  const transactions = txnPaged.rows;
+  const txnLoading = txnPaged.isLoading;
   const { data: dispatchTransfers, isLoading: dispatchLoading } = useDispatchTransfers(dispatchTab ? { type: tab } : undefined, {
     enabled: dispatchTab && (tab === "FG" ? canWrite || canQc || canDispatch || canInvoice || canRequest : canWrite),
   });
@@ -719,15 +691,9 @@ export function InventoryPage() {
   // in the Stock on Hand tab (Warehouse/Plant/Day Store), same as the
   // table below it — "2237" company-wide no longer shows once a specific
   // Warehouse is selected; it becomes that Warehouse's own item count.
-  const activeOnHands: number[] = stockDayStoreId
-    ? (dayStoreStock?.stock.map((s) => s.onHand) ?? [])
-    : stockPlantId
-      ? (plantStock?.stock.map((s) => s.onHand) ?? [])
-      : stockWarehouseId
-        ? (warehouseStock?.map((s) => s.onHand) ?? [])
-        : (stock?.map((s) => s.onHand) ?? []);
-  const itemsTracked = activeOnHands.length;
-  const negativeStock = activeOnHands.filter((v) => v < 0).length;
+  const localOnHands: number[] | null = stockDayStoreId ? (dayStoreStock?.stock.map((s) => s.onHand) ?? []) : stockPlantId ? (plantStock?.stock.map((s) => s.onHand) ?? []) : null;
+  const itemsTracked = localOnHands ? localOnHands.length : (stockSummary?.itemsTracked ?? 0);
+  const negativeStock = localOnHands ? localOnHands.filter((v) => v < 0).length : (stockSummary?.negativeStock ?? 0);
   const itemsTrackedLabel = stockDayStoreId
     ? `Items — ${dayStores?.find((d) => d.id === stockDayStoreId)?.name ?? "Store"}`
     : stockPlantId
@@ -737,7 +703,7 @@ export function InventoryPage() {
         : "Items Tracked";
 
   const q = search.trim().toLowerCase();
-  const filteredStock = stock?.filter((s) => !q || s.item.name.toLowerCase().includes(q));
+  const filteredStock = stock; // searched on the server
   const fgCustomerOptions = useMemo(() => {
     const seen = new Map<string, string>();
     for (const r of fgStock ?? []) if (!seen.has(r.customerId)) seen.set(r.customerId, r.customerName);
@@ -754,10 +720,15 @@ export function InventoryPage() {
       (!fgProductName || r.productName === fgProductName),
   );
   const filteredQuarantine = quarantineStock?.filter((t) => !q || t.item.name.toLowerCase().includes(q) || (t.vendorName ?? "").toLowerCase().includes(q));
-  const filteredWarehouseStock = warehouseStock?.filter((s) => !q || s.item.name.toLowerCase().includes(q));
+  const filteredWarehouseStock = warehouseStock; // searched on the server
   const filteredDayStoreStock = dayStoreStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
   const filteredPlantStock = plantStock?.stock.filter((s) => !q || s.item.name.toLowerCase().includes(q));
-  const filteredTxns = transactions?.filter((t) => !q || t.item.name.toLowerCase().includes(q) || (t.vendorName ?? "").toLowerCase().includes(q));
+  const filteredTxns = transactions; // searched on the server
+  // The search box talks to whichever list is paged on the server right now.
+  const serverPaged = tab === "stock" && !stockDayStoreId && !stockPlantId ? (stockWarehouseId ? whPaged : stockPaged) : materialTab ? txnPaged : null;
+  const searchValue = serverPaged ? serverPaged.search : search;
+  const setSearchValue = serverPaged ? serverPaged.setSearch : setSearch;
+  const withSearch = (base: string, value: string) => (value.trim() ? `${base}${base.includes("?") ? "&" : "?"}search=${encodeURIComponent(value.trim())}` : base);
   const filteredDispatch = dispatchTransfers?.filter((d) => !q || d.productName.toLowerCase().includes(q) || d.customer.companyName.toLowerCase().includes(q));
   const filteredRequests = allRequests?.filter((r) => !q || r.item.name.toLowerCase().includes(q) || r.requestedBy.fullName.toLowerCase().includes(q));
   const filteredTransit = transit?.filter((t) => !q || t.item.name.toLowerCase().includes(q) || t.from.toLowerCase().includes(q) || t.to.toLowerCase().includes(q));
@@ -783,7 +754,7 @@ export function InventoryPage() {
     setShowForm(false);
   }
 
-  function handleExport() {
+  async function handleExport() {
     if (tab === "stock" && stockDayStoreId) {
       const storeName = dayStores?.find((d) => d.id === stockDayStoreId)?.name ?? "Store";
       if (!filteredDayStoreStock?.length) return toast.error(`Nothing to export — ${storeName} has no stock activity yet.`);
@@ -793,11 +764,11 @@ export function InventoryPage() {
       if (!filteredPlantStock?.length) return toast.error(`Nothing to export — ${plantName} has no stock activity yet.`);
       exportPlantStockReport(plantName, filteredPlantStock);
     } else if (tab === "stock" && stockWarehouseId) {
-      if (!filteredWarehouseStock?.length) return toast.error(`Nothing to export — ${selectedWarehouse?.name ?? "this warehouse"} has no stock yet.`);
-      exportStockReport(filteredWarehouseStock);
+      if (!whPaged.total) return toast.error(`Nothing to export — ${selectedWarehouse?.name ?? "this warehouse"} has no stock yet.`);
+      exportStockReport(await apiAll<InventoryStockLine>(withSearch(`/api/inventory/stock?category=${selectedWarehouse?.category ?? ""}`, whPaged.search)));
     } else if (tab === "stock") {
-      if (!filteredStock?.length) return toast.error("Nothing to export — no stock rows match.");
-      exportStockReport(filteredStock);
+      if (!stockPaged.total) return toast.error("Nothing to export — no stock rows match.");
+      exportStockReport(await apiAll<InventoryStockLine>(withSearch("/api/inventory/stock", stockPaged.search)));
     } else if (tab === "fg-stock") {
       if (!filteredFgStock?.length) return toast.error("Nothing to export — no finished goods on hand match.");
       exportFgStockReport(filteredFgStock);
@@ -817,8 +788,9 @@ export function InventoryPage() {
       if (!filteredMaterialReconciliation?.length) return toast.error("Nothing to export — no items match.");
       exportMaterialReconciliationReport(filteredMaterialReconciliation);
     } else {
-      if (!filteredTxns?.length) return toast.error("Nothing to export — no entries match.");
-      exportTransactionReport(filteredTxns, TXN_TYPE_LABEL[tab as InventoryTxnType], TXN_TYPE_LABEL[tab as InventoryTxnType].replace(/\s+/g, "_"));
+      if (!txnPaged.total) return toast.error("Nothing to export — no entries match.");
+      const everyEntry = await apiAll<InventoryTransaction>(withSearch(`/api/inventory/transactions?type=${tab}`, txnPaged.search));
+      exportTransactionReport(everyEntry, TXN_TYPE_LABEL[tab as InventoryTxnType], TXN_TYPE_LABEL[tab as InventoryTxnType].replace(/\s+/g, "_"));
     }
     toast.success("Report downloaded — ready to share with the department.");
   }
@@ -1020,7 +992,7 @@ export function InventoryPage() {
               )}
               {tab === "ISSUED_DAY_STORE" && <QuickAddDayStore onCreated={setImportDayStoreId} />}
               {tab === "ISSUED_DAY_STORE" && (
-                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-600" title="Won't count at the Store until confirmed arrived — see the Transit tab.">
+                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-tiny font-bold text-slate-600" title="Won't count at the Store until confirmed arrived — see the Transit tab.">
                   <input type="checkbox" className="h-3 w-3" checked={importTransitTracked} onChange={(e) => setImportTransitTracked(e.target.checked)} />
                   Track as In-Transit
                 </label>
@@ -1064,11 +1036,6 @@ export function InventoryPage() {
               </button>
               <input ref={importItemMasterFileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleImportItemMasterFile} />
             </>
-          )}
-          {tab === "ISSUED_PRODUCTION" && canWrite && (
-            <button className="btn-ghost" onClick={() => switchTab("requests")}>
-              <ClipboardList className="h-3.5 w-3.5" strokeWidth={2.5} /> Go to Material Requests
-            </button>
           )}
           {showPrimaryButton && (
             <button className="btn-primary" onClick={() => setShowForm((s) => !s)}>
@@ -1157,7 +1124,7 @@ export function InventoryPage() {
               <button
                 key={t.key}
                 onClick={() => switchTab(t.key)}
-                className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-bold transition-all duration-150 sm:px-4 ${
+                className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-body font-bold transition-all duration-150 sm:px-4 ${
                   active ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
                 }`}
               >
@@ -1168,7 +1135,7 @@ export function InventoryPage() {
           })}
         </div>
         <div className="w-full sm:w-72">
-          <SearchBar value={search} onChange={setSearch} placeholder={dispatchTab ? "Search by product or customer…" : isRequestsTab ? "Search by item or requester…" : "Search by item or vendor…"} />
+          <SearchBar value={searchValue} onChange={setSearchValue} placeholder={dispatchTab ? "Search by product or customer…" : isRequestsTab ? "Search by item or requester…" : "Search by item or vendor…"} />
         </div>
       </div>
 
@@ -1198,7 +1165,6 @@ export function InventoryPage() {
           {stockDayStoreId && canWrite && dayStores?.find((d) => d.id === stockDayStoreId) && <StoreAssignmentPanel dayStore={dayStores.find((d) => d.id === stockDayStoreId)!} />}
           {stockPlantId && plants?.find((p) => p.id === stockPlantId) && <RenamePlant plant={plants.find((p) => p.id === stockPlantId)!} />}
           <QuickAddDayStore onCreated={(id) => setStockLocation(`ds:${id}`)} />
-          <QuickAddPlant onCreated={(id) => setStockLocation(`pl:${id}`)} />
 
           <span className="mx-1 hidden h-4 w-px bg-slate-200 sm:block" />
           <label className="text-xs font-bold text-slate-500">Item breakdown</label>
@@ -1228,16 +1194,25 @@ export function InventoryPage() {
         ) : stockPlantId ? (
           <PlantStockTable loading={plantStockLoading} rows={filteredPlantStock} empty={!plantStock?.stock.length} />
         ) : stockWarehouseId ? (
-          <WarehouseStockTable loading={warehouseStockLoading} rows={filteredWarehouseStock} empty={!warehouseStock?.length} />
+          <>
+            <WarehouseStockTable loading={warehouseStockLoading} rows={filteredWarehouseStock} empty={whPaged.total === 0 && !whPaged.isFiltered && !whPaged.isLoading} />
+            <PagedFooter paged={whPaged} />
+          </>
         ) : (
-          <StockTable loading={stockLoading} rows={filteredStock} empty={!stock?.length} />
+          <>
+            <StockTable loading={stockLoading} rows={filteredStock} empty={stockPaged.total === 0 && !stockPaged.isFiltered && !stockPaged.isLoading} />
+            <PagedFooter paged={stockPaged} />
+          </>
         )
       ) : tab === "fg-stock" ? (
         <FgStockTable loading={fgStockLoading} rows={filteredFgStock} empty={!fgStock?.length} />
       ) : tab === "quarantine" ? (
         <QuarantinePanel loading={quarantineLoading} rows={filteredQuarantine} empty={!quarantineStock?.length} canQc={canInwardQc} canWrite={canWrite} canDebitNote={canInvoice} />
       ) : tab === "RECEIVED" ? (
-        <ReceivedList loading={txnLoading} rows={filteredTxns} empty={!transactions?.length} canQc={canInwardQc} canWrite={canWrite} canDebitNote={canInvoice} />
+        <>
+          <ReceivedList loading={txnLoading} rows={filteredTxns} empty={txnPaged.total === 0 && !txnPaged.isFiltered && !txnPaged.isLoading} canQc={canInwardQc} canWrite={canWrite} canDebitNote={canInvoice} />
+          <PagedFooter paged={txnPaged} />
+        </>
       ) : tab === "FG" ? (
         <FgTransferList loading={dispatchLoading} rows={filteredDispatch} empty={!dispatchTransfers?.length} canQc={canQc} canWrite={canWrite} canDispatch={canDispatch} canInvoice={canInvoice} />
       ) : dispatchTab ? (
@@ -1249,13 +1224,26 @@ export function InventoryPage() {
       ) : isReconciliationTab ? (
         <MaterialReconciliationPanel loading={materialReconciliationLoading} rows={filteredMaterialReconciliation} empty={!materialReconciliation?.length} />
       ) : (
-        <TransactionTable loading={txnLoading} rows={filteredTxns} empty={!transactions?.length} type={tab as InventoryTxnType} canWrite={canWrite} />
+        <>
+          <TransactionTable loading={txnLoading} rows={filteredTxns} empty={txnPaged.total === 0 && !txnPaged.isFiltered && !txnPaged.isLoading} type={tab as InventoryTxnType} canWrite={canWrite} />
+          <PagedFooter paged={txnPaged} />
+        </>
       )}
     </div>
   );
 }
 
-function StockTable({ loading, rows, empty }: { loading: boolean; rows: ReturnType<typeof useInventoryStock>["data"]; empty: boolean }) {
+// The "Showing 1-50 of N" footer under a server-paged list, in its own card.
+function PagedFooter({ paged }: { paged: { page: number; pageSize: number; total: number; setPage: (p: number) => void; setPageSize: (s: number) => void; isFetching: boolean } }) {
+  if (paged.total === 0) return null;
+  return (
+    <div className="card">
+      <Pagination page={paged.page} pageSize={paged.pageSize} total={paged.total} onPage={paged.setPage} onPageSize={paged.setPageSize} isFetching={paged.isFetching} />
+    </div>
+  );
+}
+
+function StockTable({ loading, rows, empty }: { loading: boolean; rows: InventoryStockLine[] | undefined; empty: boolean }) {
   // Cost Price mirrors item-pricing.ts's own PRICING_VISIBLE_ROLES — the
   // API strips item.costPrice entirely (not nulled) for every other
   // role, so showing the column at all is itself the gate; no per-row
@@ -1330,10 +1318,10 @@ function FgStockTable({ loading, rows, empty }: { loading: boolean; rows: FgStoc
           <thead>
             <tr>
               <th>Customer</th>
+              <th>Stage</th>
               <th>Product</th>
               <th>PO Number</th>
               <th>Batch / Lot</th>
-              <th>Stage</th>
               <th className="text-right">Produced</th>
               <th className="text-right">Dispatched</th>
               <th className="text-right">On Hand</th>
@@ -1344,15 +1332,15 @@ function FgStockTable({ loading, rows, empty }: { loading: boolean; rows: FgStoc
           <tbody>
             {rows.map((r) => (
               <tr key={r.id}>
-                <td className="text-slate-600">{r.customerName}</td>
+                <td className="text-slate-600"><CustomerName name={r.customerName} /></td>
+                <td>
+                  <span className="pill border-brand-200 bg-brand-50 text-brand-700">{COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId}</span>
+                </td>
                 <td className="font-bold text-slate-800">{r.productName}</td>
                 <td className="font-mono text-slate-500">{r.poNumber ?? "—"}</td>
                 <td className="text-slate-600">
                   {r.label}
-                  {r.kind === "COMBINED_LOT" && <span className="pill ml-1.5 border-slate-200 bg-slate-50 text-[10px] text-slate-400">Legacy</span>}
-                </td>
-                <td>
-                  <span className="pill border-brand-200 bg-brand-50 text-brand-700">{COMBINED_LOT_STAGE_LABEL[r.currentStageId] ?? r.currentStageId}</span>
+                  {r.kind === "COMBINED_LOT" && <span className="pill ml-1.5 border-slate-200 bg-slate-50 text-micro text-slate-400">Legacy</span>}
                 </td>
                 <td className="text-right font-mono text-slate-600">
                   {r.producedQty} {r.unit}
@@ -1545,7 +1533,7 @@ function TransactionTable({
       <EmptyState
         icon={ArrowUpFromLine}
         title={`No ${TXN_TYPE_LABEL[type].toLowerCase()} entries yet`}
-        hint={type === "ISSUED_PRODUCTION" ? "Approved Material Requests land here once Store issues them." : canWrite ? "Log one above to get started." : "Ask Store to log the first entry."}
+        hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."}
         accent="brand"
       />
     );
@@ -1575,7 +1563,6 @@ function TransactionTable({
               <th>Size</th>
               <th>Vendor / Note</th>
               {type === "ISSUED_DAY_STORE" && <th>Store</th>}
-              {type === "ISSUED_PRODUCTION" && <th>Plant</th>}
               <th>Batch No</th>
               <th>GRN No</th>
               <th>Mfg Date</th>
@@ -1595,7 +1582,6 @@ function TransactionTable({
                 <td className="text-slate-500">{t.size ?? "—"}</td>
                 <td className="text-slate-500">{t.vendorName ?? "—"}</td>
                 {type === "ISSUED_DAY_STORE" && <td className="text-slate-500">{t.dayStore?.name ?? "—"}</td>}
-                {type === "ISSUED_PRODUCTION" && <td className="text-slate-500">{t.plant?.name ?? "—"}</td>}
                 <td className="text-slate-500">{t.batchNo ?? "—"}</td>
                 <td className="text-slate-500">{t.grnNo ?? "—"}</td>
                 <td className="text-slate-500">{t.mfgDate ? new Date(t.mfgDate).toLocaleDateString() : "—"}</td>
@@ -1672,7 +1658,7 @@ function DispatchTable({
             {rows.map((d) => (
               <tr key={d.id}>
                 <td className="text-slate-500">{new Date(d.date).toLocaleDateString()}</td>
-                <td className="font-bold text-slate-800">{d.customer.companyName}</td>
+                <td className="font-bold text-slate-800"><CustomerName name={d.customer.companyName} /></td>
                 <td className="text-slate-600">{d.productName}</td>
                 <td className="text-right font-mono font-bold text-slate-700">{d.quantity}</td>
                 {canWrite && (
@@ -1691,288 +1677,6 @@ function DispatchTable({
   );
 }
 
-function LogEntryForm({ initialType, onDone }: { initialType: Exclude<InventoryTxnType, "ISSUED_PRODUCTION">; onDone: () => void }) {
-  const toast = useToast();
-  const [type, setType] = useState<Exclude<InventoryTxnType, "ISSUED_PRODUCTION">>(initialType);
-  const [category, setCategory] = useState<InventoryCategory>("RM");
-  const { data: items } = useInventoryItems(category);
-
-  const [itemId, setItemId] = useState("");
-  const [showNewItem, setShowNewItem] = useState(false);
-  const [newItemName, setNewItemName] = useState("");
-
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [unit, setUnit] = useState(UNIT_OPTIONS[0]!);
-  const [quantity, setQuantity] = useState("");
-  const [size, setSize] = useState("");
-  const [vendorName, setVendorName] = useState("");
-  const [dayStoreId, setDayStoreId] = useState("");
-  const [isTransitTracked, setIsTransitTracked] = useState(false);
-  const [batchNo, setBatchNo] = useState("");
-  const [grnNo, setGrnNo] = useState("");
-  const [mfgDate, setMfgDate] = useState("");
-  const [expiryDate, setExpiryDate] = useState("");
-  const [remark, setRemark] = useState("");
-  // Store Before/After Report §4 — rate/invoice weren't captured on a
-  // direct (non-Vendor-PO) delivery before.
-  const [rate, setRate] = useState("");
-  const [invoiceNo, setInvoiceNo] = useState("");
-  const [invoiceDate, setInvoiceDate] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  const { data: vendors } = useInventoryVendors();
-  const { data: vendorDirectory } = useVendors();
-  const { data: dayStores } = useDayStores();
-  const createItem = useCreateInventoryItem();
-  const createTxn = useCreateInventoryTransaction();
-  const createDayStore = useCreateDayStore();
-
-  // Vendor Master's own directory, plus every name ever typed on a past
-  // entry (so an ad-hoc source like "Blinkit" that isn't a formal vendor
-  // still shows up as a suggestion) — still free text underneath (this
-  // field isn't an FK to Vendor), just a richer suggestion list.
-  const vendorNameOptions = useMemo(() => {
-    const names = new Set<string>();
-    for (const v of vendorDirectory ?? []) names.add(v.name);
-    for (const n of vendors?.vendors ?? []) names.add(n);
-    return [...names].sort((a, b) => a.localeCompare(b));
-  }, [vendorDirectory, vendors]);
-
-  const sortedItems = useMemo(() => items ?? [], [items]);
-
-  function switchCategory(next: InventoryCategory) {
-    setCategory(next);
-    setItemId("");
-  }
-
-  // A default suggestion only — pre-fills Vendor Name from the item's
-  // own preferredVendor (see the schema.prisma comment), but only into
-  // an empty field, so it never clobbers a value Store already typed or
-  // changed for this real delivery.
-  function handleItemChange(id: string) {
-    setItemId(id);
-    if (!vendorName.trim()) {
-      const preferred = sortedItems.find((i) => i.id === id)?.preferredVendor;
-      if (preferred) setVendorName(preferred);
-    }
-  }
-
-  async function handleSubmit() {
-    setError(null);
-
-    let finalItemId = itemId;
-    if (showNewItem) {
-      if (!newItemName.trim()) return setError("Enter the new item's name.");
-      try {
-        const created = await createItem.mutateAsync({ category, name: newItemName.trim(), unit });
-        finalItemId = created.id;
-      } catch (err) {
-        return setError(err instanceof ApiError ? err.message : "Could not create item");
-      }
-    }
-    if (!finalItemId) return setError("Select or add an item first.");
-    if (!date) return setError("Pick a date.");
-    if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
-    // Rate is mandatory on a real delivery (Store Before/After Report §4.6).
-    if (type === "RECEIVED" && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
-
-    setSubmitting(true);
-    try {
-      await createTxn.mutateAsync({
-        itemId: finalItemId,
-        type,
-        date,
-        unit,
-        quantity: Number(quantity),
-        size: size.trim() || undefined,
-        vendorName: vendorName.trim() || undefined,
-        dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
-        isTransitTracked: type === "ISSUED_DAY_STORE" && isTransitTracked ? true : undefined,
-        batchNo: batchNo.trim() || undefined,
-        grnNo: grnNo.trim() || undefined,
-        mfgDate: mfgDate || undefined,
-        expiryDate: expiryDate || undefined,
-        remark: remark.trim() || undefined,
-        rate: type === "RECEIVED" && rate ? Number(rate) : undefined,
-        invoiceNo: type === "RECEIVED" && invoiceNo.trim() ? invoiceNo.trim() : undefined,
-        invoiceDate: type === "RECEIVED" && invoiceDate ? invoiceDate : undefined,
-      });
-      toast.success(
-        type === "RECEIVED"
-          ? "Entry logged — awaiting inward QC."
-          : isTransitTracked
-            ? `${TXN_TYPE_LABEL[type]} entry logged — in transit until confirmed at the other end.`
-            : `${TXN_TYPE_LABEL[type]} entry logged.`,
-      );
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not log entry");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="card animate-slide-up space-y-5 p-5 sm:p-6">
-      <div className="scrollbar-none flex w-fit max-w-full gap-1 overflow-x-auto rounded-xl bg-slate-100/80 p-1">
-        {(["RECEIVED", "ISSUED_DAY_STORE"] as const).map((t) => (
-          <button
-            key={t}
-            type="button"
-            onClick={() => setType(t)}
-            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-bold transition-all duration-150 ${
-              type === t ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
-            }`}
-          >
-            {t === "RECEIVED" ? <ArrowDownToLine className="h-3.5 w-3.5" strokeWidth={2.25} /> : <ArrowUpFromLine className="h-3.5 w-3.5" strokeWidth={2.25} />}
-            {TXN_TYPE_LABEL[t]}
-          </button>
-        ))}
-      </div>
-
-      {type === "RECEIVED" && (
-        <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
-        </p>
-      )}
-
-      {type === "ISSUED_DAY_STORE" && (
-        <div className="space-y-2">
-          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
-            <input type="checkbox" className="h-3.5 w-3.5" checked={isTransitTracked} onChange={(e) => setIsTransitTracked(e.target.checked)} />
-            Track as In-Transit — takes real travel time to get there
-          </label>
-          {isTransitTracked && (
-            <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-              <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Leaves the Warehouse right away, but won't count at the destination until someone there confirms it arrived (see the Transit tab).
-            </p>
-          )}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <div>
-          <label className="label">Category</label>
-          <ItemPicker items={CATEGORY_ITEMS} value={category} onChange={(v) => switchCategory(v as InventoryCategory)} clearable={false} />
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Item</label>
-          {!showNewItem ? (
-            <div className="flex flex-wrap gap-2">
-              <div className="min-w-0 flex-1">
-                <ItemPicker items={sortedItems} value={itemId} onChange={handleItemChange} />
-              </div>
-              <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNewItem(true)}>
-                <UserPlus className="h-3.5 w-3.5" strokeWidth={2.25} /> New
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              <input className="field min-w-0 flex-1" placeholder="Exact item name" value={newItemName} onChange={(e) => setNewItemName(e.target.value)} />
-              <button type="button" className="btn-ghost shrink-0" onClick={() => setShowNewItem(false)}>
-                Cancel
-              </button>
-            </div>
-          )}
-        </div>
-        <div>
-          <label className="label">Date</label>
-          <input type="date" className="field" value={date} onChange={(e) => setDate(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">Unit</label>
-          <ItemPicker items={UNIT_ITEMS} value={unit} onChange={setUnit} clearable={false} />
-        </div>
-        <div>
-          <label className="label">Count</label>
-          <input className="field font-mono" type="number" min="0" step="any" placeholder="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">Size (optional)</label>
-          <input className="field" placeholder="e.g. 25 Kg bag" value={size} onChange={(e) => setSize(e.target.value)} />
-        </div>
-        <div className="sm:col-span-2">
-          <label className="label">Vendor Name (optional)</label>
-          <input
-            className="field"
-            list="vendor-name-options"
-            placeholder="Vendor / supplier — pick from the list, or type one (e.g. a direct/Blinkit delivery)"
-            value={vendorName}
-            onChange={(e) => setVendorName(e.target.value)}
-          />
-          <datalist id="vendor-name-options">
-            {vendorNameOptions.map((v) => (
-              <option key={v} value={v} />
-            ))}
-          </datalist>
-        </div>
-        {type === "RECEIVED" && (
-          <>
-            <div>
-              <label className="label">Rate</label>
-              <input className="field font-mono" type="number" min="0" step="any" placeholder="Per unit" value={rate} onChange={(e) => setRate(e.target.value)} />
-            </div>
-            <div>
-              <label className="label">Invoice No (optional)</label>
-              <input className="field" placeholder="Vendor's invoice number" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} />
-            </div>
-            <div>
-              <label className="label">Invoice Date (optional)</label>
-              <input type="date" className="field" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
-            </div>
-          </>
-        )}
-        {type === "ISSUED_DAY_STORE" && (
-          <PickerWithAdd
-            label="Store (optional)"
-            placeholder="— Which store —"
-            options={dayStores ?? []}
-            value={dayStoreId}
-            onChange={setDayStoreId}
-            onCreate={(name) => createDayStore.mutateAsync(name)}
-          />
-        )}
-        <div>
-          <label className="label">Batch No (optional)</label>
-          <input className="field" placeholder="e.g. B-2026-081" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">GRN No (optional)</label>
-          <input className="field" placeholder="e.g. GRN-1042" value={grnNo} onChange={(e) => setGrnNo(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">Mfg Date (optional)</label>
-          <input type="date" className="field" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
-        </div>
-        <div>
-          <label className="label">Expiry Date (optional)</label>
-          <input type="date" className="field" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
-        </div>
-        <div className="sm:col-span-2 lg:col-span-3">
-          <label className="label">Remark (optional)</label>
-          <input className="field" placeholder="Any other note for this entry" value={remark} onChange={(e) => setRemark(e.target.value)} />
-        </div>
-      </div>
-
-      {error && (
-        <div className="animate-fade-in flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-bold text-rose-600">
-          <X className="h-3.5 w-3.5 shrink-0" /> {error}
-        </div>
-      )}
-
-      <div className="flex flex-wrap justify-end gap-2">
-        <button type="button" className="btn-ghost" onClick={onDone}>
-          Cancel
-        </button>
-        <button type="button" className="btn-primary" disabled={submitting} onClick={handleSubmit}>
-          {submitting ? "Logging…" : "Log Entry"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTransferType; onDone: () => void }) {
   const toast = useToast();
   const [type, setType] = useState<DispatchTransferType>(initialType);
@@ -1984,7 +1688,6 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
   const { data: issuedRequests } = useInventoryRequests("ISSUED");
   const { data: plants } = usePlants();
   const createTransfer = useCreateDispatchTransfer();
-  const createPlant = useCreatePlant();
 
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -2037,7 +1740,7 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
             key={t}
             type="button"
             onClick={() => switchType(t)}
-            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-[13px] font-bold transition-all duration-150 ${
+            className={`flex shrink-0 items-center gap-1.5 rounded-lg px-3.5 py-2 text-body font-bold transition-all duration-150 ${
               type === t ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
             }`}
           >
@@ -2082,7 +1785,7 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
               onChange={setSourceRequestId}
               placeholder="— Not linked —"
             />
-            <p className="mt-1 text-[11px] text-slate-400">A manual tag, not a calculation — pick the request this shipment's material came from, if you know it.</p>
+            <p className="mt-1 text-tiny text-slate-400">A manual tag, not a calculation — pick the request this shipment's material came from, if you know it.</p>
           </div>
         )}
         {type === "FG" && (
@@ -2094,7 +1797,6 @@ function DispatchTransferForm({ initialType, onDone }: { initialType: DispatchTr
                 options={plants ?? []}
                 value={plantId}
                 onChange={setPlantId}
-                onCreate={(name) => createPlant.mutateAsync(name)}
               />
             </div>
             {plantId && plants?.find((p) => p.id === plantId) && <RenamePlant plant={plants.find((p) => p.id === plantId)!} />}
@@ -2152,7 +1854,7 @@ function QuarantinePanel({
   canDebitNote: boolean;
 }) {
   if (loading) return <SkeletonRows rows={4} cols={1} />;
-  if (empty) return <EmptyState icon={ShieldAlert} title="Quarantine is empty" hint="Nothing is awaiting QC, and nothing accepted has expired." accent="brand" />;
+  if (empty) return <EmptyState icon={ShieldAlert} title="Quarantine is empty" hint="Nothing is awaiting QC, and nothing is waiting for a lab test." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={ShieldAlert} title="No matching entries" hint="Try a different search." accent="slate" />;
 
   const awaitingQc = rows.filter((r) => r.quarantineReason !== "EXPIRED");
@@ -2161,42 +1863,36 @@ function QuarantinePanel({
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="mb-3 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <ClipboardCheck className="h-3.5 w-3.5" /> Awaiting QC ({awaitingQc.length})
         </h2>
         {awaitingQc.length === 0 ? (
           <p className="text-xs text-slate-400">Nothing waiting on inward QC right now.</p>
         ) : (
-          <div className="space-y-3">
-            {awaitingQc.map((t) => (
-              <ReceivedCard key={t.id} txn={t} canQc={canQc} canWrite={canWrite} canDebitNote={canDebitNote} />
-            ))}
-          </div>
+          <ReceivedTable rows={awaitingQc} showPo showAging openLabel={canQc || canWrite ? "Open / QC" : "Open"} renderExpanded={(t) => <ReceivedCard txn={t} canQc={canQc} canWrite={canWrite} canDebitNote={canDebitNote} />} />
         )}
       </div>
       <div>
-        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-          <ShieldAlert className="h-3.5 w-3.5" /> Expired — Awaiting Release ({expired.length})
+        <h2 className="mb-3 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
+          <ShieldAlert className="h-3.5 w-3.5" /> Lab Test — Awaiting Release ({expired.length})
         </h2>
         {expired.length === 0 ? (
-          <p className="text-xs text-slate-400">Nothing accepted has expired.</p>
+          <p className="text-xs text-slate-400">Nothing is waiting for a lab test.</p>
         ) : (
-          <div className="space-y-3">
-            {expired.map((t) => (
-              <ExpiredQuarantineCard key={t.id} txn={t} canQc={canQc} />
-            ))}
-          </div>
+          <ExpiredQuarantineTable rows={expired} canQc={canQc} />
         )}
       </div>
     </div>
   );
 }
 
-function ExpiredQuarantineCard({ txn, canQc }: { txn: QuarantineRow; canQc: boolean }) {
+// Expired stock waiting for a lab test, as one table: a column for each thing, and Release / Download in the last column.
+function ExpiredQuarantineTable({ rows, canQc }: { rows: QuarantineRow[]; canQc: boolean }) {
+  const pg = useClientPaging(rows);
   const toast = useToast();
   const release = useReleaseExpiry();
-
-  async function handleRelease() {
+  const fmt = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-");
+  async function handleRelease(txn: QuarantineRow) {
     try {
       await release.mutateAsync(txn.id);
       toast.success(`${txn.item.name} released back into stock.`);
@@ -2204,33 +1900,58 @@ function ExpiredQuarantineCard({ txn, canQc }: { txn: QuarantineRow; canQc: bool
       toast.error(err instanceof ApiError ? err.message : "Could not release this entry");
     }
   }
-
   return (
-    <div className="card flex flex-wrap items-center justify-between gap-3 p-4">
-      <div className="min-w-0">
-        <p className="flex items-center gap-1.5 font-bold text-slate-800">
-          {txn.item.name}
-          <span className="pill border-rose-200 bg-rose-50 text-rose-700">Expired {txn.expiryDate ? new Date(txn.expiryDate).toLocaleDateString() : ""}</span>
-        </p>
-        <p className="text-xs text-slate-500">
-          {txn.quantity} {txn.unit} · {txn.vendorName ?? "No vendor"} · GRN {txn.grnNo ?? "—"} · Batch {txn.batchNo ?? "—"} · accepted {new Date(txn.date).toLocaleDateString()}
-        </p>
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead>
+            <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
+              <th className="px-4 py-3">Item</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Material</th>
+              <th className="px-4 py-3 text-right">Qty</th>
+              <th className="px-4 py-3">Vendor</th>
+              <th className="px-4 py-3">GRN No.</th>
+              <th className="px-4 py-3">Batch No.</th>
+              <th className="px-4 py-3">Accepted</th>
+              <th className="px-4 py-3">Expiry</th>
+              <th className="px-4 py-3 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {pg.rows.map((txn) => (
+              <tr key={txn.id} className="transition hover:bg-slate-50">
+                <td className="px-4 py-3 font-bold text-slate-800">{txn.item.name}</td>
+                <td className="px-4 py-3">
+                  <span className="pill border-rose-200 bg-rose-50 text-rose-700">Lab Test</span>
+                </td>
+                <td className="px-4 py-3 text-slate-500">{txn.item.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                <td className="px-4 py-3 text-right font-mono text-slate-700">
+                  {txn.quantity} {txn.unit}
+                </td>
+                <td className="px-4 py-3 text-slate-600">{txn.vendorName ?? "-"}</td>
+                <td className="px-4 py-3 text-slate-600">{txn.grnNo ?? "-"}</td>
+                <td className="px-4 py-3 text-slate-600">{txn.batchNo ?? "-"}</td>
+                <td className="px-4 py-3 text-slate-600">{fmt(txn.date)}</td>
+                <td className="px-4 py-3 font-semibold text-rose-700">{fmt(txn.expiryDate)}</td>
+                <td className="px-4 py-3 text-right">
+                  <div className="inline-flex items-center gap-1.5">
+                    <button type="button" className="btn-icon" title="Download this entry" onClick={() => exportTransactionReport([txn], "Quarantine Store", `Lab_Test_${txn.item.name.replace(/\s+/g, "_")}`)}>
+                      <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    </button>
+                    {canQc && (
+                      <button type="button" className="btn-primary btn-sm" disabled={release.isPending} onClick={() => handleRelease(txn)}>
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {release.isPending ? "Releasing…" : "Release to Stock"}
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="btn-icon"
-          title="Download this entry"
-          onClick={() => exportTransactionReport([txn], "Quarantine Store", `Expired_${txn.item.name.replace(/\s+/g, "_")}`)}
-        >
-          <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
-        </button>
-        {canQc && (
-          <button type="button" className="btn-primary btn-sm" disabled={release.isPending} onClick={handleRelease}>
-            <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {release.isPending ? "Releasing…" : "Release to Stock"}
-          </button>
-        )}
-      </div>
+      <ClientPager pg={pg} />
     </div>
   );
 }
@@ -2257,13 +1978,7 @@ function ReceivedList({
     );
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
-  return (
-    <div className="space-y-3">
-      {rows.map((t) => (
-        <ReceivedCard key={t.id} txn={t} canQc={canQc} canWrite={canWrite} canDebitNote={canDebitNote} />
-      ))}
-    </div>
-  );
+  return <ReceivedTable rows={rows} showPo showAging openLabel={canQc || canWrite ? "Open / actions" : "Open"} renderExpanded={(t) => <ReceivedCard txn={t} canQc={canQc} canWrite={canWrite} canDebitNote={canDebitNote} />} />;
 }
 
 // yyyy-mm-dd for a date <input>, or "" if unset — same shape the create
@@ -2317,6 +2032,8 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
   const [showNoteForm, setShowNoteForm] = useState<"REJECT" | "HOLD" | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Inward QC needs the date the material was sampled
+  const [samplingDate, setSamplingDate] = useState("");
 
   // Editing paperwork after the fact — GRN No. is the common case (the
   // physical GRN sometimes isn't cut yet when Store first logs the
@@ -2337,8 +2054,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
   }));
 
   async function handleApprove() {
+    if (!samplingDate) return toast.error("Enter the sampling date first.");
     try {
-      await qcReview.mutateAsync({ id: txn.id, action: "APPROVE" });
+      await qcReview.mutateAsync({ id: txn.id, action: "APPROVE", samplingDate });
       toast.success("QC approved — ready for Store to accept.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not approve QC");
@@ -2347,8 +2065,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
 
   async function handleReject() {
     if (!note.trim()) return setError("A note is required when rejecting QC.");
+    if (!samplingDate) return setError("Enter the sampling date first.");
     try {
-      await qcReview.mutateAsync({ id: txn.id, action: "REJECT", note: note.trim() });
+      await qcReview.mutateAsync({ id: txn.id, action: "REJECT", samplingDate, note: note.trim() });
       toast.success("QC rejected.");
       setShowNoteForm(null);
     } catch (err) {
@@ -2358,8 +2077,9 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
 
   async function handleHold() {
     if (!note.trim()) return setError("A note is required when holding QC.");
+    if (!samplingDate) return setError("Enter the sampling date first.");
     try {
-      await qcReview.mutateAsync({ id: txn.id, action: "HOLD", note: note.trim() });
+      await qcReview.mutateAsync({ id: txn.id, action: "HOLD", samplingDate, note: note.trim() });
       toast.success("Parked on hold — Store's been notified.");
       setShowNoteForm(null);
     } catch (err) {
@@ -2444,7 +2164,7 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
             {txn.vendorName && <> · {txn.vendorName}</>} · {new Date(txn.date).toLocaleDateString()}
           </p>
           {(txn.batchNo || txn.grnNo || txn.mfgDate || txn.expiryDate) && (
-            <p className="mt-0.5 text-[11px] text-slate-500">
+            <p className="mt-0.5 text-tiny text-slate-500">
               {txn.batchNo && <>Batch {txn.batchNo}</>}
               {txn.grnNo && <> · GRN {txn.grnNo}</>}
               {txn.mfgDate && <> · Mfg {new Date(txn.mfgDate).toLocaleDateString()}</>}
@@ -2452,14 +2172,14 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
             </p>
           )}
           {(txn.rate != null || txn.invoiceNo || txn.invoiceDate) && (
-            <p className="mt-0.5 text-[11px] text-slate-500">
+            <p className="mt-0.5 text-tiny text-slate-500">
               {txn.rate != null && <>Rate ₹{txn.rate}</>}
               {txn.invoiceNo && <> · Inv {txn.invoiceNo}</>}
               {txn.invoiceDate && <> · Inv date {new Date(txn.invoiceDate).toLocaleDateString()}</>}
             </p>
           )}
-          {txn.remark && <p className="mt-0.5 text-[11px] text-slate-500">Remark: {txn.remark}</p>}
-          <p className="mt-0.5 text-[11px] text-slate-400">
+          {txn.remark && <p className="mt-0.5 text-tiny text-slate-500">Remark: {txn.remark}</p>}
+          <p className="mt-0.5 text-tiny text-slate-400">
             Logged by {txn.createdBy.fullName}
             {txn.qcCheckedBy && <> · QC by {txn.qcCheckedBy.fullName}</>}
             {txn.acceptedBy && <> · accepted by {txn.acceptedBy.fullName}</>}
@@ -2495,8 +2215,12 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
               <Receipt className="h-3 w-3" strokeWidth={2.5} /> Raise Debit Note
             </button>
           )}
-          {canQc && (txn.receiptStatus === "PENDING_QC" || txn.receiptStatus === "ON_HOLD") && !showNoteForm && !editing && (
+          {canQc && (txn.receiptStatus === "PENDING_QC" || txn.receiptStatus === "TESTING" || txn.receiptStatus === "ON_HOLD") && !showNoteForm && !editing && (
             <>
+              <label className="flex items-center gap-1.5 text-micro font-bold uppercase tracking-wide text-slate-400">
+                Sampled on
+                <input type="date" className="field !h-8 !w-auto !py-1 !text-xs" value={samplingDate} onChange={(e) => setSamplingDate(e.target.value)} />
+              </label>
               <button type="button" className="btn-ghost btn-sm" onClick={() => setShowNoteForm("REJECT")}>
                 <X className="h-3 w-3" strokeWidth={2.5} /> Reject
               </button>
@@ -2711,11 +2435,25 @@ function FgTransferList({
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
   return (
-    <div className="space-y-3">
-      {rows.map((d) => (
-        <FgTransferCard key={d.id} transfer={d} canQc={canQc} canWrite={canWrite} canDispatch={canDispatch} canInvoice={canInvoice} />
-      ))}
-    </div>
+    <ExpandTable
+      rows={rows}
+      rowKey={(d) => d.id}
+      openLabel={canQc || canDispatch || canInvoice || canWrite ? "Open / actions" : "Open"}
+      renderExpanded={(d) => <FgTransferCard transfer={d} canQc={canQc} canWrite={canWrite} canDispatch={canDispatch} canInvoice={canInvoice} />}
+      columns={[
+        { header: "Product", cell: (d) => d.productName, className: "font-bold text-slate-800" },
+        { header: "Customer", cell: (d) => d.customer.companyName },
+        { header: "Qty", cell: (d) => d.quantity, align: "right", className: "font-mono text-slate-700" },
+        { header: "Date", cell: (d) => dmy(d.date) },
+        { header: "From Plant", cell: (d) => d.plant?.name ?? "-" },
+        { header: "QC Status", cell: (d) => (d.qcStatus ? <QcStatusBadge status={d.qcStatus} /> : "-") },
+        { header: "Logged By", cell: (d) => d.createdBy.fullName },
+        { header: "QC By", cell: (d) => (d.qcCheckedBy ? `${d.qcCheckedBy.fullName} · ${dmy(d.qcCheckedAt)}` : "-") },
+        { header: "Dispatched", cell: (d) => (d.dispatchedAt ? `${dmy(d.dispatchedAt)}${d.dispatchedBy ? ` · ${d.dispatchedBy.fullName}` : ""}` : "-") },
+        { header: "Invoice", cell: (d) => d.invoiceNumber ?? "-" },
+        { header: "From Request", cell: (d) => (d.sourceRequest ? `${d.sourceRequest.item.name} · ${d.sourceRequest.requestedQty}` : "-") },
+      ]}
+    />
   );
 }
 
@@ -2818,10 +2556,10 @@ export function FgTransferCard({
             {transfer.qcStatus && <QcStatusBadge status={transfer.qcStatus} />}
           </div>
           <p className="mt-1 text-xs text-slate-500">
-            {transfer.customer.companyName} · <span className="font-mono font-bold text-slate-700">{transfer.quantity}</span> · {new Date(transfer.date).toLocaleDateString()}
+            <CustomerName name={transfer.customer.companyName} /> · <span className="font-mono font-bold text-slate-700">{transfer.quantity}</span> · {new Date(transfer.date).toLocaleDateString()}
             {transfer.plant && <> · from {transfer.plant.name}</>}
           </p>
-          <p className="mt-0.5 text-[11px] text-slate-400">
+          <p className="mt-0.5 text-tiny text-slate-400">
             Logged by {transfer.createdBy.fullName}
             {transfer.qcCheckedBy && <> · QC by {transfer.qcCheckedBy.fullName}</>}
             {transfer.dispatchedBy && <> · dispatched by {transfer.dispatchedBy.fullName}</>}
@@ -2973,7 +2711,6 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
   const { data: items } = useInventoryItems(category);
   const { data: plants } = usePlants();
   const createRequest = useCreateInventoryRequest();
-  const createPlant = useCreatePlant();
 
   const [itemId, setItemId] = useState("");
   const [purpose, setPurpose] = useState<InventoryRequestPurpose>("ISSUED_PRODUCTION");
@@ -3059,7 +2796,7 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
         {purpose === "ISSUED_PRODUCTION" && (
           <div className="flex items-end gap-2">
             <div className="flex-1">
-              <PickerWithAdd label="Plant (optional)" placeholder="— Which plant is this for —" options={plants ?? []} value={plantId} onChange={setPlantId} onCreate={(name) => createPlant.mutateAsync(name)} />
+              <PickerWithAdd label="Plant (optional)" placeholder="— Which plant is this for —" options={plants ?? []} value={plantId} onChange={setPlantId} />
             </div>
             {plantId && plants?.find((p) => p.id === plantId) && <RenamePlant plant={plants.find((p) => p.id === plantId)!} />}
           </div>
@@ -3156,7 +2893,7 @@ function TransitPanel({
               <tr key={`${t.kind}-${t.id}`}>
                 <td className="font-bold text-slate-800">
                   {t.item.name}
-                  {t.kind === "qc_sample" && <div className="text-[11px] font-normal text-slate-400">{t.productName}</div>}
+                  {t.kind === "qc_sample" && <div className="text-tiny font-normal text-slate-400">{t.productName}</div>}
                 </td>
                 <td className="text-slate-600">{TRANSIT_KIND_LABEL[t.kind]}</td>
                 <td className="text-slate-600">
@@ -3167,7 +2904,7 @@ function TransitPanel({
                 </td>
                 <td className="text-slate-500">
                   {new Date(t.dispatchedAt).toLocaleString()}
-                  <div className="text-[11px] text-slate-400">by {t.dispatchedBy.fullName}</div>
+                  <div className="text-tiny text-slate-400">by {t.dispatchedBy.fullName}</div>
                 </td>
                 <td className="font-mono font-bold text-amber-600">{formatElapsed(t.dispatchedAt)}</td>
                 <td className="text-right">
@@ -3274,13 +3011,31 @@ function MaterialRequestsPanel({
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching requests" hint="Try a different search." accent="slate" />;
 
   return (
-    <div className="space-y-3">
-      {rows.map((r) => (
-        <RequestCard key={r.id} request={r} canReview={canReview} isOwner={r.requestedBy.id === currentUserId} />
-      ))}
-    </div>
+    <ExpandTable
+      rows={rows}
+      rowKey={(r) => r.id}
+      openLabel={canReview ? "Open / review" : "Open"}
+      renderExpanded={(r) => <RequestCard request={r} canReview={canReview} isOwner={r.requestedBy.id === currentUserId} />}
+      columns={[
+        { header: "Item", cell: (r) => r.item.name, className: "font-bold text-slate-800" },
+        { header: "Material", cell: (r) => CATEGORY_LABEL[r.category] },
+        { header: "Purpose", cell: (r) => REQUEST_PURPOSE_LABEL[r.purpose] },
+        { header: "For Plant", cell: (r) => r.plant?.name ?? "-" },
+        { header: "Requested", cell: (r) => `${r.requestedQty} ${r.item.unit ?? ""}`, align: "right", className: "font-mono text-slate-700" },
+        { header: "Issued", cell: (r) => (r.issuedQty ? `${r.issuedQty} ${r.item.unit ?? ""}` : "-"), align: "right", className: "font-mono text-brand-700" },
+        { header: "Remaining", cell: (r) => (r.status === "PARTIALLY_ISSUED" || r.status === "APPROVED" || r.status === "PENDING" ? `${r.remainingQty} ${r.item.unit ?? ""}` : "-"), align: "right", className: "font-mono text-amber-700" },
+        { header: "Status", cell: (r) => <RequestStatusBadge status={r.status} /> },
+        { header: "Needed By", cell: (r) => dmy(r.neededBy) },
+        { header: "Requested By", cell: (r) => `${r.requestedBy.fullName} · ${dmy(r.createdAt)}` },
+        { header: "Reviewed By", cell: (r) => (r.reviewedBy ? `${r.reviewedBy.fullName} · ${dmy(r.reviewedAt)}` : "-") },
+        { header: "Note", cell: (r) => (r.status === "REJECTED" && r.rejectionReason ? `Rejected: ${r.rejectionReason}` : (r.note ?? "-")), className: "max-w-[16rem] truncate" },
+      ]}
+    />
   );
 }
+
+const dmy = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-");
+
 
 function RequestCard({ request, canReview, isOwner }: { request: InventoryRequest; canReview: boolean; isOwner: boolean }) {
   const toast = useToast();
@@ -3301,7 +3056,9 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
   // issueInventoryRequestSchema: dayStoreId is now a required, nullable
   // key, not an optional one). "" means nothing picked yet and blocks
   // submit; "CENTRAL" means null on purpose; "STORE" needs issueDayStoreId too.
-  const [issueSource, setIssueSource] = useState<"" | "CENTRAL" | "STORE">("");
+  // A request for Production can only be filled out of a Day Store - the Warehouse does not issue to a Plant.
+  const forProduction = request.purpose === "ISSUED_PRODUCTION";
+  const [issueSource, setIssueSource] = useState<"" | "CENTRAL" | "STORE">(forProduction ? "STORE" : "");
   const [issueDayStoreId, setIssueDayStoreId] = useState("");
   const [issueTransitTracked, setIssueTransitTracked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3383,7 +3140,7 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
             {request.plant && <> · for {request.plant.name}</>}
             {request.neededBy && <> · needed by {new Date(request.neededBy).toLocaleDateString()}</>}
           </p>
-          <p className="mt-0.5 text-[11px] text-slate-400">
+          <p className="mt-0.5 text-tiny text-slate-400">
             Requested by {request.requestedBy.fullName} · {new Date(request.createdAt).toLocaleDateString()}
             {request.reviewedBy && <> · reviewed by {request.reviewedBy.fullName}</>}
           </p>
@@ -3485,7 +3242,7 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
           <div>
             <label className="label">Coming from</label>
             <div className="flex flex-wrap gap-1 rounded-xl bg-slate-100/80 p-1">
-              {(["CENTRAL", "STORE"] as const).map((s) => (
+              {(forProduction ? (["STORE"] as const) : (["CENTRAL", "STORE"] as const)).map((s) => (
                 <button
                   key={s}
                   type="button"
@@ -3494,7 +3251,7 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
                     issueSource === s ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  {s === "CENTRAL" ? "Central / Warehouse Stock" : "A Store"}
+                  {s === "CENTRAL" ? "Central / Warehouse Stock" : forProduction ? "A Day Store (to its own Plant)" : "A Store"}
                 </button>
               ))}
             </div>

@@ -13,6 +13,9 @@ import { SkeletonRows } from "../components/Skeleton";
 import { SearchBar } from "../components/SearchBar";
 import { ItemPicker } from "../components/ItemPicker";
 import { useToast } from "../components/Toast";
+import { useClientPaging } from "../lib/useClientPaging";
+import { ClientPager } from "../components/Pagination";
+import { CustomerName } from "../components/CustomerName";
 
 const UNIT_OPTIONS = ["Kg", "Ltr", "Count", "Inch", "Ft"];
 const UNIT_ITEMS = UNIT_OPTIONS.map((u) => ({ id: u, name: u }));
@@ -124,6 +127,8 @@ export function PoReadinessPage() {
     }
   }
 
+  const pg = useClientPaging(filtered);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -202,7 +207,7 @@ export function PoReadinessPage() {
         <div className="w-full sm:w-72">
           <SearchBar value={search} onChange={setSearch} placeholder="Search by PO number, brand, or customer…" />
         </div>
-        <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-[11px] font-bold text-slate-600">
+        <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-tiny font-bold text-slate-600">
           <input type="checkbox" className="h-3 w-3" checked={readyOnly} onChange={(e) => setReadyOnly(e.target.checked)} />
           Ready only
         </label>
@@ -219,7 +224,7 @@ export function PoReadinessPage() {
         />
       ) : (
         <div className="space-y-2">
-          {filtered.map((row) => (
+          {pg.rows.map((row) => (
             <PoReadinessCard
               key={row.purchaseOrder.id}
               row={row}
@@ -230,6 +235,7 @@ export function PoReadinessPage() {
               removing={deleteItem.isPending}
             />
           ))}
+          <ClientPager pg={pg} />
         </div>
       )}
     </div>
@@ -346,7 +352,7 @@ function PoReadinessCard({
           </span>
           <div className="min-w-0">
             <p className="truncate font-bold text-slate-800">{purchaseOrder.poNumber ?? purchaseOrder.id.slice(0, 8)}</p>
-            <p className="truncate text-xs text-slate-500">{purchaseOrder.customer.companyName}</p>
+            <p className="truncate text-xs text-slate-500"><CustomerName name={purchaseOrder.customer.companyName} /></p>
           </div>
         </button>
         <div className="flex shrink-0 items-center gap-2">

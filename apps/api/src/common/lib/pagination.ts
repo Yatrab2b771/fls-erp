@@ -21,3 +21,29 @@ export function setPaginationHeaders(res: { setHeader(name: string, value: strin
   res.setHeader("X-Page", String(p.page));
   res.setHeader("X-Page-Size", String(p.pageSize));
 }
+
+// ---------------------------------------------------------------------------
+// Shared list-query helpers - every paginated list route reads the same query
+// params, so the web's usePagedList hook can talk to all of them alike:
+//   ?page=&pageSize=   (pageSize 1..200, default 50)
+//   ?search=           free text, matched server-side against the list's own fields
+//   ?sort=&dir=        one of the route's allowed sort fields, asc | desc
+// The total comes back in the X-Total-Count header (setPaginationHeaders).
+// ---------------------------------------------------------------------------
+
+/** Free-text search from the query string (trimmed, capped), or undefined when empty. */
+export function parseSearch(req: Request, param = "search"): string | undefined {
+  const raw = req.query[param];
+  if (typeof raw !== "string") return undefined;
+  const text = raw.trim().slice(0, 100);
+  return text.length > 0 ? text : undefined;
+}
+
+export type SortDir = "asc" | "desc";
+
+/** `?sort=field&dir=asc|desc`, restricted to the fields a route allows - anything else falls back. */
+export function parseSort<T extends string>(req: Request, allowed: readonly T[], fallback: { field: T; dir: SortDir }): { field: T; dir: SortDir } {
+  const field = typeof req.query.sort === "string" && (allowed as readonly string[]).includes(req.query.sort) ? (req.query.sort as T) : fallback.field;
+  const dir: SortDir = req.query.dir === "asc" || req.query.dir === "desc" ? req.query.dir : field === fallback.field ? fallback.dir : "asc";
+  return { field, dir };
+}

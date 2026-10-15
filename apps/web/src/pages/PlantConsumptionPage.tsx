@@ -7,6 +7,7 @@ import {
   usePlants,
   usePlantStock,
   usePreProductionsByPlant,
+  useProductionBatches,
   useRecordPlantConsumption,
   type RecordPlantConsumptionPayload,
 } from "../lib/hooks";
@@ -16,6 +17,7 @@ import { SkeletonRows } from "../components/Skeleton";
 import { useToast } from "../components/Toast";
 import { ApiError } from "../lib/api";
 import type { PreProduction } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
 
 // Plant records, per production run, how much RM/PM it consumed / wasted
 // / rejected / returned to a store — requirement I. Distinct from
@@ -80,9 +82,9 @@ function RunListItem({ run, selected, onSelect }: { run: PreProduction; selected
     >
       <p className="truncate font-bold text-slate-800">{run.purchaseOrderItem.productName}</p>
       <p className="text-xs text-slate-500">
-        {run.purchaseOrderItem.purchaseOrder.poNumber ?? "No PO #"} · {run.purchaseOrderItem.purchaseOrder.customer.companyName}
+        {run.purchaseOrderItem.purchaseOrder.poNumber ?? "No PO #"} · <CustomerName name={run.purchaseOrderItem.purchaseOrder.customer.companyName} />
       </p>
-      <p className="mt-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{run.currentStageId.replace(/_/g, " ")}</p>
+      <p className="mt-1 text-micro font-bold uppercase tracking-wider text-slate-400">{run.currentStageId.replace(/_/g, " ")}</p>
     </button>
   );
 }
@@ -93,7 +95,7 @@ function RunDetail({ run, plantId, canRecord }: { run: PreProduction; plantId: s
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">Balance for this run</h2>
+        <h2 className="mb-3 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">Balance for this run</h2>
         {balanceLoading ? (
           <SkeletonRows rows={2} cols={6} />
         ) : !balance?.items.length ? (
@@ -136,7 +138,7 @@ function RunDetail({ run, plantId, canRecord }: { run: PreProduction; plantId: s
                 </tbody>
               </table>
             </div>
-            <p className="border-t border-slate-100 px-4 py-2 text-[10px] text-slate-400">Plant On-Hand is whole-Plant, not per-run — other runs may share the same physical stock.</p>
+            <p className="border-t border-slate-100 px-4 py-2 text-micro text-slate-400">Plant On-Hand is whole-Plant, not per-run — other runs may share the same physical stock.</p>
           </div>
         )}
       </div>
@@ -151,6 +153,9 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
   const { data: plantStock } = usePlantStock(plantId);
   const { data: dayStores } = useDayStores();
   const record = useRecordPlantConsumption(preProductionId);
+  const { data: batches } = useProductionBatches(preProductionId);
+  const [batchId, setBatchId] = useState("");
+  const [sampleQty, setSampleQty] = useState("");
 
   const [itemId, setItemId] = useState("");
   const [unit, setUnit] = useState("");
@@ -170,6 +175,7 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
     setConsumedQty("");
     setWastedQty("");
     setRejectedQty("");
+    setSampleQty("");
     setReturnedQty("");
     setDestDayStoreId("");
     setNote("");
@@ -181,7 +187,8 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
     const wasted = Number(wastedQty) || 0;
     const rejected = Number(rejectedQty) || 0;
     const returned = Number(returnedQty) || 0;
-    if (consumed + wasted + rejected + returned <= 0) return toast.error("Enter at least one quantity greater than zero.");
+    const sample = Number(sampleQty) || 0;
+    if (consumed + wasted + rejected + sample + returned <= 0) return toast.error("Enter at least one quantity greater than zero.");
     if (returned > 0 && destinationType === "DAY_STORE" && !destDayStoreId) return toast.error("Select a destination Day Store for the return.");
 
     const body: RecordPlantConsumptionPayload = {
@@ -190,6 +197,8 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
       wastedQty: wasted,
       rejectedQty: rejected,
       returnedQty: returned,
+      sampleQty: sample,
+      productionBatchId: batchId || undefined,
       unit: unit.trim() || (stockItems.find((i) => i.id === itemId)?.unit ?? ""),
       destinationType: returned > 0 ? destinationType : undefined,
       destDayStoreId: returned > 0 && destinationType === "DAY_STORE" ? destDayStoreId : undefined,
@@ -227,6 +236,15 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
           <label className="label">Unit</label>
           <input className="field" value={unit} onChange={(e) => setUnit(e.target.value)} />
         </div>
+        <div className="sm:col-span-3">
+          <label className="label">Batch</label>
+          <ItemPicker
+            items={(batches ?? []).map((b) => ({ id: b.id, name: `${b.batchNo ?? `Batch ${b.id.slice(0, 8)}`} · planned ${b.plannedQty}` }))}
+            value={batchId}
+            onChange={setBatchId}
+            placeholder="— Which batch used it (optional) —"
+          />
+        </div>
         <div>
           <label className="label">Consumed</label>
           <input className="field font-mono" type="number" min="0" step="any" value={consumedQty} onChange={(e) => setConsumedQty(e.target.value)} />
@@ -238,6 +256,10 @@ function EntryForm({ preProductionId, plantId }: { preProductionId: string; plan
         <div>
           <label className="label">Rejected</label>
           <input className="field font-mono" type="number" min="0" step="any" value={rejectedQty} onChange={(e) => setRejectedQty(e.target.value)} />
+        </div>
+        <div>
+          <label className="label">Sample</label>
+          <input className="field font-mono" type="number" min="0" step="any" value={sampleQty} onChange={(e) => setSampleQty(e.target.value)} />
         </div>
         <div>
           <label className="label">Returned</label>

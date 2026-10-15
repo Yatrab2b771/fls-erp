@@ -4,8 +4,11 @@ export interface CurrentUser {
   id: string;
   employeeId: number;
   email: string;
+  loginId: string | null;
   fullName: string;
   roles: RoleName[];
+  /** The departments this person is the admin of ("My team" shows for them). */
+  deptAdminOf: RoleName[];
 }
 
 export interface Customer {
@@ -16,6 +19,11 @@ export interface Customer {
   gstNo: string | null;
   email: string | null;
   deliveryAddress: string | null;
+  /** Picked by BD. "New" (joined in the last 90 days) comes from createdAt. */
+  isTop10?: boolean;
+  /** New: set by hand, else joined in the last 90 days (worked out by the server). */
+  isNew?: boolean;
+  createdAt?: string;
 }
 
 // The vendor directory — RM/PM suppliers, not to be confused with
@@ -135,6 +143,7 @@ export interface PlantConsumptionBalanceItem {
   consumedQty: number;
   wastedQty: number;
   rejectedQty: number;
+  sampleQty: number;
   returnedQty: number;
   // Whole-Plant live on-hand for this item — NOT scoped to this one run;
   // several runs can share the same physical stock pool. See the
@@ -186,6 +195,9 @@ export interface PurchaseOrderItem {
   id: string;
   purchaseOrderId: string;
   productName: string;
+  // Powder / Gummies / Bars / ... — null only on lines that predate the
+  // field (the API requires it on every new one).
+  productCategory: string | null;
   dosageForm: string | null;
   quantity: number;
   unit: string;
@@ -212,11 +224,29 @@ export interface PurchaseOrderItem {
   // regulatoryStatus (BD's own self-declared field). Set via PATCH
   // /:id/items/:itemId/regulatory-review, REGULATORY-only.
   regulatoryStatus?: "Approved" | "Not Approved" | null;
+  // Set automatically when the product's BOM/RM plan is CALCULATED — that is
+  // what puts it in Regulatory's review queue. Null = not sent yet.
+  sentToRegulatoryAt?: string | null;
+  // PPIC's Hold on this product's materials (Material Planning) — a held
+  // product takes no stock in the FIFO queue. Cleared when sent to Production.
+  materialHeldAt?: string | null;
+  // PPIC's Cancel - the product is dead for good (no undo). Cancelled
+  // products drop out of every planning list and the PO's completion.
+  cancelledAt?: string | null;
+  cancelReason?: string | null;
   regulatoryRemarks?: string | null;
   regulatoryReviewedAt?: string | null;
+  // Where the product is once it has been sent to Production (null before that). One rule on the server, used by every list.
+  // BD's open Hold / Cancel request for this product, waiting for PPIC.
+  changeRequests?: { id: string; kind: "HOLD" | "CANCEL"; reason: string; requestedAt: string }[];
+  productionStage?: "PRE_PRODUCTION" | "IN_PRODUCTION" | "FINISHED_GOODS" | "DISPATCH" | "COMPLETED" | null;
+  // How much of this product's own order has gone out to the customer, and whether that covers the ordered quantity.
+  dispatch?: { dispatchedQty: number; isCompleted: boolean; completionDate: string | null };
   // Set once PPIC's "Send Plan to Production" succeeds — the hard gate
   // Production's own Pre-Production creation checks.
   planSentToProductionAt?: string | null;
+  // How much of `quantity` PPIC has released to Production so far; null = all of it.
+  releasedQty?: number | null;
 }
 
 export interface PurchaseOrderDocument {
@@ -255,6 +285,84 @@ export interface PendingPoMaterialRow {
   bomPlanned: boolean;
   rmMaterials: PendingMaterialLine[];
   pmMaterials: PendingMaterialLine[];
+}
+
+// Material Planning (see apps/api material-planning.ts) — one row per
+// raw/packaging material of every planned product, with how much live stock
+// covers it under the FIFO queue, and how much is short.
+// PPIC's dashboard tiles, counted on the server over every PO (see ppic.routes.ts).
+export interface PpicSummary {
+  totalPos: number;
+  totalProducts: number;
+  notPlannedPos: number;
+  notPlannedProducts: number;
+  materialPlanning: number;
+  materialShortProducts: number;
+  poReadiness: number;
+  inProduction: number;
+  onHold: number;
+  cancelled: number;
+  pendingPos: number;
+  poLogged: number;
+  completedPos: number;
+  completedProducts: number;
+  bdRequests: number;
+  qaAwaited: number;
+}
+
+export type MaterialType = "RM" | "PM";
+export type MaterialStatus = "COVERED" | "SHORT" | "NOT_IN_CATALOG";
+// SENT = plan sent to Production (firm claim); ACTIVE = claiming in FIFO
+// order; HELD / NOT_APPROVED = not claiming, numbers are an "if released" preview.
+export type MaterialProductState = "SENT" | "ACTIVE" | "HELD" | "NOT_APPROVED";
+
+export interface MaterialPlanningRow {
+  purchaseOrderId: string;
+  purchaseOrderItemId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  type: MaterialType;
+  material: string;
+  unit: string;
+  requiredQty: number;
+  onHand: number | null;
+  coveredQty: number | null;
+  shortQty: number | null;
+  status: MaterialStatus;
+  isPreview: boolean;
+}
+
+export interface MaterialPlanningProduct {
+  purchaseOrderId: string;
+  purchaseOrderItemId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  productCategory: string | null;
+  quantity: number;
+  unit: string;
+  regulatoryStatus: string | null;
+  plannedPlantId: string | null;
+  sentToRegulatoryAt: string | null;
+  planSentToProductionAt: string | null;
+  // Set while PPIC has released only part of the order to Production.
+  releasedQty: number | null;
+  heldAt: string | null;
+  state: MaterialProductState;
+  materialCount: number;
+  shortCount: number;
+  hasShortfall: boolean;
+  rmPlanned: boolean;
+  bomPlanned: boolean;
+  // When both plans were calculated - in Material Planning since then (its Aging).
+  plannedAt: string | null;
+}
+
+export interface MaterialPlanningResult {
+  products: MaterialPlanningProduct[];
+  rows: MaterialPlanningRow[];
 }
 
 export interface PurchaseOrder {
@@ -366,7 +474,6 @@ export interface PoBdPpicReportRow {
   unit: string;
   dispatchedQty: number;
   dispatchDate: string | null;
-  value: number | null;
   ageingDays: number;
 }
 
@@ -462,44 +569,6 @@ export interface PoReconciliation {
   totals: PoReconciliationTotals;
 }
 
-// --- PO-level consolidated Billing — one commercial invoice for the
-// whole PO (separate from each CombinedLot's own Billing & E-Way Bill
-// stage, which is per-shipment paperwork). Price per Pouch (from the item's own
-// RM Costing plan) x estimated pouches shipped — see
-// purchase-orders.routes.ts's GET/POST /:id/billing. ---
-export interface PoBillingLine {
-  purchaseOrderItemId: string;
-  productName: string;
-  unit: string;
-  dispatchedQtyKg: number;
-  packSizeG: number | null;
-  pricePerPouch: number | null;
-  estimatedPouches: number | null;
-  amount: number | null;
-  priced: boolean;
-}
-
-export interface PurchaseOrderInvoice {
-  id: string;
-  purchaseOrderId: string;
-  invoiceNo: string | null;
-  invoiceDate: string | null;
-  totalAmount: number;
-  lineItems: PoBillingLine[];
-  generatedById: string;
-  generatedBy: { fullName: string; email: string };
-  generatedAt: string;
-  updatedAt: string;
-}
-
-export interface PoBilling {
-  poId: string;
-  poNumber: string | null;
-  lines: PoBillingLine[];
-  totalAmount: number;
-  invoice: PurchaseOrderInvoice | null;
-}
-
 // --- Recycle Store — a read-only combined view over the two waste
 // ledgers this app writes to automatically (see recycle-store.routes.ts):
 // a real RM/PM spill at Dispensing (traced to a PreProduction run) or a
@@ -593,7 +662,9 @@ export type CombinedLotStageId =
   | "FG_STORE"
   | "FG_QC_RELEASE"
   | "BILLING_EWAY_BILL"
-  | "DISPATCH_PLAN";
+  | "DISPATCH_PLAN"
+  // A production batch only: finished goods approved by QA, ready for the Day Store to hand over to Dispatch.
+  | "FG_HANDOVER";
 
 export interface StageDelay {
   isDelayed: boolean;
@@ -662,12 +733,33 @@ export interface CoaTestResult {
 
 // Tier 2 — one small manufacturing run against a PreProduction. No stage
 // machine — just IN_PROGRESS -> COMPLETED.
+export type BatchPrepStageId = "INDENT_ISSUE" | "BATCH_NO" | "DISPENSING" | "LINE_CLEARANCE" | "READY";
+export interface UtilizationPart {
+  required: number;
+  logged: number;
+  missing: string[];
+  complete: boolean;
+}
+export interface UtilizationItem {
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  requiredQty: number;
+  givenQty: number;
+}
+
 export interface ProductionBatch {
   id: string;
   preProductionId: string;
   batchNo: string | null;
   plannedQty: number;
   status: "IN_PROGRESS" | "COMPLETED";
+  // The batch production sheet.
+  shift: "Day" | "Night" | null;
+  manpowerCount: number | null;
+  shiftStartAt: string | null;
+  shiftEndAt: string | null;
   manufacturingStartDate: string | null;
   manufacturingStatus: string | null;
   manufacturingEndDate: string | null;
@@ -676,6 +768,28 @@ export interface ProductionBatch {
   inputQty: number | null;
   outputQty: number | null;
   wastage: StageWastage;
+  // Where its Utilization stands. The fields here are the RM sheet (every plan RM needs a Production quantity on the batch before the end
+  // time and Mark Completed open); `pm` is the packaging-material sheet (Packaging); `items` are the plan's materials for this batch
+  // with what the Day Store dispensed for it.
+  utilization?: UtilizationPart & { pm: UtilizationPart; items: UtilizationItem[] };
+  // The per-batch preparation (a run started with batchFlow): Indent (Production), Batch No (R&D), Dispensing (Day Store), Line Clearance (QA).
+  prepStageId: BatchPrepStageId;
+  prodIndentSlipSign: string | null;
+  productionPlanDate: string | null;
+  batchNoAllocatedAt: string | null;
+  rmDispensingDate: string | null;
+  pmIssuedDate: string | null;
+  dispensingRemarks: string | null;
+  dispensedAt: string | null;
+  grnNo: string | null;
+  lineClearanceStatus: string | null;
+  lineClearanceRemarks: string | null;
+  lineClearanceAt: string | null;
+  // Packaging's own production sheet.
+  packagingShift: "Day" | "Night" | null;
+  packagingManpowerCount: number | null;
+  packagingStartAt: string | null;
+  packagingEndAt: string | null;
   completedById: string | null;
   completedByName: string | null;
   completedAt: string | null;
@@ -684,6 +798,7 @@ export interface ProductionBatch {
   createdAt: string;
   preProduction: {
     id: string;
+    batchFlow?: boolean;
     purchaseOrderItem: {
       id: string;
       productName: string;
@@ -733,6 +848,8 @@ export interface ProductionBatch {
   billingRemarks: string | null;
   dispatchDate: string | null;
   dispatchedQty: number | null;
+  // Set when the Day Store has handed the approved finished goods to Dispatch (stage FG_HANDOVER).
+  handedOverToDispatchAt?: string | null;
   shipperQty: number | null;
   totalShipperWeight: number | null;
   transportType: string | null;
@@ -758,6 +875,8 @@ export interface PreProduction {
   // plannedQty - combinedQty, computed server-side — how much production
   // is still unaccounted for before a CombinedLot can form.
   remainingQty: number;
+  // How much of the order PPIC has released to Production (batches can be planned up to this).
+  releasedQty?: number;
   grnNo: string | null;
   grnDate: string | null;
   materialReceivedRemarks: string | null;
@@ -781,8 +900,11 @@ export interface PreProduction {
   purchaseOrderItem: {
     id: string;
     productName: string;
+    productCategory?: string | null;
+    productType?: "EXISTING" | "NEW";
     quantity: number;
     unit: string;
+    volume?: number | null;
     purchaseOrder: { id: string; poNumber: string | null; customer: { id: string; companyName: string } };
   };
   stageEvents: PreProductionStageEvent[];
@@ -967,6 +1089,11 @@ export interface CatalogSku {
   customerId: string;
   customerName: string;
   productName: string;
+  // Header block of the PM BOM sheet.
+  productCode?: string | null;
+  packSize?: string | null;
+  packingConfig?: string | null;
+  batchPacks?: number | null;
   jar?: string | null;
   wadMm?: string | null;
   scoopMl?: string | null;
@@ -998,6 +1125,15 @@ export interface PackagingComponent {
   quantity: number | null;
   unit: string;
   pmCode: string | null;
+  // The Store PM item this component is linked to, when R&D picked one.
+  pmItemId?: string | null;
+  itemName?: string | null;
+  itemCode?: string | null;
+  // The PM BOM sheet's OV% (0.02 = 2%), Specification, Make and Primary/Secondary/Tertiary level.
+  overagePct?: number | null;
+  spec?: string | null;
+  make?: string | null;
+  packingLevel?: string | null;
 }
 
 // The real PM SHEET's 21 known packaging types — the checklist the
@@ -1122,7 +1258,9 @@ export interface RecipeRequest {
   poNumber: string | null;
 }
 
+// Set when Generate could not work the order out (for example a Kg order with no pack size).
 export interface BomPlan {
+  conversionProblem?: string;
   id: string;
   name: string;
   dateFrom: string | null;
@@ -1144,8 +1282,15 @@ export interface RecipeSummary {
   id: string;
   name: string;
   totalServing: number;
+  // The customer this recipe is for; null = an older common recipe.
+  customerId?: string | null;
+  kind?: RecipeKind;
+  productCode?: string | null;
   ingredientCount: number;
 }
+
+// PER_KG = quantity per Kg of batch (powder, bar); PER_UNIT = milligrams per gummy / capsule.
+export type RecipeKind = "PER_KG" | "PER_UNIT";
 
 // One ingredient row as stored, full detail — used by the manual
 // "Browse & Edit Recipe" editor (see RecipeEditor in RmCostingPage.tsx),
@@ -1155,10 +1300,10 @@ export interface RecipeIngredientRow {
   name: string;
   brand: string;
   itemCode: string | null;
-  costPerKg: number;
   gPerServing: number;
   proteinPct: number;
   sortOrder: number;
+  uom?: string;
 }
 
 // GET /api/rm-costing/recipes/:id — a Recipe's full ingredient list, for
@@ -1167,20 +1312,12 @@ export interface RecipeDetail {
   id: string;
   name: string;
   totalServing: number;
+  kind?: RecipeKind;
+  productCode?: string | null;
+  versionLabel?: string | null;
+  batchSize?: number | null;
+  avgUnitWeightMg?: number | null;
   ingredients: RecipeIngredientRow[];
-}
-
-export interface CostingParams {
-  mfgLossPct: number;
-  packSizeG: number;
-  testCost: number;
-  jarCost: number;
-  scoopCost: number;
-  labelCost: number;
-  convCost: number;
-  ccbCost: number;
-  profitPct: number;
-  gstPct: number;
 }
 
 export interface BatchIngredientResult {
@@ -1188,12 +1325,9 @@ export interface BatchIngredientResult {
   brand: string;
   itemCode: string | null;
   proteinPct: number;
-  costPerKg: number;
-  ratePerGm: number;
   gPerServing: number;
   perBatchGrams: number;
   qtyInKg: number;
-  amount: number;
 }
 
 export interface BatchCostingResult {
@@ -1202,16 +1336,6 @@ export interface BatchCostingResult {
   batchSizeKg: number;
   servingsPerBatch: number;
   proteinPctInBatch: number;
-  costPerKgWithoutPkg: number;
-  totalRmCost: number;
-  testCost: number;
-  mfgLossPct: number;
-  mfgLossAmount: number;
-  packagingTotal: number;
-  cogsPerPouch: number;
-  profitAmount: number;
-  gstAmount: number;
-  pricePerPouch: number;
   ingredients: BatchIngredientResult[];
 }
 
@@ -1219,7 +1343,6 @@ export interface ProcurementLine {
   name: string;
   brand: string;
   itemCode: string | null;
-  estCostPerKg: number;
   totalKg: number;
   sources: Record<string, number>;
 }
@@ -1237,12 +1360,12 @@ export interface RmPlanItem {
 }
 
 export interface RmPlan {
+  conversionProblem?: string;
   id: string;
   name: string;
   dateFrom: string | null;
   dateTo: string | null;
   status: "DRAFT" | "CALCULATED";
-  costingParams: CostingParams;
   calculatedAt: string | null;
   createdAt: string;
   sentToPreInventoryAt: string | null;
@@ -1280,7 +1403,7 @@ export type InventoryCategory = "RM" | "PM";
 export type InventoryTxnType = "RECEIVED" | "ISSUED_DAY_STORE" | "ISSUED_PRODUCTION" | "ISSUED_RND";
 export type DispatchTransferType = "FG" | "BILL";
 // Inward QC gate — RECEIVED rows only; null for ISSUED_* rows.
-export type InventoryReceiptStatus = "PENDING_QC" | "ON_HOLD" | "QC_APPROVED" | "QC_REJECTED" | "ACCEPTED";
+export type InventoryReceiptStatus = "PENDING_QC" | "TESTING" | "ON_HOLD" | "QC_APPROVED" | "QC_REJECTED" | "ACCEPTED";
 // Outward QC gate — FG dispatch transfers only; null for BILL rows.
 export type DispatchQcStatus = "PENDING_QC" | "ON_HOLD" | "QC_APPROVED" | "QC_REJECTED";
 
@@ -1322,6 +1445,8 @@ export interface DayStore {
 export interface Plant {
   id: string;
   name: string;
+  // The Day Store this Plant is paired with (null for an unpaired Plant).
+  dayStoreId?: string | null;
   createdAt: string;
 }
 
@@ -1423,6 +1548,8 @@ export interface InventoryTransaction {
   // a partial rejectedQty). Always present as an array (possibly empty),
   // newest first — see txnInclude on the API side.
   debitNotes: DebitNote[];
+  // The Vendor PO this delivery was received against (null for a direct / opening-stock receipt).
+  vendorPurchaseOrderItem?: { vendorPurchaseOrder: { poNumber: string } } | null;
 }
 
 // GET /inventory/quarantine — a RECEIVED row still awaiting its first QC
@@ -1613,6 +1740,24 @@ export interface InventoryRequest {
 // what's available, Purchase logs a PO for the shortfall, Finance reads
 // the resulting vendor list. See PreInventoryRequirement in schema.prisma. ---
 
+// One slice of a shortfall Purchase has ordered: "40 Kg on PI-102 from Vendor A, ETA 12 Oct".
+export interface PurchaseLine {
+  id: string;
+  requirementId: string;
+  quantity: number;
+  receivedQty: number;
+  piNumber: string;
+  vendorName: string;
+  eta: string;
+  status: "OPEN" | "RECEIVED";
+  /** What Finance decided on this line (none yet = waiting for Finance). */
+  finance?: { status: "PAID_PARTIAL" | "PAID_FULL" | "ON_HOLD" | "REJECTED"; remarks: string | null; remarksAt: string } | null;
+  loggedBy: PersonRef;
+  loggedAt: string;
+  correctedAt: string | null;
+  closedAt: string | null;
+}
+
 export interface PreInventoryRequirement {
   id: string;
   date: string;
@@ -1643,6 +1788,16 @@ export interface PreInventoryRequirement {
   // PPIC's one-time "Send to Purchase" notify — set once, then the
   // button disables so repeat clicks don't spam Purchase.
   purchaseNotifiedAt: string | null;
+  // Purchase can split the shortfall into several PI lines (20 + 40 + 40 Kg).
+  purchaseLines: PurchaseLine[];
+  // The part of the shortfall covered by lines still to arrive, and what Purchase can still log.
+  onOrderQty: number;
+  remainingToLog: number;
+  // The customer PO and product this row was raised for (rows sent from Material
+  // Planning); null for manual / imported rows. The page groups by it.
+  sourcePo: { poId: string; poNumber: string | null; customerName: string; itemId: string; productName: string; quantity: number; unit: string } | null;
+  // Raised from a Day Store / R&D material request the Warehouse could not fill (PPIC sends it on to Purchase).
+  requestSource: { kind: "DAY_STORE" | "RND"; label: string } | null;
 }
 
 // --- Add on Plan — PPIC's PO-independent material availability search
@@ -1664,6 +1819,41 @@ export interface AddOnPlanMaterialLine {
   onHand: number | null;
   short: boolean;
   shortfallQty: number;
+  /** Add on Plan: the packaging level, and the spec (packaging) or brand (raw material) shown under the name. */
+  group?: string;
+  detail?: string;
+}
+
+/** A product the Add on Plan check can work out: its customer's Packaging BOM (PM) and / or RM formulation. */
+export interface AddOnProduct {
+  key: string;
+  customerId: string;
+  customerName: string;
+  name: string;
+  hasPm: boolean;
+  hasRm: boolean;
+}
+
+export interface AddOnSection {
+  /** false when this side cannot be worked out: `problem` says why */
+  available: boolean;
+  problem: string | null;
+  lines: AddOnPlanMaterialLine[];
+}
+
+export interface AddOnResult {
+  productName: string;
+  customerName: string;
+  quantity: number;
+  unit: "KG" | "PACKS";
+  kg: number | null;
+  packs: number | null;
+  /** The working of the Kg / packs conversion, e.g. "100 Kg / 1 Kg = 100 packs" */
+  note: string | null;
+  rm: AddOnSection;
+  pm: AddOnSection;
+  summary: { total: number; short: number; notInCatalog: number };
+  calculatedAt: string;
 }
 
 export interface AddOnPlanDetail {
@@ -1754,11 +1944,18 @@ export interface AppNotification {
 export interface ManagedUser {
   id: string;
   employeeId: number;
+  loginId: string | null;
   email: string;
   fullName: string;
   isActive: boolean;
   createdAt: string;
+  lastLoginAt: string | null;
+  /** When the password was last changed, and by whom: ADMIN (reset by an admin), USER (himself) or SYSTEM (script). The password itself is never shown. */
+  passwordChangedAt: string | null;
+  passwordChangedBy: "ADMIN" | "USER" | "SYSTEM" | null;
   roles: RoleName[];
+  /** The departments this person is the (one) admin of. */
+  deptAdminOf: RoleName[];
 }
 
 // --- Recycle Bin (Admin only) — every soft-deletable entity type in the
@@ -1995,4 +2192,20 @@ export interface AuditLogEntry {
   metadata: Record<string, unknown> | null;
   createdAt: string;
   actor: (PersonRef & { email: string }) | null;
+}
+
+// One saved version of a Packaging BOM (kind "PM") or an RM recipe (kind "RM"); the newest is the Active one.
+export interface BomVersionSummary {
+  version: number;
+  note: string | null;
+  createdAt: string;
+  createdByName: string | null;
+  active: boolean;
+}
+
+// A product name BD has put on a PO - names only, R&D sees nothing else of the PO.
+export interface PoProduct {
+  customerId: string;
+  customerName: string;
+  productName: string;
 }

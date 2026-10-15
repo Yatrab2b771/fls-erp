@@ -44,7 +44,7 @@ export async function getRequiredDispensingItems(purchaseOrderItemId: string): P
   if (bomPlan?.resultSnapshot) {
     const result = bomPlan.resultSnapshot as unknown as BomResult;
     for (const line of result.lines) {
-      if (line.totalQty > 0) rows.push({ category: "PM", itemName: `${line.component} — ${line.spec}`, unit: "Count", requiredQty: line.totalQty });
+      if (line.totalQty > 0) rows.push({ category: "PM", itemName: line.itemName ?? `${line.component} — ${line.spec}`, unit: "Count", requiredQty: line.totalQty });
     }
   }
   if (rows.length === 0) return [];

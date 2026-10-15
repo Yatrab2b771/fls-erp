@@ -1,6 +1,9 @@
 import * as XLSX from "xlsx";
-import type { PendingPoMaterialRow, PreProduction, ProductionBatch } from "./types";
-import { getItemStage, getPoAgingDays, hasCalculatedBom, hasCalculatedRm, PPIC_PLANNING_METRIC_LABEL, type PpicPlanningMetric, type PpicPlanningResult } from "./ppicPlanning";
+import type { MaterialPlanningProduct, MaterialPlanningRow, PendingPoMaterialRow, PreProduction, ProductionBatch } from "./types";
+import { agingDays } from "../components/AgingCell";
+import { PRODUCT_STATE_LABEL } from "./materialPlanning";
+import { getItemStage, hasCalculatedBom, hasCalculatedRm, PPIC_PLANNING_METRIC_LABEL, type PpicPlanningMetric, type PpicPlanningResult } from "./ppicPlanning";
+import { customerTypeLabel } from "./customerTags";
 
 function download(sheetName: string, rows: Record<string, unknown>[], filename: string) {
   const sheet = XLSX.utils.json_to_sheet(rows);
@@ -11,6 +14,39 @@ function download(sheetName: string, rows: Record<string, unknown>[], filename: 
 
 function todayStamp(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Material Planning export — the same (filtered) rows the list shows, one Excel
+// row per material, with the product's queue state so a held / not-approved
+// product's "if released" numbers can't be mistaken for a live allocation.
+export function exportMaterialPlanningReport(rows: (MaterialPlanningRow & { onOrder?: { quantity: number; nextEta: string } | null })[], products: MaterialPlanningProduct[]): number {
+  const productById = new Map(products.map((p) => [p.purchaseOrderItemId, p]));
+  const lines = rows.map((r) => {
+    const p = productById.get(r.purchaseOrderItemId);
+    return {
+      "PO Number": r.poNumber ?? r.purchaseOrderId.slice(0, 8),
+      Status: r.status === "NOT_IN_CATALOG" ? "Not in catalog" : r.status === "SHORT" ? "Short" : "Covered",
+      Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
+      Product: r.productName,
+      Category: r.productCategory ?? "",
+      "Aging (Days)": agingDays(p?.plannedAt) ?? "",
+      "Product State": p ? PRODUCT_STATE_LABEL[p.state] : "",
+      Regulatory: p ? (p.regulatoryStatus ?? (p.sentToRegulatoryAt ? "Pending" : "Not Sent")) : "",
+      Type: r.type === "RM" ? "Raw Material" : "Packaging Material",
+      Material: r.material,
+      Unit: r.unit,
+      Required: r.requiredQty,
+      "On Hand (Live Stock)": r.onHand ?? "",
+      Covered: r.coveredQty ?? "",
+      Short: r.shortQty ?? "",
+      "On Order (Purchase PIs)": r.onOrder?.quantity ?? "",
+      "Next ETA": r.onOrder ? new Date(r.onOrder.nextEta).toLocaleDateString() : "",
+      "If Released (Preview)": r.isPreview ? "Yes" : "",
+    };
+  });
+  download("Material Planning", lines, `FLS_PPIC_material_planning_${todayStamp()}.xlsx`);
+  return lines.length;
 }
 
 // One material list -> "Name (qty unit) [Short by X unit]; ..." — Excel
@@ -41,20 +77,22 @@ export function exportPpicPlanningReport(
     const { preRuns, batches, materialRows } = pendingPosExtras ?? { preRuns: [], batches: [], materialRows: [] };
     const materialsByItemId = new Map(materialRows.map((r) => [r.purchaseOrderItemId, r]));
 
-    const lines = result.rows.map(({ po, item }) => {
+    const lines = result.rows.map(({ po, item, sinceAt }) => {
       const materials = materialsByItemId.get(item.id);
       const isDelayed = !!po.expectedDeliveryDate && new Date(po.expectedDeliveryDate) < new Date();
       return {
         "PO Number": po.poNumber ?? po.id.slice(0, 8),
+        "Current Stage": getItemStage(item, preRuns, batches),
         Customer: po.customer.companyName,
+        "Customer Type": customerTypeLabel(po.customer.companyName),
+        "In List Since": (sinceAt ?? "").slice(0, 10),
         Product: item.productName,
         Quantity: item.quantity,
         Unit: item.unit,
-        "Aging (Days)": getPoAgingDays(po),
+        "Aging (Days)": agingDays(sinceAt) ?? "",
         "Expected Delivery": po.expectedDeliveryDate ? po.expectedDeliveryDate.slice(0, 10) : "",
         Delayed: po.expectedDeliveryDate ? (isDelayed ? "Yes" : "No") : "",
         "Regulatory Body": po.regulatoryBody ?? "",
-        "Current Stage": getItemStage(item, preRuns, batches),
         "RM Materials": materialsToText(materials?.rmMaterials, materials?.rmPlanned),
         "PM Materials": materialsToText(materials?.pmMaterials, materials?.bomPlanned),
       };
@@ -64,19 +102,101 @@ export function exportPpicPlanningReport(
     return lines.length;
   }
 
+  if (metric === "cancelled" && result.kind === "item") {
+    const lines = result.rows.map(({ po, item, sinceAt }) => ({
+      "PO Number": po.poNumber ?? po.id.slice(0, 8),
+      Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
+      "In List Since": (sinceAt ?? "").slice(0, 10),
+      "Aging (Days)": agingDays(sinceAt) ?? "",
+      Product: item.productName,
+      Category: item.productCategory ?? "",
+      Quantity: item.quantity,
+      Unit: item.unit,
+      "Cancelled On": item.cancelledAt?.slice(0, 10) ?? "",
+      Reason: item.cancelReason ?? "",
+    }));
+    download(label, lines, `FLS_PPIC_cancelled_${todayStamp()}.xlsx`);
+    return lines.length;
+  }
+
+  if (metric === "on-hold" && result.kind === "item") {
+    const lines = result.rows.map(({ po, item, sinceAt }) => ({
+      "PO Number": po.poNumber ?? po.id.slice(0, 8),
+      Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
+      "In List Since": (sinceAt ?? "").slice(0, 10),
+      "Aging (Days)": agingDays(sinceAt) ?? "",
+      Product: item.productName,
+      Category: item.productCategory ?? "",
+      Quantity: item.quantity,
+      Unit: item.unit,
+      "On Hold Since": item.materialHeldAt?.slice(0, 10) ?? "",
+      Planning: hasCalculatedRm(item) && hasCalculatedBom(item) ? "Planned" : hasCalculatedRm(item) || hasCalculatedBom(item) ? "Partially Planned" : "Not Planned",
+    }));
+    download(label, lines, `FLS_PPIC_on_hold_${todayStamp()}.xlsx`);
+    return lines.length;
+  }
+
+  if (metric === "plan-sent" && result.kind === "item") {
+    const { preRuns, batches } = pendingPosExtras ?? { preRuns: [], batches: [] };
+    const lines = result.rows.map(({ po, item, sinceAt }) => ({
+      "PO Number": po.poNumber ?? po.id.slice(0, 8),
+      "Current Stage": getItemStage(item, preRuns, batches),
+      Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
+      "In List Since": (sinceAt ?? "").slice(0, 10),
+      "Aging (Days)": agingDays(sinceAt) ?? "",
+      Product: item.productName,
+      Category: item.productCategory ?? "",
+      Quantity: item.quantity,
+      Unit: item.unit,
+      Plant: item.plannedPlant?.name ?? "",
+      "Sent On": item.planSentToProductionAt?.slice(0, 10) ?? "",
+    }));
+    download(label, lines, `FLS_PPIC_in_production_${todayStamp()}.xlsx`);
+    return lines.length;
+  }
+
+  if (metric === "not-planned-pos" && result.kind === "item") {
+    const lines = result.rows.map(({ po, item, sinceAt }) => ({
+      "PO Number": po.poNumber ?? po.id.slice(0, 8),
+      Status: hasCalculatedRm(item) || hasCalculatedBom(item) ? "Partially Planned" : "Not Planned",
+      Customer: po.customer.companyName,
+      "Customer Type": customerTypeLabel(po.customer.companyName),
+      "In List Since": (sinceAt ?? "").slice(0, 10),
+      "Aging (Days)": agingDays(sinceAt) ?? "",
+      Product: item.productName,
+      Category: item.productCategory ?? "",
+      Quantity: item.quantity,
+      Unit: item.unit,
+      "Order Date": po.orderDate?.slice(0, 10) ?? "",
+      "RM BOM": hasCalculatedRm(item) ? "Yes" : "No",
+      "PM BOM": hasCalculatedBom(item) ? "Yes" : "No",
+    }));
+    download(label, lines, `FLS_PPIC_not_planned_${todayStamp()}.xlsx`);
+    return lines.length;
+  }
+
   const lines =
     result.kind === "po"
       ? result.rows.map((po) => ({
           "PO Number": po.poNumber ?? po.id.slice(0, 8),
-          Customer: po.customer.companyName,
-          "Order Date": po.orderDate?.slice(0, 10) ?? "",
           Status: po.status,
+          Customer: po.customer.companyName,
+          "Customer Type": customerTypeLabel(po.customer.companyName),
+          "In List Since": ((po as { sinceAt?: string }).sinceAt ?? "").slice(0, 10),
+          "Aging (Days)": agingDays((po as { sinceAt?: string }).sinceAt) ?? "",
+          "Order Date": po.orderDate?.slice(0, 10) ?? "",
           "Product Count": po.items.length,
           Completed: po.completion.isCompleted ? "Yes" : "No",
         }))
-      : result.rows.map(({ po, item }) => ({
+      : result.rows.map(({ po, item, sinceAt }) => ({
           "PO Number": po.poNumber ?? po.id.slice(0, 8),
           Customer: po.customer.companyName,
+          "Customer Type": customerTypeLabel(po.customer.companyName),
+          "In List Since": (sinceAt ?? "").slice(0, 10),
+          "Aging (Days)": agingDays(sinceAt) ?? "",
           Product: item.productName,
           Quantity: item.quantity,
           Unit: item.unit,

@@ -86,7 +86,7 @@ export function VendorPurchaseOrderDetailPage() {
       </div>
 
       <div>
-        <h2 className="mb-3 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+        <h2 className="mb-3 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
           <Package className="h-3.5 w-3.5" /> Line Items
         </h2>
         <div className="card overflow-hidden">
@@ -243,7 +243,7 @@ function LineItemRow({ poId, item, canWrite, canReceive }: { poId: string; item:
       <tr>
         <td className="font-bold text-slate-800">
           {item.item.name}
-          {item.item.code && <span className="ml-1.5 font-mono text-[10px] font-normal text-slate-400">{item.item.code}</span>}
+          {item.item.code && <span className="ml-1.5 font-mono text-micro font-normal text-slate-400">{item.item.code}</span>}
         </td>
         <td className="text-slate-500">{item.item.category}</td>
         <td className="text-right font-mono text-slate-700">{item.quantity}</td>
@@ -327,23 +327,23 @@ function ReceiveItemForm({ poId, item, onDone }: { poId: string; item: VendorPur
   return (
     <div className="grid grid-cols-2 gap-2 p-3 sm:grid-cols-6">
       <div>
-        <label className="label !mb-1 text-[10px]">Qty Received</label>
+        <label className="label !mb-1 text-micro">Qty Received</label>
         <input className="field font-mono" type="number" min="0" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder={`of ${remaining} left`} />
       </div>
       <div>
-        <label className="label !mb-1 text-[10px]">Batch No.</label>
+        <label className="label !mb-1 text-micro">Batch No.</label>
         <input className="field" value={batchNo} onChange={(e) => setBatchNo(e.target.value)} />
       </div>
       <div>
-        <label className="label !mb-1 text-[10px]">GRN No.</label>
+        <label className="label !mb-1 text-micro">GRN No.</label>
         <input className="field" value={grnNo} onChange={(e) => setGrnNo(e.target.value)} />
       </div>
       <div>
-        <label className="label !mb-1 text-[10px]">Mfg. Date</label>
+        <label className="label !mb-1 text-micro">Mfg. Date</label>
         <input className="field" type="date" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
       </div>
       <div>
-        <label className="label !mb-1 text-[10px]">Expiry Date</label>
+        <label className="label !mb-1 text-micro">Expiry Date</label>
         <input className="field" type="date" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
       </div>
       <div className="flex items-end gap-2">
@@ -355,10 +355,10 @@ function ReceiveItemForm({ poId, item, onDone }: { poId: string; item: VendorPur
         </button>
       </div>
       <div className="col-span-2 sm:col-span-6">
-        <label className="label !mb-1 text-[10px]">Remark (optional)</label>
+        <label className="label !mb-1 text-micro">Remark (optional)</label>
         <input className="field" value={remark} onChange={(e) => setRemark(e.target.value)} placeholder="Any note for this delivery" />
       </div>
-      <p className="col-span-2 text-[10px] text-slate-400 sm:col-span-6">Goes to Inward QC for approval before it counts toward stock or completion — see the Inventory page.</p>
+      <p className="col-span-2 text-micro text-slate-400 sm:col-span-6">Goes to Inward QC for approval before it counts toward stock or completion — see the Inventory page.</p>
     </div>
   );
 }

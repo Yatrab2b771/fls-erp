@@ -49,6 +49,7 @@ export interface PoFullReportItem {
   quantity: number;
   unit: string;
   productType: string;
+  productCategory: string | null;
   preProduction: {
     id: string;
     currentStageId: PreProductionStageId;
@@ -247,6 +248,7 @@ export async function getPoFullReport(poId: string): Promise<PoFullReport | null
       quantity: item.quantity,
       unit: item.unit,
       productType: item.productType,
+      productCategory: item.productCategory,
       preProduction: pp
         ? {
             id: pp.id,

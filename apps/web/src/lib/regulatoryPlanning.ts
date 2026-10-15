@@ -17,8 +17,10 @@ export const REGULATORY_PLANNING_METRIC_LABEL: Record<RegulatoryPlanningMetric, 
 export function getRegulatoryPlanningRows(metric: RegulatoryPlanningMetric, orders: PurchaseOrder[]): PpicPlanningItemRow[] {
   const pendingItemRows = toItemRows(getPendingPos(orders));
   switch (metric) {
+    // Only products PPIC's plan has actually been sent for (automatically,
+    // once the plan is calculated) — nothing to review before that.
     case "pending-review":
-      return pendingItemRows.filter((r) => !r.item.regulatoryStatus);
+      return pendingItemRows.filter((r) => !r.item.regulatoryStatus && !!r.item.sentToRegulatoryAt);
     case "approved":
       return pendingItemRows.filter((r) => r.item.regulatoryStatus === "Approved");
     case "not-approved":

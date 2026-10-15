@@ -20,6 +20,14 @@ const skuSpecFields = {
   packagingSizeNos: z.string().optional(),
 };
 
+// The header block of the PM BOM sheet.
+const pmHeaderFields = {
+  productCode: z.string().max(60).nullable().optional(),
+  packSize: z.string().max(60).nullable().optional(),
+  packingConfig: z.string().max(80).nullable().optional(),
+  batchPacks: z.number().int().positive().nullable().optional(),
+};
+
 const skuSpecSchema = z.object({
   productName: z.string().min(1),
   ...skuSpecFields,
@@ -64,6 +72,7 @@ export type CreateSkuInput = z.infer<typeof createSkuSchema>;
 export const updateSkuSchema = z.object({
   productName: z.string().min(1).optional(),
   ...skuSpecFields,
+  ...pmHeaderFields,
   extra: z.record(z.string(), z.unknown()).optional(),
 });
 export type UpdateSkuInput = z.infer<typeof updateSkuSchema>;
@@ -87,12 +96,20 @@ export type ReportCatalogMismatchInput = z.infer<typeof reportCatalogMismatchSch
 // as `extra` above — a component the caller stops sending is gone, not
 // left behind from before.
 export const updatePackagingComponentsSchema = z.object({
+  header: z.object(pmHeaderFields).optional(),
+  note: z.string().max(200).optional(),
   components: z.array(
     z.object({
       type: z.string().min(1),
       quantity: z.number().nonnegative().nullable().optional(),
       unit: z.string().min(1).default("Nos"),
       pmCode: z.string().optional(),
+      pmItemId: z.string().nullable().optional(),
+      // Overage as a fraction, e.g. 0.02 for 2% (the sheet's OV% column).
+      overagePct: z.number().min(0).max(1).nullable().optional(),
+      spec: z.string().max(200).nullable().optional(),
+      make: z.string().max(120).nullable().optional(),
+      packingLevel: z.enum(["Primary", "Secondary", "Tertiary"]).nullable().optional(),
     }),
   ),
 });

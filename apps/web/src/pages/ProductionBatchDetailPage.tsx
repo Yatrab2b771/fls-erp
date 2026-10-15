@@ -3,13 +3,14 @@ import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Check, ClipboardEdit, Download, FlaskConical, Lock, Pencil, Undo2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { useAssignProductionBatchNo, useProductionBatch, useTransitionProductionBatchStage } from "../lib/hooks";
-import { COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ORDER, COMBINED_LOT_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/combinedLotStage";
+import { batchStageOrderFor, COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ROLE, getBatchForwardTarget, getBatchRejectTarget } from "../lib/combinedLotStage";
 import { PRODUCTION_BATCH_STAGE_FIELDS } from "../lib/productionBatchStage";
 import { FieldGrid } from "../components/FieldGrid";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ApiError, downloadFile } from "../lib/api";
 import type { ProductionBatch, CombinedLotStageId } from "../lib/types";
+import { CustomerName } from "../components/CustomerName";
 
 // A ProductionBatch's OWN Tier-3 pipeline (IPQC through Dispatch Plan) —
 // same shape as CombinedLotDetailPage, trimmed of Bulk Reconciliation,
@@ -60,7 +61,7 @@ export function ProductionBatchDetailPage() {
             <div>
               <h1 className="text-xl font-black tracking-tight text-slate-900">{item.productName}</h1>
               <p className="text-sm text-slate-500">
-                {po.customer.companyName} {po.poNumber && `· ${po.poNumber}`} · Batch Qty {batch.plannedQty} {item.unit}
+                <CustomerName name={po.customer.companyName} /> {po.poNumber && `· ${po.poNumber}`} · Batch Qty {batch.plannedQty} {item.unit}
               </p>
             </div>
           </div>
@@ -123,7 +124,7 @@ function BatchNoBadge({ batch }: { batch: ProductionBatch }) {
 
   return (
     <div className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5">
-      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Batch No.</span>
+      <span className="text-micro font-bold uppercase tracking-wide text-slate-400">Batch No.</span>
       <span className="font-mono text-sm font-black text-slate-800">{batch.batchNo ?? "— not assigned —"}</span>
       {canAssign && (
         <button className="btn-icon h-6 w-6" onClick={() => setEditing(true)} title="QA/QC assigns the batch number">
@@ -135,14 +136,15 @@ function BatchNoBadge({ batch }: { batch: ProductionBatch }) {
 }
 
 function StageProgressStrip({ batch }: { batch: ProductionBatch }) {
-  const currentIndex = COMBINED_LOT_STAGE_ORDER.indexOf(batch.currentStageId);
+  const order = batchStageOrderFor(batch.currentStageId);
+  const currentIndex = order.indexOf(batch.currentStageId);
   return (
     <div className="card p-4 sm:p-5">
       <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-none">
-        {COMBINED_LOT_STAGE_ORDER.map((stage, idx) => {
+        {order.map((stage, idx) => {
           const isDone = idx < currentIndex;
           const isCurrent = idx === currentIndex;
-          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10.5px] font-bold whitespace-nowrap ${
+          const pillClass = `flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-micro font-bold whitespace-nowrap ${
             isCurrent ? "border-brand-300 bg-brand-50 text-brand-700 shadow-soft" : isDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-slate-50 text-slate-400"
           }`;
           const icon = isDone ? <Check className="h-3 w-3" strokeWidth={3} /> : isCurrent ? <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-500" /> : <Lock className="h-2.5 w-2.5" strokeWidth={2.5} />;
@@ -152,7 +154,7 @@ function StageProgressStrip({ batch }: { batch: ProductionBatch }) {
                 {icon}
                 {COMBINED_LOT_STAGE_LABEL[stage]}
               </div>
-              {idx < COMBINED_LOT_STAGE_ORDER.length - 1 && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" strokeWidth={2.5} />}
+              {idx < order.length - 1 && <ArrowRight className="h-3 w-3 shrink-0 text-slate-300" strokeWidth={2.5} />}
             </div>
           );
         })}
@@ -168,9 +170,11 @@ function CurrentStageCard({ batch }: { batch: ProductionBatch }) {
   const canAct = hasRole(...roles);
   const roleLabel = roles.join(" / ");
   const fields = PRODUCTION_BATCH_STAGE_FIELDS[stage];
-  const forwardTarget = getForwardTarget(stage);
-  const rejectTarget = getRejectTarget(stage);
+  const forwardTarget = getBatchForwardTarget(stage);
+  const rejectTarget = getBatchRejectTarget(stage);
   const isTerminal = stage === "DISPATCH_PLAN";
+  const isHandover = stage === "FG_HANDOVER";
+  const handedOver = isHandover && !!batch.handedOverToDispatchAt;
 
   const transition = useTransitionProductionBatchStage(batch.id, batch.preProductionId);
   const toast = useToast();
@@ -199,9 +203,11 @@ function CurrentStageCard({ batch }: { batch: ProductionBatch }) {
       if ((stage === "QA_GATE_MFG" || stage === "QA_GATE_PACKAGING") && result.currentStageId === stage) {
         toast.error("Saved — still on hold. Approve or Reject to move it forward.");
       } else if ((stage === "IPQC" || stage === "BULK_QC") && result.currentStageId === stage) {
-        toast.error(`Saved — can't move on to ${COMBINED_LOT_STAGE_LABEL[getForwardTarget(stage)]} until QC sets this to Approved.`);
+        toast.error(`Saved — can't move on to ${COMBINED_LOT_STAGE_LABEL[getBatchForwardTarget(stage)]} until QC sets this to Approved.`);
+      } else if (stage === "FG_QC_RELEASE" && result.currentStageId === stage) {
+        toast.error("Saved — the finished goods move on only when QA sets the QA Status to Approved.");
       } else {
-        toast.success(isTerminal ? "Dispatch details saved." : `Forwarded to ${COMBINED_LOT_STAGE_LABEL[forwardTarget]}.`);
+        toast.success(isHandover ? "Handed over to Dispatch." : isTerminal ? "Dispatch details saved." : `Forwarded to ${COMBINED_LOT_STAGE_LABEL[forwardTarget]}.`);
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "Could not save";
@@ -232,7 +238,7 @@ function CurrentStageCard({ batch }: { batch: ProductionBatch }) {
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
           <ClipboardEdit className="h-3.5 w-3.5" /> {COMBINED_LOT_STAGE_LABEL[stage]}
         </h3>
-        <span className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-micro font-bold uppercase tracking-wide ${canAct ? "border-brand-200 bg-brand-50 text-brand-700" : "border-slate-200 bg-slate-100 text-slate-400"}`}>
           {roleLabel}
         </span>
       </div>
@@ -250,7 +256,9 @@ function CurrentStageCard({ batch }: { batch: ProductionBatch }) {
 
         {error && <p className="mt-3 text-xs font-bold text-rose-600">{error}</p>}
 
-        {canAct && (
+        {handedOver && <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">Handed over to Dispatch on {new Date(batch.handedOverToDispatchAt!).toLocaleDateString("en-GB")}. Dispatch now ships it to the customer or the Warehouse.</p>}
+
+        {canAct && !handedOver && (
           <div className="mt-4 space-y-3">
             {showReject ? (
               <div className="rounded-xl border border-rose-200 bg-rose-50/60 p-3">
@@ -273,8 +281,8 @@ function CurrentStageCard({ batch }: { batch: ProductionBatch }) {
                   </button>
                 )}
                 <button type="button" className="btn-primary" disabled={transition.isPending} onClick={handleForward}>
-                  {transition.isPending ? "Saving…" : isTerminal ? "Save Dispatch Details" : `Forward to ${COMBINED_LOT_STAGE_LABEL[forwardTarget]}`}
-                  {!transition.isPending && !isTerminal && <ArrowRight className="h-3.5 w-3.5" strokeWidth={2.5} />}
+                  {transition.isPending ? "Saving…" : isHandover ? "Hand over to Dispatch" : isTerminal ? "Save Dispatch Details" : `Forward to ${COMBINED_LOT_STAGE_LABEL[forwardTarget]}`}
+                  {!transition.isPending && !isTerminal && !isHandover && <ArrowRight className="h-3.5 w-3.5" strokeWidth={2.5} />}
                 </button>
               </div>
             )}
