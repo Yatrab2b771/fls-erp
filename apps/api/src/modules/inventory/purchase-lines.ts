@@ -56,13 +56,17 @@ export async function syncRequirementSummary(requirementId: string, db: Db = pri
  * that item, earliest ETA first, so the same quantity is not counted both as stock and
  * as "still on order".
  */
-export async function allocateReceiptToPurchaseLines(itemId: string, qty: number, db: Db = prisma): Promise<void> {
+export async function allocateReceiptToPurchaseLines(itemId: string, qty: number, db: Db = prisma, vendorName?: string | null): Promise<void> {
   let left = qty;
   if (left <= QTY_EPS) return;
-  const lines = await db.requirementPurchaseLine.findMany({
+  const found = await db.requirementPurchaseLine.findMany({
     where: { status: "OPEN", requirement: { itemId, deletedAt: null } },
     orderBy: [{ eta: "asc" }, { loggedAt: "asc" }],
   });
+  // A delivery closes the lines Purchase ordered from THAT vendor first (earliest ETA first); only what is left over goes to other
+  // vendors' lines for the same item. Otherwise vendor A's delivery would tick off vendor B's order.
+  const same = (l: { vendorName: string }) => !!vendorName && l.vendorName.trim().toLowerCase() === vendorName.trim().toLowerCase();
+  const lines = [...found.filter(same), ...found.filter((l) => !same(l))];
   for (const line of lines) {
     if (left <= QTY_EPS) break;
     const take = Math.min(left, openQtyOf(line));

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { ArrowRightLeft, Check, Send, Truck, Warehouse as WarehouseIcon } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { useCancelStockTransfer, useConfirmStockTransfer, useCreateStockTransfer, useDayStoreStock, useMyStoreInfo, useStockTransfers, type CreateStockTransferPayload } from "../lib/hooks";
+import { useCancelStockTransfer, useConfirmStockTransfer, useCreateStockTransfer, useDayStoreStock, useMyStoreInfo, useRejectStockTransfer, useStockTransfers, type CreateStockTransferPayload } from "../lib/hooks";
+import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { ItemPicker } from "../components/ItemPicker";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonRows } from "../components/Skeleton";
@@ -114,6 +115,11 @@ export function StockTransfersPage() {
                       </td>
                       <td className="text-right font-mono text-slate-700">
                         {fmtQty(t.quantity)} {t.unit}
+                        {t.shortQty ? (
+                          <span className="block text-micro font-bold text-amber-700" title={t.shortNote ?? ""}>
+                            {fmtQty(t.shortQty)} short
+                          </span>
+                        ) : null}
                       </td>
                       <td className="text-slate-600">{sourceLabel(t)}</td>
                       <td className="text-slate-600">{destinationLabel(t)}</td>
@@ -165,16 +171,29 @@ function PendingTransfersTable({ rows, canConfirm }: { rows: StockTransfer[]; ca
 function PendingTransferRow({ transfer, canConfirm }: { transfer: StockTransfer; canConfirm: boolean }) {
   const toast = useToast();
   const confirm = useConfirmStockTransfer();
+  const reject = useRejectStockTransfer();
   const cancel = useCancelStockTransfer();
   const { hasRole, user } = useAuth();
   const canCancel = transfer.sentByName === user?.fullName || hasRole("ADMIN");
+  const [receiving, setReceiving] = useState(false);
 
-  async function doConfirm() {
+  async function doConfirm(r: ReceiveResult) {
     try {
-      await confirm.mutateAsync(transfer.id);
-      toast.success(`Confirmed ${fmtQty(transfer.quantity)} ${transfer.unit} of ${transfer.itemName}.`);
+      await confirm.mutateAsync({ id: transfer.id, receivedQty: r.receivedQty, note: r.note });
+      toast.success(`Confirmed ${fmtQty(r.receivedQty ?? transfer.quantity)} ${transfer.unit} of ${transfer.itemName}.`);
+      setReceiving(false);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not confirm receipt");
+    }
+  }
+
+  async function doRefuse(reason: string) {
+    try {
+      await reject.mutateAsync({ id: transfer.id, reason });
+      toast.success("Refused - the material is back with the sender.");
+      setReceiving(false);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not refuse this transfer");
     }
   }
 
@@ -202,10 +221,21 @@ function PendingTransferRow({ transfer, canConfirm }: { transfer: StockTransfer;
         {transfer.note ?? "-"}
       </td>
       <td className="px-4 py-3 text-right">
+        <ReceiveDialog
+          open={receiving}
+          itemName={transfer.itemName}
+          sentQty={transfer.quantity}
+          unit={transfer.unit}
+          from={sourceLabel(transfer)}
+          busy={confirm.isPending || reject.isPending}
+          onReceive={doConfirm}
+          onRefuse={doRefuse}
+          onCancel={() => setReceiving(false)}
+        />
         <div className="inline-flex gap-1.5">
           {canConfirm && (
-            <button className="btn-primary btn-sm" disabled={confirm.isPending} onClick={doConfirm}>
-              <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {confirm.isPending ? "Confirming…" : "Confirm Receipt"}
+            <button className="btn-primary btn-sm" disabled={confirm.isPending} onClick={() => setReceiving(true)}>
+              <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Confirm Receipt
             </button>
           )}
           {canCancel && (

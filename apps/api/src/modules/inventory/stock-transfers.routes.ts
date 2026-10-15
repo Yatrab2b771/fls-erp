@@ -9,6 +9,7 @@ import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
 import { assertDayStoreAccess, assertPlantAccess, getScopedDayStoreIds, getScopedPlantIds } from "./day-store-access";
 import { getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "./stock";
+import { receiveTransferSchema, rejectTransferSchema, resolveShortReceipt, type ReceiveTransferInput, type RejectTransferInput } from "./transit";
 import { createStockTransferSchema, type CreateStockTransferInput } from "./stock-transfers.schemas";
 
 export const stockTransfersRouter = Router();
@@ -62,6 +63,8 @@ function serializeTransfer(t: TransferWithRelations) {
     sentByName: t.sentBy.fullName,
     confirmedAt: t.confirmedAt,
     confirmedByName: t.confirmedBy?.fullName ?? null,
+    shortQty: t.shortQty,
+    shortNote: t.shortNote,
     status: t.confirmedAt ? ("CONFIRMED" as const) : ("PENDING" as const),
   };
 }
@@ -172,11 +175,13 @@ stockTransfersRouter.post("/", requireRole("STORE", "PRODUCTION"), validateBody(
   }
 });
 
-stockTransfersRouter.post("/:id/confirm", requireRole("STORE", "PRODUCTION"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+stockTransfersRouter.post("/:id/confirm", requireRole("STORE", "PRODUCTION"), validateBody(receiveTransferSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const transfer = await prisma.stockTransfer.findUnique({ where: { id: req.params.id }, include: transferInclude });
     if (!transfer || transfer.deletedAt) return res.status(404).json({ error: "Transfer not found" });
     if (transfer.confirmedAt) return res.status(409).json({ error: "This transfer has already been confirmed" });
+    // How much actually arrived (less than was sent needs a reason and is kept as a recorded transit loss).
+    const received = resolveShortReceipt(transfer.quantity, req.body as ReceiveTransferInput);
 
     // Who may confirm depends on where it's headed: Production confirms
     // at a Plant, Store confirms everywhere else (another Day Store, or
@@ -212,7 +217,7 @@ stockTransfersRouter.post("/:id/confirm", requireRole("STORE", "PRODUCTION"), as
             type: "RECEIVED",
             date: new Date(),
             unit: transfer.unit,
-            quantity: transfer.quantity,
+            quantity: received.receivedQty,
             receiptStatus: "ACCEPTED",
             acceptedById: req.user!.id,
             acceptedAt: new Date(),
@@ -231,20 +236,50 @@ stockTransfersRouter.post("/:id/confirm", requireRole("STORE", "PRODUCTION"), as
       // already net a confirmed StockTransfer row directly.
       return tx.stockTransfer.update({
         where: { id: transfer.id },
-        data: { confirmedById: req.user!.id, confirmedAt: new Date() },
+        data: { confirmedById: req.user!.id, confirmedAt: new Date(), shortQty: received.shortQty, shortNote: received.shortNote },
         include: transferInclude,
       });
     });
 
-    await recordAudit({ actorId: req.user!.id, action: "stock_transfer.confirmed", entityType: "StockTransfer", entityId: updated.id });
+    await recordAudit({ actorId: req.user!.id, action: "stock_transfer.confirmed", entityType: "StockTransfer", entityId: updated.id, metadata: received.shortQty ? { shortQty: received.shortQty, shortNote: received.shortNote } : undefined });
 
     await notifyUser(transfer.sentById, {
       title: `${transfer.item.name} confirmed received`,
-      body: `${transfer.quantity} ${transfer.unit} arrived at ${transfer.destDayStore?.name ?? transfer.destPlant?.name ?? "the Warehouse"}.`,
+      body: `${received.receivedQty} ${transfer.unit} arrived at ${transfer.destDayStore?.name ?? transfer.destPlant?.name ?? "the Warehouse"}${received.shortQty ? ` (${received.shortQty} ${transfer.unit} short: ${received.shortNote})` : ""}.`,
       link: "/stock-transfers",
     }).catch(notifyFailed(req, "stock_transfer.confirmed"));
 
     res.json(serializeTransfer(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The receiving side refuses the transfer (wrong item, damaged, not expected): it is cancelled, which gives the material back to the
+// sender's stock, and the sender is told why. Same people who may confirm it may refuse it.
+stockTransfersRouter.post("/:id/reject", requireRole("STORE", "PRODUCTION"), validateBody(rejectTransferSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const transfer = await prisma.stockTransfer.findUnique({ where: { id: req.params.id }, include: transferInclude });
+    if (!transfer || transfer.deletedAt) return res.status(404).json({ error: "Transfer not found" });
+    if (transfer.confirmedAt) return res.status(409).json({ error: "Already confirmed - it can't be refused any more." });
+
+    if (transfer.destinationType === "PLANT") {
+      if (!req.user!.roles.includes("PRODUCTION") && !req.user!.roles.includes("ADMIN")) return res.status(403).json({ error: "Only Production can refuse a transfer headed to a Plant" });
+      await assertPlantAccess(req.user!.id, req.user!.roles, transfer.destPlantId);
+    } else {
+      if (!req.user!.roles.includes("STORE") && !req.user!.roles.includes("ADMIN")) return res.status(403).json({ error: "Only Store can refuse this transfer" });
+      if (transfer.destinationType === "DAY_STORE" && transfer.destDayStoreId) await assertDayStoreAccess(req.user!.id, req.user!.roles, transfer.destDayStoreId);
+    }
+
+    const { reason } = req.body as RejectTransferInput;
+    await prisma.stockTransfer.update({ where: { id: transfer.id }, data: { deletedAt: new Date(), deletedById: req.user!.id, rejectedReason: reason } });
+    await recordAudit({ actorId: req.user!.id, action: "stock_transfer.refused", entityType: "StockTransfer", entityId: transfer.id, metadata: { reason } });
+    await notifyUser(transfer.sentById, {
+      title: `${transfer.item.name} refused`,
+      body: `${transfer.quantity} ${transfer.unit} was refused by ${transfer.destDayStore?.name ?? transfer.destPlant?.name ?? "the Warehouse"}: ${reason}. It is back in your stock.`,
+      link: "/stock-transfers",
+    }).catch(notifyFailed(req, "stock_transfer.refused"));
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

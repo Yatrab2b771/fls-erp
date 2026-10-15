@@ -1,4 +1,5 @@
 import { useRef, useState, type ChangeEvent } from "react";
+import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { ArrowLeftRight, Beaker, CheckCircle2, Clock, FileSpreadsheet, FlaskConical, Inbox, Lock, PackageCheck, PackageMinus, Plus, Send, Trash2, Truck, Upload, X } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { ApiError } from "../lib/api";
@@ -10,6 +11,7 @@ import { useToast } from "../components/Toast";
 import {
   useCancelRndSampleRequest,
   useConfirmRndTransfer,
+  useRejectRndTransfer,
   useConsumeAtRnd,
   useCreateRndSampleRequest,
   useCreateRndTransfer,
@@ -77,6 +79,8 @@ export function RndStorePage() {
   const { data: transactions } = useRndStoreTransactions();
   const { data: report } = useRndStoreReport();
   const confirmTransfer = useConfirmRndTransfer();
+  const rejectTransfer = useRejectRndTransfer();
+  const [receivingId, setReceivingId] = useState<string | null>(null);
   const fulfillRequest = useFulfillRndSampleRequest();
   const rejectRequest = useRejectRndSampleRequest();
   const cancelRequest = useCancelRndSampleRequest();
@@ -89,12 +93,23 @@ export function RndStorePage() {
   const pendingRequests = (allRequests ?? []).filter((r) => r.status === "PENDING");
   const myRequestHistory = (allRequests ?? []).filter((r) => r.status !== "PENDING").slice(0, 10);
 
-  async function handleConfirm(t: RndTransfer) {
+  async function handleConfirm(t: RndTransfer, r: ReceiveResult) {
     try {
-      await confirmTransfer.mutateAsync(t.id);
-      toast.success(`Confirmed — ${t.quantity} ${t.unit} ${t.itemName}.`);
+      await confirmTransfer.mutateAsync({ id: t.id, receivedQty: r.receivedQty, note: r.note });
+      toast.success(`Confirmed — ${r.receivedQty ?? t.quantity} ${t.unit} ${t.itemName}.`);
+      setReceivingId(null);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not confirm");
+    }
+  }
+
+  async function handleRefuseTransfer(t: RndTransfer, reason: string) {
+    try {
+      await rejectTransfer.mutateAsync({ id: t.id, reason });
+      toast.success("Refused - the material is back with the sender.");
+      setReceivingId(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not refuse");
     }
   }
 
@@ -172,9 +187,22 @@ export function RndStorePage() {
               { header: "Note", cell: (t) => t.note ?? "-", className: "max-w-[16rem] truncate" },
             ]}
             actions={(t) => (
-              <button type="button" className="btn-primary btn-sm" disabled={confirmTransfer.isPending} onClick={() => handleConfirm(t)}>
-                {confirmTransfer.isPending ? "Confirming…" : "Confirm Receipt"}
-              </button>
+              <>
+                <button type="button" className="btn-primary btn-sm" disabled={confirmTransfer.isPending} onClick={() => setReceivingId(t.id)}>
+                  Confirm Receipt
+                </button>
+                <ReceiveDialog
+                  open={receivingId === t.id}
+                  itemName={t.itemName}
+                  sentQty={t.quantity}
+                  unit={t.unit}
+                  from={t.direction === "TO_RND" ? "the Warehouse" : "the R&D Store"}
+                  busy={confirmTransfer.isPending || rejectTransfer.isPending}
+                  onReceive={(r) => void handleConfirm(t, r)}
+                  onRefuse={(reason) => void handleRefuseTransfer(t, reason)}
+                  onCancel={() => setReceivingId(null)}
+                />
+              </>
             )}
           />
         </div>

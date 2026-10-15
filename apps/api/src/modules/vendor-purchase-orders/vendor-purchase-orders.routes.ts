@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
+import { assertUnitMatchesItem } from "../../common/lib/units";
 import { notifyRoles } from "../../common/lib/notify";
 import { parsePagination, setPaginationHeaders } from "../../common/lib/pagination";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
@@ -40,6 +41,9 @@ function notifyFailed(req: AuthedRequest, label: string) {
 // computePoBilling in purchase-orders.routes.ts) rather than a shared
 // helper nothing else uses yet.
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// A delivery may run a little over the ordered quantity (bags, drums and rolls come in whole units); more than this needs the PO raised.
+const OVER_RECEIPT_TOLERANCE = 0.05;
 
 // GST-exclusive: the entered rate is the base price, GST is added on top.
 function computeItemAmount(item: Pick<VendorPurchaseOrderItemInput, "quantity" | "rate" | "gstPct">): number {
@@ -307,7 +311,7 @@ vendorPurchaseOrdersRouter.post(
     try {
       const lineItem = await prisma.vendorPurchaseOrderItem.findUnique({
         where: { id: req.params.itemId },
-        include: { vendorPurchaseOrder: { include: { vendor: { select: { name: true } } } }, item: { select: { id: true, name: true } } },
+        include: { vendorPurchaseOrder: { include: { vendor: { select: { name: true } } } }, item: { select: { id: true, name: true, unit: true } } },
       });
       if (!lineItem || lineItem.vendorPurchaseOrderId !== req.params.id || lineItem.deletedAt || lineItem.vendorPurchaseOrder.deletedAt) {
         return res.status(404).json({ error: "Line item not found" });
@@ -315,6 +319,23 @@ vendorPurchaseOrdersRouter.post(
 
       const input = req.body as ReceiveVendorPurchaseOrderItemInput;
       const unit = input.unit ?? lineItem.unit;
+      // Same unit rule as every other stock entry (the item is kept in one unit).
+      assertUnitMatchesItem(lineItem.item, unit);
+
+      // Over-receipt guard: what has already come against this line (everything not rejected, including deliveries still in QC)
+      // plus this one may not go past the ordered quantity by more than the usual delivery tolerance. A delivery that large needs
+      // Purchase to raise the PO quantity first, so the PO, the stock and the payment all say the same thing.
+      const already = await prisma.inventoryTransaction.findMany({
+        where: { vendorPurchaseOrderItemId: lineItem.id, deletedAt: null, receiptStatus: { not: "QC_REJECTED" } },
+        select: { quantity: true, rejectedQty: true },
+      });
+      const alreadyQty = already.reduce((sum, t) => sum + t.quantity - (t.rejectedQty ?? 0), 0);
+      const limit = lineItem.quantity * (1 + OVER_RECEIPT_TOLERANCE);
+      if (alreadyQty + input.quantity > limit + 1e-6) {
+        return res.status(409).json({
+          error: `This line was ordered for ${lineItem.quantity} ${lineItem.unit} and ${round2(alreadyQty)} has already arrived. ${input.quantity} more would be over the ${Math.round(OVER_RECEIPT_TOLERANCE * 100)}% delivery tolerance (${round2(limit)}). Ask Purchase to raise the quantity on the PO first.`,
+        });
+      }
 
       const txn = await prisma.inventoryTransaction.create({
         data: {

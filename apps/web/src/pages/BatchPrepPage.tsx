@@ -221,7 +221,12 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
 }
 
 // The plan's materials for this batch (the plan scaled to the batch's quantity) and whether the Plant and its Day Store hold them.
-function RequirementsTable({ row }: { row: BatchPrepRow }) {
+// How far a weighed quantity may be from the plan before the Day Store has to say why (the server enforces the same 5%).
+const WEIGH_TOLERANCE = 0.05;
+type Weighed = Record<string, { qty: string; note: string }>;
+const deviates = (planned: number, weighed: string) => weighed !== "" && planned > 0 && Math.abs(Number(weighed) - planned) / planned > WEIGH_TOLERANCE;
+
+function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { values: Weighed; onChange: (itemId: string, patch: Partial<Weighed[string]>) => void; disabled: boolean } }) {
   const reqs = row.requirements ?? [];
   return (
     <>
@@ -238,12 +243,13 @@ function RequirementsTable({ row }: { row: BatchPrepRow }) {
                 <th className="px-3 py-2 text-right">Free at Plant</th>
                 <th className="px-3 py-2 text-right">At Day Store</th>
                 <th className="px-3 py-2 text-left">Status</th>
+                {weighing && <th className="px-3 py-2 text-left">Weighed (if different)</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {reqs.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="px-3 py-4 text-center text-slate-400">
+                  <td colSpan={weighing ? 7 : 6} className="px-3 py-4 text-center text-slate-400">
                     No plan material for this product.
                   </td>
                 </tr>
@@ -258,6 +264,26 @@ function RequirementsTable({ row }: { row: BatchPrepRow }) {
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.plantFreeQty)}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.dayStoreQty)}</td>
                   <td className="px-3 py-1.5">{m.enough ? <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Available</span> : <span className="pill border-amber-200 bg-amber-50 text-amber-700">Short</span>}</td>
+                  {weighing && (
+                    <td className="px-3 py-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          step="any"
+                          className="field !w-24 !py-1 font-mono text-xs"
+                          placeholder={fmtQty(m.requiredQty)}
+                          value={weighing.values[m.itemId]?.qty ?? ""}
+                          disabled={weighing.disabled}
+                          onChange={(e) => weighing.onChange(m.itemId, { qty: e.target.value })}
+                        />
+                        <span className="text-micro text-slate-400">{m.unit}</span>
+                        {deviates(m.requiredQty, weighing.values[m.itemId]?.qty ?? "") && (
+                          <input className="field !w-44 !py-1 text-xs" placeholder="Why different? *" value={weighing.values[m.itemId]?.note ?? ""} disabled={weighing.disabled} onChange={(e) => weighing.onChange(m.itemId, { note: e.target.value })} />
+                        )}
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -388,10 +414,22 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
   const [error, setError] = useState<string | null>(null);
   const reqs = row.requirements ?? [];
   const short = reqs.filter((m) => !m.enough);
+  // What was actually weighed out, where it differs from the plan. Nothing entered = the plan quantity is given.
+  const [weights, setWeights] = useState<Weighed>({});
+  const setWeight = (itemId: string, patch: Partial<Weighed[string]>) =>
+    setWeights((w) => {
+      const cur = w[itemId] ?? { qty: "", note: "" };
+      return { ...w, [itemId]: { ...cur, ...patch } };
+    });
   async function submit() {
     setError(null);
+    const lines = reqs
+      .filter((m) => weights[m.itemId]?.qty)
+      .map((m) => ({ itemId: m.itemId, actualQty: Number(weights[m.itemId]!.qty), note: weights[m.itemId]!.note.trim() || undefined }));
+    const unexplained = reqs.find((m) => deviates(m.requiredQty, weights[m.itemId]?.qty ?? "") && !weights[m.itemId]?.note.trim());
+    if (unexplained) return setError(`Write why ${unexplained.itemName} was weighed different from the plan.`);
     try {
-      await act.mutateAsync({ id: row.id, rmDispensingDate: rmDate, pmIssuedDate: pmDate, dispensingRemarks: remarks || undefined, grnNo: grn || undefined });
+      await act.mutateAsync({ id: row.id, rmDispensingDate: rmDate, pmIssuedDate: pmDate, dispensingRemarks: remarks || undefined, grnNo: grn || undefined, ...(lines.length ? { lines } : {}) });
       toast.success(`${row.batchNo ?? "Batch"} dispensed. QA clears the line next.`);
       onDone();
     } catch (err) {
@@ -429,8 +467,8 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
         )}
       </div>
       <div>
-        <RequirementsTable row={row} />
-        <p className="mt-1 text-micro text-slate-400">The Plant gives what it already holds; the Day Store issues the rest to the Plant when you dispense.</p>
+        <RequirementsTable row={row} weighing={{ values: weights, onChange: setWeight, disabled: !canAct }} />
+        <p className="mt-1 text-micro text-slate-400">The Plant gives what it already holds; the Day Store issues the rest to the Plant when you dispense. If you weighed something different from the plan, enter it - leave it blank and the plan quantity is taken as given.</p>
       </div>
     </div>
   );

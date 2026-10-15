@@ -2,6 +2,9 @@ import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
+import { runSerializable } from "../../common/lib/serializable-transaction";
+import { RouteError } from "../../common/lib/route-error";
+import { getOnHandByDayStoreAndItem, getOnHandByItemId } from "../inventory/stock";
 
 // --- Recycle Bin — nothing in this app hard-deletes real data any more.
 // Every "delete" button across every module (see each model's own
@@ -193,8 +196,21 @@ recycleBinRouter.get("/", requireRole("ADMIN"), async (_req, res, next) => {
 // this runs, no other state to reconcile.
 const RESTORE_HANDLERS: Record<BinEntityType, (id: string) => Promise<{ found: boolean }>> = {
   "inventory-transaction": async (id) => {
-    const result = await prisma.inventoryTransaction.updateMany({ where: { id, deletedAt: { not: null } }, data: { deletedAt: null, deletedById: null } });
-    return { found: result.count > 0 };
+    // Bringing back an entry that takes stock OUT of a place must not push that place below zero: the stock it used may have been
+    // issued again since it was deleted. (Bringing back one that adds stock is always safe.)
+    return runSerializable(async (tx) => {
+      const txn = await tx.inventoryTransaction.findFirst({ where: { id, deletedAt: { not: null } } });
+      if (!txn) return { found: false };
+      if (txn.type === "ISSUED_DAY_STORE" || txn.type === "ISSUED_RND") {
+        const onHand = (await getOnHandByItemId([txn.itemId], tx)).get(txn.itemId) ?? 0;
+        if (txn.quantity > onHand + 1e-9) throw new RouteError(409, `Can't restore this: it issues ${txn.quantity} ${txn.unit} but only ${onHand} ${txn.unit} is on hand in the Warehouse now.`);
+      } else if (txn.type === "ISSUED_PRODUCTION" && txn.dayStoreId) {
+        const onHand = (await getOnHandByDayStoreAndItem(txn.dayStoreId, [txn.itemId], tx)).get(txn.itemId)?.onHand ?? 0;
+        if (txn.quantity > onHand + 1e-9) throw new RouteError(409, `Can't restore this: it issues ${txn.quantity} ${txn.unit} from a Day Store that has only ${onHand} ${txn.unit} now.`);
+      }
+      await tx.inventoryTransaction.update({ where: { id }, data: { deletedAt: null, deletedById: null } });
+      return { found: true };
+    });
   },
   "dispatch-transfer": async (id) => {
     const result = await prisma.dispatchTransfer.updateMany({ where: { id, deletedAt: { not: null } }, data: { deletedAt: null, deletedById: null } });

@@ -11,6 +11,7 @@ import { useToast } from "../components/Toast";
 import { ApiError, downloadFile } from "../lib/api";
 import type { ProductionBatch, CombinedLotStageId } from "../lib/types";
 import { CustomerName } from "../components/CustomerName";
+import { BatchLotsPanel } from "./LotsPage";
 
 // A ProductionBatch's OWN Tier-3 pipeline (IPQC through Dispatch Plan) —
 // same shape as CombinedLotDetailPage, trimmed of Bulk Reconciliation,
@@ -87,6 +88,19 @@ export function ProductionBatchDetailPage() {
           <CurrentStageCard batch={batch} />
         </>
       )}
+      <BatchLotsSection batchId={batch.id} />
+    </div>
+  );
+}
+
+// Which deliveries (supplier, GRN, lot, expiry) went into this batch - the batch side of a recall.
+function BatchLotsSection({ batchId }: { batchId: string }) {
+  const { hasRole } = useAuth();
+  if (!hasRole("STORE", "QA_QC", "RND", "PPIC", "ACCOUNTS", "PRODUCTION")) return null;
+  return (
+    <div className="card space-y-3 p-5">
+      <p className="label !mb-0">Materials used - which deliveries (for a recall)</p>
+      <BatchLotsPanel batchId={batchId} />
     </div>
   );
 }

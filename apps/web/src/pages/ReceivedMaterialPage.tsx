@@ -1,8 +1,9 @@
 import { Fragment, useState } from "react";
+import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, ChevronDown, Download, PackageCheck, PackageOpen, Plus } from "lucide-react";
-import { useCancelRndSampleRequest, useConfirmRndTransfer, useCreateRndSampleRequest, useImportRndSampleRequests, useInventoryItems, useReceivedMaterial, useRndItemInfo, type ReceivedMaterialRow, type ReceivedMaterialStatus, type ReceivedMaterialVendor } from "../lib/hooks";
+import { useCancelRndSampleRequest, useConfirmRndTransfer, useRejectRndTransfer, useCreateRndSampleRequest, useImportRndSampleRequests, useInventoryItems, useReceivedMaterial, useRndItemInfo, type ReceivedMaterialRow, type ReceivedMaterialStatus, type ReceivedMaterialVendor } from "../lib/hooks";
 import { ApiError } from "../lib/api";
 import { useToast } from "../components/Toast";
 import { ItemPicker } from "../components/ItemPicker";
@@ -189,6 +190,8 @@ export function ReceivedMaterialPage() {
   const toast = useToast();
   const cancel = useCancelRndSampleRequest();
   const confirm = useConfirmRndTransfer();
+  const reject = useRejectRndTransfer();
+  const [receivingId, setReceivingId] = useState<string | null>(null);
   const filters = useTileFilters();
   const [openId, setOpenId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -220,13 +223,24 @@ export function ReceivedMaterialPage() {
   const isFiltered = filters.activeCount > 0;
   const count = (s: ReceivedMaterialStatus) => all.filter((r) => r.status === s).length;
 
-  async function confirmReceived(r: ReceivedMaterialRow) {
+  async function confirmReceived(r: ReceivedMaterialRow, got: ReceiveResult) {
     if (!r.transferId) return;
     try {
-      await confirm.mutateAsync(r.transferId);
+      await confirm.mutateAsync({ id: r.transferId, receivedQty: got.receivedQty, note: got.note });
       toast.success(`${r.itemName} received into the R&D Store.`);
+      setReceivingId(null);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not confirm");
+    }
+  }
+  async function refuseReceived(r: ReceivedMaterialRow, reason: string) {
+    if (!r.transferId) return;
+    try {
+      await reject.mutateAsync({ id: r.transferId, reason });
+      toast.success("Refused - the material is back with the Warehouse.");
+      setReceivingId(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not refuse");
     }
   }
   async function cancelRequest(r: ReceivedMaterialRow) {
@@ -372,9 +386,22 @@ export function ReceivedMaterialPage() {
                       </td>
                       <td className="px-4 py-3">
                         {r.status === "ISSUED" && (
-                          <button type="button" className="btn-primary btn-sm" disabled={confirm.isPending} onClick={() => void confirmReceived(r)}>
-                            Confirm received
-                          </button>
+                          <>
+                            <button type="button" className="btn-primary btn-sm" disabled={confirm.isPending} onClick={() => setReceivingId(r.transferId ?? r.requestId ?? "")}>
+                              Confirm received
+                            </button>
+                            <ReceiveDialog
+                              open={receivingId === (r.transferId ?? r.requestId ?? "")}
+                              itemName={r.itemName}
+                              sentQty={r.quantity}
+                              unit={r.unit}
+                              from="the Warehouse"
+                              busy={confirm.isPending || reject.isPending}
+                              onReceive={(got) => void confirmReceived(r, got)}
+                              onRefuse={(reason) => void refuseReceived(r, reason)}
+                              onCancel={() => setReceivingId(null)}
+                            />
+                          </>
                         )}
                         {r.status === "REQUESTED" && r.requestId && (
                           <button type="button" className="btn-ghost btn-sm !text-rose-600" disabled={cancel.isPending} onClick={() => void cancelRequest(r)}>

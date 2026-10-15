@@ -6,6 +6,7 @@ import { productionBatchInclude, type ProductionBatchWithRelations } from "./bat
 import { actorCanActOnStage, COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ROLE, getBatchForwardTarget, getBatchRejectTarget, type CombinedLotStageId } from "./combined-lot-stage";
 import { notifyPlantDayStore } from "../inventory/plan-requests";
 import { PRODUCTION_BATCH_STAGE_FIELD_SCHEMA } from "./batch.schemas";
+import { checkMassBalance } from "./mass-balance";
 import type { Prisma, ProductionBatch, RoleName } from "@prisma/client";
 
 // --- The forward/reject transition for a ProductionBatch's OWN Tier-3
@@ -101,10 +102,53 @@ export async function transitionProductionBatchStage(params: {
 
   const effectiveTarget = isQaGateHeld || isFgNotApproved || isIpqcBlocked || isBulkQcBlocked || isPackagingIncomplete ? currentStage : target;
 
-  const updated = await prisma.productionBatch.update({
-    where: { id: batch.id },
-    data: { ...(fieldData as Prisma.ProductionBatchUpdateInput), currentStageId: effectiveTarget },
-    include: productionBatchInclude,
+  // Quantities may not appear out of nowhere between stages: when a gate actually clears, what it approves, rejects and wastes has to
+  // add up to what the stage before gave it (blank fields are worked out from it). A gate on Hold may still be saved half-filled.
+  const clearsGate = action === "FORWARD" && effectiveTarget !== currentStage;
+  const massBalanceStage = currentStage === "IPQC" || currentStage === "QA_GATE_MFG" || currentStage === "QA_GATE_PACKAGING" ? currentStage : null;
+  let orderUnit = "";
+  if (clearsGate && massBalanceStage) {
+    const po = await prisma.productionBatch.findUnique({ where: { id: batch.id }, select: { preProduction: { select: { purchaseOrderItem: { select: { unit: true } } } } } });
+    orderUnit = po?.preProduction.purchaseOrderItem.unit ?? "";
+    const merged = {
+      bulkTransferToPackingQty: batch.bulkTransferToPackingQty,
+      mfgApprovedQty: batch.mfgApprovedQty,
+      mfgRejectedQty: batch.mfgRejectedQty,
+      mfgWastageQty: batch.mfgWastageQty,
+      packApprovedQty: batch.packApprovedQty,
+      packRejectedQty: batch.packRejectedQty,
+      packWastageQty: batch.packWastageQty,
+      ...(fieldData as Record<string, number | null | undefined>),
+    };
+    const balance = checkMassBalance({ stage: massBalanceStage, outputQty: batch.outputQty, unit: orderUnit, values: merged });
+    if (!balance.ok) return { ok: false, status: 400, error: balance.error };
+    fieldData = { ...fieldData, ...balance.defaults };
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.productionBatch.update({
+      where: { id: batch.id },
+      data: { ...(fieldData as Prisma.ProductionBatchUpdateInput), currentStageId: effectiveTarget },
+      include: productionBatchInclude,
+    });
+    // A QA gate's rejected and wasted quantities go to the Recycle Store (waste gone for good; rejected held for a decision), so
+    // they are on the books instead of being two numbers on the batch. Replaced each time the gate clears, so a batch sent back and
+    // forwarded again does not count twice.
+    if (clearsGate && (currentStage === "QA_GATE_MFG" || currentStage === "QA_GATE_PACKAGING")) {
+      const f = fieldData as Record<string, number | null | undefined>;
+      const rejected = (currentStage === "QA_GATE_MFG" ? f.mfgRejectedQty ?? batch.mfgRejectedQty : f.packRejectedQty ?? batch.packRejectedQty) ?? 0;
+      const wasted = (currentStage === "QA_GATE_MFG" ? f.mfgWastageQty ?? batch.mfgWastageQty : f.packWastageQty ?? batch.packWastageQty) ?? 0;
+      const note = `Batch ${batch.batchNo ?? batch.id.slice(0, 8)}`;
+      await tx.batchRecycleLog.deleteMany({ where: { productionBatchId: batch.id, stageId: currentStage } });
+      const rows = [
+        ...(wasted > 0 ? [{ kind: "WASTAGE", quantity: wasted }] : []),
+        ...(rejected > 0 ? [{ kind: "REJECTED", quantity: rejected }] : []),
+      ];
+      if (rows.length > 0) {
+        await tx.batchRecycleLog.createMany({ data: rows.map((r) => ({ productionBatchId: batch.id, stageId: currentStage, kind: r.kind, quantity: r.quantity, unit: orderUnit || "Kg", note, createdById: actorId })) });
+      }
+    }
+    return row;
   });
 
   await recordAudit({

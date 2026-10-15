@@ -111,6 +111,8 @@ export function LogEntryForm({ initialType, onDone, lockType = false }: { initia
     if (!quantity || Number(quantity) <= 0) return setError("Enter a quantity greater than zero.");
     // Rate is mandatory on a real delivery (Store Before/After Report §4.6).
     if (type === "RECEIVED" && (!rate || Number(rate) < 0)) return setError("Enter the rate for this delivery.");
+    // Raw material without an expiry date can never expire in the system, so it is never caught. (Packaging material may have none.)
+    if (type === "RECEIVED" && category === "RM" && !expiryDate) return setError("Enter the expiry date - raw material needs one so it can be caught when it expires.");
 
     setSubmitting(true);
     try {
@@ -283,7 +285,9 @@ export function LogEntryForm({ initialType, onDone, lockType = false }: { initia
           <input type="date" className="field" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
         </div>
         <div>
-          <label className="label">Expiry Date (optional)</label>
+          <label className="label">
+            Expiry Date {type === "RECEIVED" && category === "RM" ? <span className="text-rose-500">*</span> : "(optional)"}
+          </label>
           <input type="date" className="field" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
         </div>
         <div className="sm:col-span-2 lg:col-span-3">

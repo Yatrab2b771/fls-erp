@@ -41,6 +41,10 @@ async function main() {
       await run("QC sample transfers", tx.qcSampleTransfer.deleteMany());
 
       // Stock movements that belong to the flow (a run, a request, a transfer, a Vendor PO, a PO) or to DEMO items; opening stock stays
+      // Lot records and rejected-stock entries point at the deliveries and issues deleted below; stock corrections on DEMO items go with them.
+      await run("lot allocations", tx.lotAllocation.deleteMany());
+      await run("rejected-stock entries", tx.rejectedDisposition.deleteMany());
+      await run("DEMO stock corrections", tx.stockAdjustment.deleteMany({ where: { item: demoItems } }));
       await run("debit notes", tx.debitNote.deleteMany());
       await run(
         "stock movements",

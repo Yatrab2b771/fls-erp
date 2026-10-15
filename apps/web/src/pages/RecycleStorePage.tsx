@@ -65,7 +65,7 @@ export function RecycleStorePage() {
       ) : (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatTile icon={Package} label="RM/PM Wasted (Dispensing)" value={sumByUnit((byItem ?? []).map((r) => ({ quantity: r.totalQty, unit: r.unit })))} accent="amber" />
-          <StatTile icon={Factory} label="Batch Output Wasted (QA Gates)" value={sumByUnit((byBatch ?? []).map((r) => ({ quantity: r.totalQty, unit: r.unit })))} accent="amber" />
+          <StatTile icon={Factory} label="Batch Output Wasted (QA Gates)" value={sumByUnit((byBatch ?? []).filter((r) => r.outputKind !== "REJECTED").map((r) => ({ quantity: r.totalQty, unit: r.unit })))} accent="amber" />
           <StatTile icon={Beaker} label="Items Affected" value={byItem?.length ?? 0} accent="slate" />
           <StatTile icon={Recycle} label="Batches Affected" value={byBatch?.length ?? 0} accent="slate" />
         </div>
@@ -123,7 +123,7 @@ function ByBatchPanel({ loading, rows }: { loading: boolean; rows: RecycleStoreB
     <div className="card overflow-hidden">
       <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
         <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-slate-600">
-          <Factory className="h-3.5 w-3.5" /> Batch Output Wasted at QA Gates — by batch
+          <Factory className="h-3.5 w-3.5" /> Batch Output Wasted / Rejected at QA Gates — by batch
         </h3>
       </div>
       <div className="overflow-x-auto">
@@ -133,19 +133,24 @@ function ByBatchPanel({ loading, rows }: { loading: boolean; rows: RecycleStoreB
               <th>Product</th>
               <th>PO</th>
               <th>Gate</th>
-              <th className="text-right">Total Wasted</th>
+              <th>What</th>
+              <th className="text-right">Total</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={`${r.combinedLotId}-${r.stageId}`}>
+              <tr key={`${r.productionBatchId ?? r.combinedLotId}-${r.stageId}-${r.outputKind ?? "WASTAGE"}`}>
                 <td className="font-bold text-slate-800">
-                  <Link to={`/combined-lots/${r.combinedLotId}`} className="hover:text-brand-600">
+                  <Link to={r.productionBatchId ? `/production-batches/${r.productionBatchId}` : `/combined-lots/${r.combinedLotId}`} className="hover:text-brand-600">
                     {r.productName}
                   </Link>
+                  {r.batchNo && <span className="block text-micro font-normal text-slate-400">Batch {r.batchNo}</span>}
                 </td>
                 <td className="text-slate-500">{r.poNumber ?? "—"}</td>
                 <td className="text-slate-500">{r.stageLabel}</td>
+                <td>
+                  <span className={`pill ${r.outputKind === "REJECTED" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>{r.outputKind === "REJECTED" ? "Rejected - held" : "Wasted"}</span>
+                </td>
                 <td className="text-right font-mono font-bold text-amber-700">
                   {r.totalQty} {r.unit}
                 </td>

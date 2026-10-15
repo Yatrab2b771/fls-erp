@@ -5,6 +5,7 @@ import { parsePagination, parseSearch, setPaginationHeaders } from "../../common
 import { requireWarehouseSeat } from "./day-store-access";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { agingRanges, type TileFilters } from "../ppic/ppic-filters";
+import { getExpiredReceipts } from "./stock";
 
 /**
  * The Quarantine list (Store dashboard tile) - paged and filterable. Same stock the Inventory
@@ -34,7 +35,7 @@ const range = (from?: string, to?: string) => (from || to ? { ...(from ? { gte: 
 
 const BASE: Prisma.InventoryTransactionWhereInput = { deletedAt: null, type: "RECEIVED" };
 
-function buildWhere(req: AuthedRequest): Prisma.InventoryTransactionWhereInput {
+function buildWhere(req: AuthedRequest, expiredIds: string[]): Prisma.InventoryTransactionWhereInput {
   const q = req.query;
   const now = new Date();
   const reasons = many(q.reason).flatMap((l) => (REASON_BY_LABEL[l] ? [REASON_BY_LABEL[l]] : []));
@@ -43,7 +44,7 @@ function buildWhere(req: AuthedRequest): Prisma.InventoryTransactionWhereInput {
 
   // One clause per reason; "aged" is measured from a different date for each.
   const branch = (reason: Reason): Prisma.InventoryTransactionWhereInput => {
-    const cond: Prisma.InventoryTransactionWhereInput = reason === "EXPIRED" ? { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null } : { receiptStatus: reason };
+    const cond: Prisma.InventoryTransactionWhereInput = reason === "EXPIRED" ? { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null, id: { in: expiredIds } } : { receiptStatus: reason };
     if (!aging) return cond;
     const field = reason === "EXPIRED" ? "expiryDate" : "date";
     return { AND: [cond, { OR: aging.map((r) => ({ [field]: r })) }] };
@@ -70,7 +71,10 @@ const reasonOf = (r: { receiptStatus: string | null }): Reason => (r.receiptStat
 quarantineListRouter.get("/", async (req: AuthedRequest, res, next) => {
   try {
     const pagination = parsePagination(req);
-    const where = buildWhere(req);
+    // Expired lots count only while material from them is still here (stock issued out before it expired is not in Quarantine).
+    const expiredLeft = await getExpiredReceipts();
+    const remainingById = new Map(expiredLeft.map((e) => [e.id, e.remaining]));
+    const where = buildWhere(req, [...remainingById.keys()]);
     const [total, rows] = await Promise.all([
       prisma.inventoryTransaction.count({ where }),
       prisma.inventoryTransaction.findMany({
@@ -105,7 +109,7 @@ quarantineListRouter.get("/", async (req: AuthedRequest, res, next) => {
           itemName: r.item.name,
           category: r.item.category,
           unit: r.unit,
-          quantity: r.quantity,
+          quantity: reason === "EXPIRED" ? (remainingById.get(r.id) ?? r.quantity) : r.quantity,
           vendorName: r.vendorName,
           invoiceNo: r.invoiceNo,
           grnNo: r.grnNo,
@@ -130,7 +134,7 @@ quarantineListRouter.get("/options", async (req: AuthedRequest, res, next) => {
     const now = new Date();
     const held: Prisma.InventoryTransactionWhereInput = {
       ...BASE,
-      OR: [{ receiptStatus: { in: ["PENDING_QC", "TESTING", "ON_HOLD"] } }, { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null }],
+      OR: [{ receiptStatus: { in: ["PENDING_QC", "TESTING", "ON_HOLD"] } }, { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null, id: { in: (await getExpiredReceipts()).map((e) => e.id) } }],
     };
     let values: string[];
     if (field === "item") {

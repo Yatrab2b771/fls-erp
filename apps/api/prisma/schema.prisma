@@ -865,12 +865,21 @@ model BatchDispensingLine {
   id                String   @id @default(uuid())
   productionBatchId String
   itemId            String
+  // What the Day Store actually weighed out and gave (the plan quantity when nothing different was entered).
   quantity          Float
+  // What the plan asked for, kept so the weighing difference stays visible. Null on lines made before this existed.
+  plannedQty        Float?
   unit              String
+  // The dispensing sheet's own weighing fields (BMR 3.0): optional.
+  grossWeight       Float?
+  tareWeight        Float?
+  arNo              String?
+  note              String?
   createdById       String
   createdAt         DateTime @default(now())
 
   productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+  lotsDrawn       LotAllocation[]
 
   @@index([productionBatchId])
   @@map("batch_dispensing_lines")
@@ -1052,6 +1061,7 @@ model ProductionBatch {
   stockTransfers       StockTransfer[]
   dispensingLines      BatchDispensingLine[]
   leftovers            BatchLeftover[]
+  recycleLogs          BatchRecycleLog[]
 
   @@index([preProductionId])
   @@index([status])
@@ -1389,20 +1399,26 @@ enum QaGateStageId {
 }
 
 model BatchRecycleLog {
-  id            String        @id @default(uuid())
-  combinedLotId String
-  stageId       QaGateStageId
-  quantity      Float
-  unit          String
-  note          String?
+  id                String        @id @default(uuid())
+  // Exactly one of combinedLotId (legacy pooled lot) / productionBatchId (the current per-batch flow) is set.
+  combinedLotId     String?
+  productionBatchId String?
+  stageId           QaGateStageId
+  // WASTAGE: gone for good. REJECTED: failed quality and is held for a decision (rework / destroy / return).
+  kind              String        @default("WASTAGE")
+  quantity          Float
+  unit              String
+  note              String?
 
   createdById String
   createdAt   DateTime @default(now())
 
-  combinedLot CombinedLot @relation(fields: [combinedLotId], references: [id])
-  createdBy   User        @relation(fields: [createdById], references: [id])
+  combinedLot     CombinedLot?     @relation(fields: [combinedLotId], references: [id])
+  productionBatch ProductionBatch? @relation(fields: [productionBatchId], references: [id], onDelete: SetNull)
+  createdBy       User             @relation(fields: [createdById], references: [id])
 
   @@index([combinedLotId])
+  @@index([productionBatchId])
   @@map("batch_recycle_logs")
 }
 
@@ -1984,6 +2000,8 @@ model InventoryItem {
   qcSampleTransactions     QcSampleTransaction[]
   vendorPurchaseOrderItems VendorPurchaseOrderItem[]
   stockTransfers           StockTransfer[]
+  stockAdjustments         StockAdjustment[]
+  lotAllocations           LotAllocation[]
 
   @@unique([category, name])
   @@map("inventory_items")
@@ -2029,6 +2047,7 @@ model DayStore {
   // The paired Plant created alongside this Store — see Plant.dayStoreId's
   // own comment.
   pairedPlant       Plant?
+  stockAdjustments  StockAdjustment[]
 
   @@map("day_stores")
 }
@@ -2101,6 +2120,7 @@ model Plant {
   plannedForPoItems PurchaseOrderItem[]
   stockTransfersIn  StockTransfer[]        @relation("StockTransferDestPlant")
   stockTransfersOut StockTransfer[]        @relation("StockTransferSourcePlant")
+  stockAdjustments  StockAdjustment[]
 
   @@map("plants")
 }
@@ -2166,6 +2186,13 @@ model StockTransfer {
   // Null = still pending the other side's confirmation.
   confirmedById String?
   confirmedAt   DateTime?
+
+  // The receiver counted LESS than was sent: the destination gains quantity - shortQty, the source already lost the full
+  // quantity, and the difference is a recorded transit loss (shortNote says why). Null = received in full.
+  shortQty       Float?
+  shortNote      String?
+  // The receiver refused the transfer (deletedAt is set too, which gives the material back to the sender).
+  rejectedReason String?
 
   deletedAt   DateTime?
   deletedById String?
@@ -2614,6 +2641,15 @@ model InventoryTransaction {
   invoiceNo   String?
   invoiceDate DateTime?
 
+  // Transit-tracked issues only: the receiver counted LESS than was sent when it confirmed delivery. The source has
+  // already lost the full quantity; the destination gains quantity - shortQty. The difference is a recorded
+  // transit loss (shortNote says why) - never silently missing.
+  shortQty  Float?
+  shortNote String?
+
+  // ISSUED_RND only: the R&D transfer this issue belongs to, so cancelling a pending transfer can reverse exactly this row.
+  rndTransferId String?
+
   // Soft delete — every stock-on-hand calculation in stock.ts filters
   // deletedAt: null, so a "deleted" receipt/issue stops counting toward
   // stock the instant it's removed, same as a hard delete used to —
@@ -2636,10 +2672,16 @@ model InventoryTransaction {
   debitNotes               DebitNote[]
   vendorPurchaseOrderItem  VendorPurchaseOrderItem? @relation(fields: [vendorPurchaseOrderItemId], references: [id])
   stockTransfer            StockTransfer?           @relation(fields: [stockTransferId], references: [id])
+  // Which lots (RECEIVED rows) an issue drew from (first-expiry-first-out), and - on a RECEIVED row - where that lot went.
+  lotsDrawn                LotAllocation[]          @relation("LotAllocationIssue")
+  lotUsage                 LotAllocation[]          @relation("LotAllocationReceipt")
+  // Rejected stock that physically left (returned to the vendor / destroyed) - RECEIVED rows only.
+  rejectedDispositions     RejectedDisposition[]
 
   @@index([itemId])
   @@index([type, date])
   @@index([receiptStatus])
+  @@index([rndTransferId])
   @@index([dayStoreId])
   @@index([plantId])
   @@index([preProductionId])
@@ -2738,6 +2780,12 @@ model RndTransfer {
   // Null = still pending the other department's confirmation.
   confirmedById String?
   confirmedAt   DateTime?
+
+  // The receiver counted LESS than was sent: what it books in is quantity - shortQty; the difference is a recorded transit loss.
+  shortQty       Float?
+  shortNote      String?
+  // The receiver refused the transfer (deletedAt is set too, which gives the material back to the sender).
+  rejectedReason String?
 
   // Soft delete
   deletedAt   DateTime?
@@ -3068,6 +3116,123 @@ model FgShipment {
   @@index([productionBatchId])
   @@index([type, status])
   @@map("fg_shipments")
+}
+
+// ---------------------------------------------------------------------------
+// Stock corrections. Until now the only way to fix a wrong balance was to delete entries, which is blocked once other
+// stock depends on them. An adjustment is a signed correction at ONE location (Warehouse / a Day Store / a Plant / the R&D
+// Store) that a second person approves: Store raises it (or enters what it physically counted and the system works out the
+// difference), Admin or Accounts approves, and only then does it change any balance (stock.ts reads APPROVED rows only).
+// Disposing of expired Warehouse stock is an adjustment too (EXPIRED_DISPOSAL): it takes the quantity out of Quarantine.
+// ---------------------------------------------------------------------------
+
+enum StockAdjustmentLocation {
+  WAREHOUSE
+  DAY_STORE
+  PLANT
+  RND_STORE
+}
+
+enum StockAdjustmentReason {
+  COUNT_CORRECTION // the physical count differs from the system
+  DAMAGED
+  SPILLAGE
+  EXPIRED_DISPOSAL // expired Warehouse stock thrown away
+  FOUND_EXTRA // stock found that was never booked in
+  OTHER
+}
+
+enum StockAdjustmentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model StockAdjustment {
+  id            String                  @id @default(uuid())
+  itemId        String
+  locationType  StockAdjustmentLocation
+  dayStoreId    String?
+  plantId       String?
+  // + puts stock into the location, - takes it out.
+  quantityDelta Float
+  unit          String
+  reason        StockAdjustmentReason
+  note          String
+  // For a physical-count request: what the system showed and what was counted when it was raised.
+  systemQty     Float?
+  countedQty    Float?
+  status        StockAdjustmentStatus   @default(PENDING)
+
+  requestedById String
+  requestedAt   DateTime  @default(now())
+  reviewedById  String?
+  reviewedAt    DateTime?
+  reviewNote    String?
+  deletedAt     DateTime?
+
+  item     InventoryItem @relation(fields: [itemId], references: [id])
+  dayStore DayStore?     @relation(fields: [dayStoreId], references: [id])
+  plant    Plant?        @relation(fields: [plantId], references: [id])
+
+  @@index([status])
+  @@index([itemId, locationType, status])
+  @@map("stock_adjustments")
+}
+
+// Rejected stock (a whole delivery QC rejected, or the rejected part of an approved one) is not in stock, but it is still
+// physically in the building until it is sent back to the vendor or destroyed. One row per such movement; what is left to
+// deal with = the rejected quantity less what is recorded here.
+enum RejectedDispositionKind {
+  RETURNED_TO_VENDOR
+  DESTROYED
+}
+
+model RejectedDisposition {
+  id        String                  @id @default(uuid())
+  receiptId String
+  kind      RejectedDispositionKind
+  quantity  Float
+  unit      String
+  date      DateTime
+  challanNo String? // the return challan / destruction certificate number
+  vehicleNo String?
+  note      String?
+
+  createdById String
+  createdAt   DateTime  @default(now())
+  deletedAt   DateTime?
+
+  receipt InventoryTransaction @relation(fields: [receiptId], references: [id])
+
+  @@index([receiptId])
+  @@map("rejected_dispositions")
+}
+
+// Lot traceability. A "lot" is one RECEIVED row (its GRN, batch no, vendor, mfg and expiry dates). Every time stock leaves a
+// location, the lots it came out of are recorded here, first-expiry-first-out: Warehouse -> Day Store / R&D (issueTxnId),
+// Day Store -> Plant (issueTxnId), Plant -> a production batch (dispensingLineId). Reading it forwards answers "where did this
+// lot go", backwards "which lots went into this batch" - what a recall needs. Quantities that were booked before this existed
+// (or moved by a transfer, which does not carry lots) simply have no rows and show as "lot unknown".
+model LotAllocation {
+  id               String   @id @default(uuid())
+  itemId           String
+  receiptId        String
+  quantity         Float
+  issueTxnId       String?
+  dispensingLineId String?
+  createdAt        DateTime @default(now())
+
+  item           InventoryItem         @relation(fields: [itemId], references: [id])
+  receipt        InventoryTransaction  @relation("LotAllocationReceipt", fields: [receiptId], references: [id])
+  issueTxn       InventoryTransaction? @relation("LotAllocationIssue", fields: [issueTxnId], references: [id], onDelete: Cascade)
+  dispensingLine BatchDispensingLine?  @relation(fields: [dispensingLineId], references: [id], onDelete: Cascade)
+
+  @@index([receiptId])
+  @@index([issueTxnId])
+  @@index([dispensingLineId])
+  @@index([itemId])
+  @@map("lot_allocations")
 }
 
 // Every save of a Packaging BOM (kind PM, entityId = Sku id) or an RM recipe (kind RM, entityId =

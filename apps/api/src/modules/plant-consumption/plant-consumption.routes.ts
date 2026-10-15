@@ -112,6 +112,27 @@ plantConsumptionRouter.post(
           });
         }
 
+        // Waste and rejected raw material also go on the Recycle Store's books (a one-way sink: nothing comes back). The consumption row
+        // above is what takes it out of the Plant's stock; this row is the Recycle Store's own record of it, tied to the run.
+        const sink = consumptionRows.filter((r) => r.purpose === "WASTE" || r.purpose === "REJECTED");
+        if (sink.length > 0) {
+          await tx.inventoryTransaction.createMany({
+            data: sink.map((r) => ({
+              itemId: input.itemId,
+              type: "ISSUED_RECYCLE" as const,
+              date: new Date(),
+              unit: input.unit,
+              quantity: r.quantity,
+              plantId: run.plantId!,
+              preProductionId: run.id,
+              createdById: req.user!.id,
+              deliveredAt: new Date(),
+              deliveredById: req.user!.id,
+              remark: `${r.purpose === "WASTE" ? "Wasted" : "Rejected"} at the Plant${input.note ? ` - ${input.note}` : ""}`,
+            })),
+          });
+        }
+
         if (isLeftover && input.returnedQty > 0) {
           await tx.batchLeftover.create({ data: { productionBatchId: input.productionBatchId!, itemId: input.itemId, quantity: input.returnedQty, unit: input.unit, createdById: req.user!.id } });
         }

@@ -66,6 +66,7 @@ recycleStoreRouter.get("/transactions", requireRole(...VISIBLE_TO), async (_req,
       prisma.batchRecycleLog.findMany({
         include: {
           combinedLot: { select: { preProduction: { select: { purchaseOrderItem: poItemTrace } } } },
+          productionBatch: { select: { id: true, batchNo: true, preProduction: { select: { purchaseOrderItem: poItemTrace } } } },
           createdBy: { select: { fullName: true, email: true } },
         },
         orderBy: { createdAt: "desc" },
@@ -88,20 +89,30 @@ recycleStoreRouter.get("/transactions", requireRole(...VISIBLE_TO), async (_req,
       createdByName: r.createdBy.fullName || r.createdBy.email,
     }));
 
-    const lotOutput = lotOutputRows.map((r) => ({
-      kind: "batch_output" as const,
-      id: r.id,
-      itemName: null,
-      category: null,
-      quantity: r.quantity,
-      unit: r.unit,
-      plantName: null,
-      stageLabel: r.stageId === "QA_GATE_MFG" ? "QA Gate — Manufacturing" : "QA Gate — Packaging",
-      ...traceLabel(r.combinedLot.preProduction.purchaseOrderItem),
-      note: r.note,
-      date: r.createdAt,
-      createdByName: r.createdBy.fullName || r.createdBy.email,
-    }));
+    // A QA gate's own output: waste (gone for good) or a rejection (failed quality, held for a decision). It belongs to a production
+    // batch in the current flow, or to a pooled lot from before it.
+    const lotOutput = lotOutputRows.flatMap((r) => {
+      const item = r.productionBatch?.preProduction.purchaseOrderItem ?? r.combinedLot?.preProduction.purchaseOrderItem;
+      if (!item) return [];
+      return [
+        {
+          kind: "batch_output" as const,
+          id: r.id,
+          itemName: null,
+          category: null,
+          quantity: r.quantity,
+          unit: r.unit,
+          plantName: null,
+          stageLabel: `${r.stageId === "QA_GATE_MFG" ? "QA Gate — Manufacturing" : "QA Gate — Packaging"}${r.kind === "REJECTED" ? " (rejected, held)" : ""}`,
+          outputKind: r.kind,
+          batchNo: r.productionBatch?.batchNo ?? null,
+          ...traceLabel(item),
+          note: r.note,
+          date: r.createdAt,
+          createdByName: r.createdBy.fullName || r.createdBy.email,
+        },
+      ];
+    });
 
     const combined = [...material, ...lotOutput].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     res.json(combined);
@@ -158,33 +169,41 @@ recycleStoreRouter.get("/by-item", requireRole(...VISIBLE_TO), async (_req, res,
 // at which gate" rather than one lump sum per lot.
 recycleStoreRouter.get("/by-batch", requireRole(...VISIBLE_TO), async (_req, res, next) => {
   try {
-    const rows = await prisma.batchRecycleLog.groupBy({ by: ["combinedLotId", "stageId"], _sum: { quantity: true }, _count: { _all: true } });
+    const rows = await prisma.batchRecycleLog.groupBy({ by: ["combinedLotId", "productionBatchId", "stageId", "kind"], _sum: { quantity: true }, _count: { _all: true } });
     if (rows.length === 0) return res.json([]);
 
-    const lots = await prisma.combinedLot.findMany({
-      where: { id: { in: [...new Set(rows.map((r) => r.combinedLotId))] } },
-      select: { id: true, preProduction: { select: { purchaseOrderItem: poItemTrace } } },
-    });
+    const lotIds = [...new Set(rows.flatMap((r) => (r.combinedLotId ? [r.combinedLotId] : [])))];
+    const batchIds = [...new Set(rows.flatMap((r) => (r.productionBatchId ? [r.productionBatchId] : [])))];
+    const [lots, batches, unitRows] = await Promise.all([
+      prisma.combinedLot.findMany({ where: { id: { in: lotIds } }, select: { id: true, preProduction: { select: { purchaseOrderItem: poItemTrace } } } }),
+      prisma.productionBatch.findMany({ where: { id: { in: batchIds } }, select: { id: true, batchNo: true, preProduction: { select: { purchaseOrderItem: poItemTrace } } } }),
+      prisma.batchRecycleLog.findMany({ select: { combinedLotId: true, productionBatchId: true, unit: true }, distinct: ["combinedLotId", "productionBatchId"] }),
+    ]);
     const lotById = new Map(lots.map((l) => [l.id, l]));
-    const unitRows = await prisma.batchRecycleLog.findMany({ where: { combinedLotId: { in: rows.map((r) => r.combinedLotId) } }, select: { combinedLotId: true, unit: true }, distinct: ["combinedLotId"] });
-    const unitByLotId = new Map(unitRows.map((r) => [r.combinedLotId, r.unit]));
+    const batchById = new Map(batches.map((b) => [b.id, b]));
+    const unitByKey = new Map(unitRows.map((r) => [`${r.combinedLotId ?? ""}|${r.productionBatchId ?? ""}`, r.unit]));
 
     res.json(
-      rows
-        .map((r) => {
-          const lot = lotById.get(r.combinedLotId);
-          if (!lot) return null;
-          return {
+      rows.flatMap((r) => {
+        const lot = r.combinedLotId ? lotById.get(r.combinedLotId) : undefined;
+        const batch = r.productionBatchId ? batchById.get(r.productionBatchId) : undefined;
+        const item = batch?.preProduction.purchaseOrderItem ?? lot?.preProduction.purchaseOrderItem;
+        if (!item) return [];
+        return [
+          {
             combinedLotId: r.combinedLotId,
+            productionBatchId: r.productionBatchId,
+            batchNo: batch?.batchNo ?? null,
+            outputKind: r.kind,
             stageId: r.stageId,
             stageLabel: r.stageId === "QA_GATE_MFG" ? "QA Gate — Manufacturing" : "QA Gate — Packaging",
-            unit: unitByLotId.get(r.combinedLotId) ?? "",
+            unit: unitByKey.get(`${r.combinedLotId ?? ""}|${r.productionBatchId ?? ""}`) ?? "",
             totalQty: r._sum.quantity ?? 0,
             entryCount: r._count._all,
-            ...traceLabel(lot.preProduction.purchaseOrderItem),
-          };
-        })
-        .filter((r): r is NonNullable<typeof r> => r !== null),
+            ...traceLabel(item),
+          },
+        ];
+      }),
     );
   } catch (err) {
     next(err);

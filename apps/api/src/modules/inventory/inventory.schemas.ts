@@ -305,7 +305,9 @@ export const issueInventoryRequestSchema = z.object({
 // partial mismatch noticed on arrival, etc.) — appended onto the row's
 // existing remark, not a new column.
 export const confirmDeliverySchema = z.object({
-  note: z.string().max(500).optional(),
+  note: z.string().trim().max(500).optional(),
+  // What actually arrived, when it is less than was sent (then a note saying why is required).
+  receivedQty: z.coerce.number().positive().optional(),
 });
 
 // --- Quality Check gates — QA/QC checks, Store/Dispatch acts on the

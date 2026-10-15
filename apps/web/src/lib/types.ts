@@ -132,6 +132,9 @@ export interface StockTransfer {
   sentByName: string;
   confirmedAt: string | null;
   confirmedByName: string | null;
+  // Set when the receiver counted less than was sent: how much was missing and what happened to it.
+  shortQty?: number | null;
+  shortNote?: string | null;
   status: StockTransferStatus;
 }
 
@@ -506,10 +509,22 @@ export interface ItemStockByLocation {
 // a lump sum discovered a year later in a Tally suspense account.
 export interface MaterialReconciliationRow {
   item: { id: string; name: string; category: InventoryCategory; unit: string | null };
+  /** Accepted vendor deliveries, net of QC rejection (stock coming back from R&D / a Day Store is not counted again). */
   receivedQty: number;
+  /** Material R&D bought itself, straight into the R&D Store. */
+  rndDirectPurchase: number;
+  /** Net of approved stock corrections (+ found, - lost / thrown away). */
+  adjustments: number;
   onHandWarehouse: number;
+  /** Expired and still in the Warehouse's Quarantine. */
+  quarantineExpired: number;
   onHandDayStores: number;
   onHandPlants: number;
+  onHandRnd: number;
+  /** Sent but not yet confirmed by the receiver. */
+  inTransit: number;
+  /** A receiver counted less than was sent - a recorded transit loss. */
+  transitShort: number;
   consumedProduction: number;
   consumedSample: number;
   consumedWaste: number;
@@ -590,6 +605,8 @@ export interface RecycleStoreTransaction {
   unit: string;
   plantName: string | null; // material only
   stageLabel: string | null; // batch_output only
+  outputKind?: "WASTAGE" | "REJECTED"; // batch_output only: gone for good, or failed quality and held
+  batchNo?: string | null; // batch_output only
   productName: string | null;
   poNumber: string | null;
   customerName: string | null;
@@ -608,7 +625,11 @@ export interface RecycleStoreByItemRow {
 }
 
 export interface RecycleStoreByBatchRow {
-  combinedLotId: string;
+  /** A pooled lot from before the per-batch flow, or null for a production batch. */
+  combinedLotId: string | null;
+  productionBatchId?: string | null;
+  batchNo?: string | null;
+  outputKind?: "WASTAGE" | "REJECTED";
   stageId: "QA_GATE_MFG" | "QA_GATE_PACKAGING";
   stageLabel: string;
   unit: string;

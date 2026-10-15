@@ -305,6 +305,10 @@ function ReceiveItemForm({ poId, item, onDone }: { poId: string; item: VendorPur
       toast.error("Enter how much actually arrived.");
       return;
     }
+    if (item.item.category === "RM" && !expiryDate) {
+      toast.error("Enter the expiry date - raw material needs one so it can be caught when it expires.");
+      return;
+    }
     try {
       await receiveItem.mutateAsync({
         itemId: item.id,
@@ -343,7 +347,7 @@ function ReceiveItemForm({ poId, item, onDone }: { poId: string; item: VendorPur
         <input className="field" type="date" max={TODAY} value={mfgDate} onChange={(e) => setMfgDate(e.target.value)} />
       </div>
       <div>
-        <label className="label !mb-1 text-micro">Expiry Date</label>
+        <label className="label !mb-1 text-micro">Expiry Date{item.item.category === "RM" ? " *" : ""}</label>
         <input className="field" type="date" min={mfgDate || TODAY} value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} />
       </div>
       <div className="flex items-end gap-2">

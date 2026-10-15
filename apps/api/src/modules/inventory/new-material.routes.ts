@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../../common/lib/prisma";
 import { requireAuth, requireRole } from "../../common/middleware/auth";
+import { getExpiredReceipts } from "./stock";
 
 /**
  * R&D's "New Material" list: every Material Received entry the Warehouse took in from a vendor, with where it stands in R&D's inward QC.
@@ -74,13 +75,15 @@ newMaterialRouter.get("/", async (_req, res, next) => {
 newMaterialRouter.get("/quarantine", async (_req, res, next) => {
   try {
     const now = new Date();
+    // Expired lots count only while material from them is still here (see getExpiredReceipts).
+    const expiredIds = (await getExpiredReceipts()).map((e) => e.id);
     const rows = await prisma.inventoryTransaction.findMany({
       where: {
         type: "RECEIVED",
         deletedAt: null,
         isRndReturn: false,
         isStockTransferReceipt: false,
-        OR: [{ receiptStatus: { in: ["PENDING_QC", "TESTING", "ON_HOLD", "QC_REJECTED"] }, isOpeningStock: false }, { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null }],
+        OR: [{ receiptStatus: { in: ["PENDING_QC", "TESTING", "ON_HOLD", "QC_REJECTED"] }, isOpeningStock: false }, { receiptStatus: "ACCEPTED", expiryDate: { lt: now }, expiryReleasedAt: null, id: { in: expiredIds } }],
       },
       orderBy: { date: "desc" },
       take: 3000,

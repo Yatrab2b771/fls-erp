@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
+import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { Link } from "react-router-dom";
 import {
   ArrowDownToLine,
@@ -45,6 +46,7 @@ import {
   useCreateDispatchTransfer,
   useCreateInventoryRequest,
   useConfirmDelivery,
+  useRejectDelivery,
   useCustomers,
   useDayStoreAssignments,
   useDayStores,
@@ -636,6 +638,7 @@ export function InventoryPage() {
 
   const { data: transit, isLoading: transitLoading } = useTransit({ enabled: isTransitTab });
   const confirmDelivery = useConfirmDelivery();
+  const rejectDelivery = useRejectDelivery();
   const { data: materialReconciliation, isLoading: materialReconciliationLoading } = useMaterialReconciliation(undefined, { enabled: isReconciliationTab });
 
   // Stock on Hand and the material ledgers can run to thousands of rows, so the
@@ -740,12 +743,23 @@ export function InventoryPage() {
     .slice()
     .sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance));
 
-  async function handleConfirmDelivery(id: string) {
+  async function handleConfirmDelivery(id: string, r: ReceiveResult) {
     try {
-      await confirmDelivery.mutateAsync({ id });
-      toast.success("Confirmed delivered.");
+      await confirmDelivery.mutateAsync({ id, note: r.note, receivedQty: r.receivedQty });
+      toast.success(r.receivedQty ? "Confirmed - the shortage is recorded." : "Confirmed delivered.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not confirm delivery");
+      throw err;
+    }
+  }
+
+  async function handleRefuseDelivery(id: string, reason: string) {
+    try {
+      await rejectDelivery.mutateAsync({ id, reason });
+      toast.success("Refused - the material is back with the sender.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not refuse");
+      throw err;
     }
   }
 
@@ -1220,7 +1234,7 @@ export function InventoryPage() {
       ) : isRequestsTab ? (
         <MaterialRequestsPanel loading={requestsLoading} rows={filteredRequests} empty={!allRequests?.length} canReview={canWrite} currentUserId={user?.id} />
       ) : isTransitTab ? (
-        <TransitPanel loading={transitLoading} rows={filteredTransit} empty={!transit?.length} canConfirm={canWrite} onConfirm={handleConfirmDelivery} confirming={confirmDelivery.isPending} />
+        <TransitPanel loading={transitLoading} rows={filteredTransit} empty={!transit?.length} canConfirm={canWrite} onConfirm={handleConfirmDelivery} onRefuse={handleRefuseDelivery} confirming={confirmDelivery.isPending || rejectDelivery.isPending} />
       ) : isReconciliationTab ? (
         <MaterialReconciliationPanel loading={materialReconciliationLoading} rows={filteredMaterialReconciliation} empty={!materialReconciliation?.length} />
       ) : (
@@ -2856,15 +2870,18 @@ function TransitPanel({
   empty,
   canConfirm,
   onConfirm,
+  onRefuse,
   confirming,
 }: {
   loading: boolean;
   rows: TransitItem[] | undefined;
   empty: boolean;
   canConfirm: boolean;
-  onConfirm: (id: string) => void;
+  onConfirm: (id: string, r: ReceiveResult) => Promise<void>;
+  onRefuse: (id: string, reason: string) => Promise<void>;
   confirming: boolean;
 }) {
+  const [receivingKey, setReceivingKey] = useState<string | null>(null);
   if (loading) return <SkeletonRows rows={5} cols={7} />;
   if (empty) return <EmptyState icon={Route} title="Nothing in transit right now" hint="Tick “Track as In-Transit” when logging a Store/Production issue to see it here." accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Route} title="No matching shipments" hint="Try a different search." accent="slate" />;
@@ -2909,9 +2926,22 @@ function TransitPanel({
                 <td className="font-mono font-bold text-amber-600">{formatElapsed(t.dispatchedAt)}</td>
                 <td className="text-right">
                   {t.confirmPath && canConfirm ? (
-                    <button type="button" className="btn-primary btn-sm" disabled={confirming} onClick={() => onConfirm(t.id)}>
-                      <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Confirm Received
-                    </button>
+                    <>
+                      <button type="button" className="btn-primary btn-sm" disabled={confirming} onClick={() => setReceivingKey(`${t.kind}-${t.id}`)}>
+                        <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Confirm Received
+                      </button>
+                      <ReceiveDialog
+                        open={receivingKey === `${t.kind}-${t.id}`}
+                        itemName={t.item.name}
+                        sentQty={t.quantity}
+                        unit={t.unit}
+                        from={t.from}
+                        busy={confirming}
+                        onReceive={(r) => void onConfirm(t.id, r).then(() => setReceivingKey(null), () => undefined)}
+                        onRefuse={(reason) => void onRefuse(t.id, reason).then(() => setReceivingKey(null), () => undefined)}
+                        onCancel={() => setReceivingKey(null)}
+                      />
+                    </>
                   ) : (
                     <Link to={t.linkPath} className="btn-ghost btn-sm inline-flex" title="Act on this from its own screen">
                       <Eye className="h-3.5 w-3.5" strokeWidth={2.25} /> View
@@ -2939,15 +2969,24 @@ function MaterialReconciliationPanel({ loading, rows, empty }: { loading: boolea
 
   return (
     <div className="card overflow-hidden">
+      <p className="border-b border-slate-100 bg-slate-50/60 px-4 py-2.5 text-xs text-slate-500">
+        Variance = (Received + R&amp;D bought + Corrections) − Accounted For. Material that came back from R&amp;D or a Day Store is not counted as received again; material still on its way, expired in Quarantine, or lost in transit is shown in its own column. It should be 0.
+      </p>
       <div className="overflow-x-auto">
         <table className="table-modern w-full">
           <thead>
             <tr>
               <th>Item</th>
               <th className="text-right">Received</th>
+              <th className="text-right">R&amp;D Bought</th>
+              <th className="text-right">Corrections</th>
               <th className="text-right">On Hand — Warehouse</th>
+              <th className="text-right">Expired (Quarantine)</th>
               <th className="text-right">On Hand — Stores</th>
               <th className="text-right">On Hand — Plants</th>
+              <th className="text-right">On Hand — R&amp;D Store</th>
+              <th className="text-right">In Transit</th>
+              <th className="text-right">Lost in Transit</th>
               <th className="text-right">Consumed in Production</th>
               <th className="text-right">Sent as QC Sample</th>
               <th className="text-right">Wastage at Dispensing</th>
@@ -2964,9 +3003,15 @@ function MaterialReconciliationPanel({ loading, rows, empty }: { loading: boolea
               <tr key={r.item.id}>
                 <td className="font-bold text-slate-800">{r.item.name}</td>
                 <td className="text-right font-mono text-slate-700">{r.receivedQty}</td>
+                <td className="text-right font-mono text-violet-700">{r.rndDirectPurchase}</td>
+                <td className={`text-right font-mono ${r.adjustments === 0 ? "text-slate-400" : r.adjustments > 0 ? "text-emerald-700" : "text-rose-700"}`}>{r.adjustments > 0 ? `+${r.adjustments}` : r.adjustments}</td>
                 <td className="text-right font-mono text-slate-600">{r.onHandWarehouse}</td>
+                <td className="text-right font-mono text-amber-700">{r.quarantineExpired}</td>
                 <td className="text-right font-mono text-slate-600">{r.onHandDayStores}</td>
                 <td className="text-right font-mono text-slate-600">{r.onHandPlants}</td>
+                <td className="text-right font-mono text-violet-700">{r.onHandRnd}</td>
+                <td className="text-right font-mono text-sky-700">{r.inTransit}</td>
+                <td className={`text-right font-mono ${r.transitShort > 0 ? "text-rose-700" : "text-slate-400"}`}>{r.transitShort}</td>
                 <td className="text-right font-mono text-slate-600">{r.consumedProduction}</td>
                 <td className="text-right font-mono text-sky-700">{r.consumedSample}</td>
                 <td className="text-right font-mono text-amber-700">{r.consumedWaste}</td>

@@ -47,6 +47,11 @@ beforeEach(async () => {
   await init();
   await assertConnectedToTestDatabase();
   await prisma.$transaction([
+    // Lot allocations, rejected-stock dispositions and stock corrections reference InventoryTransaction / InventoryItem / DayStore /
+    // Plant (RESTRICT) - they go first, same reasoning as everything else in this list.
+    prisma.lotAllocation.deleteMany(),
+    prisma.rejectedDisposition.deleteMany(),
+    prisma.stockAdjustment.deleteMany(),
     prisma.dispatchTransfer.deleteMany(),
     // DebitNote references InventoryTransaction (transactionId) with a
     // RESTRICT FK — must go before inventoryTransaction below, same

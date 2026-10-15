@@ -90,6 +90,9 @@ import { AuditLogPage } from "./pages/AuditLogPage";
 import { RndPage } from "./pages/RndPage";
 import { RndStorePage } from "./pages/RndStorePage";
 import { RecycleStorePage } from "./pages/RecycleStorePage";
+import { StockAdjustmentsPage } from "./pages/StockAdjustmentsPage";
+import { RejectedStockPage } from "./pages/RejectedStockPage";
+import { LotsPage } from "./pages/LotsPage";
 
 export default function App() {
   const { user, loading } = useAuth();
@@ -214,6 +217,9 @@ export default function App() {
           <Route path="/rnd" element={<RndPage />} />
           <Route path="/rnd-store" element={<RndStorePage />} />
           <Route path="/recycle-store" element={<RecycleStorePage />} />
+          <Route path="/stock-adjustments" element={<StockAdjustmentsPage />} />
+          <Route path="/rejected-stock" element={<RejectedStockPage />} />
+          <Route path="/lots" element={<LotsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AppLayout>

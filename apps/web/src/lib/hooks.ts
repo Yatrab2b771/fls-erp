@@ -1722,17 +1722,29 @@ export function useTransit(options?: { enabled?: boolean }) {
   });
 }
 
+function invalidateTransit(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["inventory", "transit"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "day-stores"] });
+  qc.invalidateQueries({ queryKey: ["inventory", "plants"] });
+}
+
+// receivedQty: what actually arrived, when it is less than was sent (then a note saying why is required).
 export function useConfirmDelivery() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, note }: { id: string; note?: string }) => api<InventoryTransaction>(`/api/inventory/transactions/${id}/confirm-delivery`, { method: "POST", body: { note } }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["inventory", "transit"] });
-      qc.invalidateQueries({ queryKey: ["inventory", "transactions"] });
-      qc.invalidateQueries({ queryKey: ["inventory", "stock"] });
-      qc.invalidateQueries({ queryKey: ["inventory", "day-stores"] });
-      qc.invalidateQueries({ queryKey: ["inventory", "plants"] });
-    },
+    mutationFn: ({ id, note, receivedQty }: { id: string; note?: string; receivedQty?: number }) => api<InventoryTransaction>(`/api/inventory/transactions/${id}/confirm-delivery`, { method: "POST", body: { note, receivedQty } }),
+    onSuccess: () => invalidateTransit(qc),
+  });
+}
+
+// The receiver refuses a transit-tracked issue: it goes back to the sender's stock.
+export function useRejectDelivery() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => api(`/api/inventory/transactions/${id}/reject-delivery`, { method: "POST", body: { reason } }),
+    onSuccess: () => invalidateTransit(qc),
   });
 }
 
@@ -2895,7 +2907,27 @@ export function useCancelRndSampleRequest() {
 export function useConfirmRndTransfer() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api<RndTransfer>(`/api/rnd-store/transfers/${id}/confirm`, { method: "POST" }),
+    mutationFn: (arg: string | { id: string; receivedQty?: number; note?: string }) => {
+      const { id, ...body } = typeof arg === "string" ? { id: arg } : arg;
+      return api<RndTransfer>(`/api/rnd-store/transfers/${id}/confirm`, { method: "POST", body });
+    },
+    onSuccess: () => invalidateRndStore(qc),
+  });
+}
+
+// The receiver refuses a transfer (the material goes back to the sender), or the sender takes back one nobody has confirmed yet.
+export function useRejectRndTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => api(`/api/rnd-store/transfers/${id}/reject`, { method: "POST", body: { reason } }),
+    onSuccess: () => invalidateRndStore(qc),
+  });
+}
+
+export function useCancelRndTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/rnd-store/transfers/${id}`, { method: "DELETE" }),
     onSuccess: () => invalidateRndStore(qc),
   });
 }
@@ -2984,7 +3016,19 @@ export function useCreateStockTransfer() {
 export function useConfirmStockTransfer() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api<StockTransfer>(`/api/stock-transfers/${id}/confirm`, { method: "POST" }),
+    mutationFn: (arg: string | { id: string; receivedQty?: number; note?: string }) => {
+      const { id, ...body } = typeof arg === "string" ? { id: arg } : arg;
+      return api<StockTransfer>(`/api/stock-transfers/${id}/confirm`, { method: "POST", body });
+    },
+    onSuccess: () => invalidateStockTransfers(qc),
+  });
+}
+
+// The receiving side refuses the transfer: the material goes back to the sender.
+export function useRejectStockTransfer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => api(`/api/stock-transfers/${id}/reject`, { method: "POST", body: { reason } }),
     onSuccess: () => invalidateStockTransfers(qc),
   });
 }

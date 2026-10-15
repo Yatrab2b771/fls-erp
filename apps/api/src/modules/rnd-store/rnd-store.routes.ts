@@ -3,10 +3,12 @@ import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
-import { notifyRoles } from "../../common/lib/notify";
+import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
 import { getOnHandByItemId } from "../inventory/stock";
+import { recordIssueLots } from "../inventory/lots";
+import { receiveTransferSchema, rejectTransferSchema, resolveShortReceipt, type ReceiveTransferInput, type RejectTransferInput } from "../inventory/transit";
 import { getRndStoreOnHand } from "./rnd-stock";
 import {
   createRndTransferSchema,
@@ -49,12 +51,16 @@ function serializeTransfer(t: {
   note: string | null;
   sentAt: Date;
   confirmedAt: Date | null;
+  shortQty?: number | null;
+  shortNote?: string | null;
   item: { id: string; category: string; name: string };
   sentBy: { fullName: string; email: string };
   confirmedBy: { fullName: string; email: string } | null;
 }) {
   return {
     id: t.id,
+    shortQty: t.shortQty ?? null,
+    shortNote: t.shortNote ?? null,
     direction: t.direction,
     itemId: t.itemId,
     itemName: t.item.name,
@@ -83,9 +89,10 @@ async function createSampleSendToRnd(params: { itemId: string; quantity: number;
       throw new RouteError(409, `Only ${currentStock} ${unit} actually on hand in the Warehouse — can't send more than what's in stock.`);
     }
     const created = await tx.rndTransfer.create({ data: { direction: "TO_RND", itemId, quantity, unit, note, sentById }, include: transferInclude });
-    await tx.inventoryTransaction.create({
-      data: { itemId, type: "ISSUED_RND", date: new Date(), unit, quantity, remark: note ? `Sent to R&D Store — ${note}` : "Sent to R&D Store", createdById: sentById },
+    const issue = await tx.inventoryTransaction.create({
+      data: { itemId, type: "ISSUED_RND", date: new Date(), unit, quantity, remark: note ? `Sent to R&D Store — ${note}` : "Sent to R&D Store", createdById: sentById, rndTransferId: created.id },
     });
+    await recordIssueLots(tx, issue);
     return created;
   });
 }
@@ -151,11 +158,13 @@ rndStoreRouter.post("/transfers", validateBody(createRndTransferSchema), async (
 // Step 2 (R&D confirms Store's send) / Step 6 (Store confirms R&D's
 // return). The receiving department's own side of the ledger only moves
 // here, not at creation — see the module comment above.
-rndStoreRouter.post("/transfers/:id/confirm", async (req: AuthedRequest<{ id: string }>, res, next) => {
+rndStoreRouter.post("/transfers/:id/confirm", validateBody(receiveTransferSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const existing = await prisma.rndTransfer.findUnique({ where: { id: req.params.id } });
-    if (!existing) return res.status(404).json({ error: "Transfer not found" });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transfer not found" });
     if (existing.confirmedAt) return res.status(409).json({ error: "Already confirmed." });
+    // How much actually arrived (less than was sent needs a reason and is kept as a recorded transit loss).
+    const received = resolveShortReceipt(existing.quantity, req.body as ReceiveTransferInput);
 
     const isAdmin = req.user!.roles.includes("ADMIN");
     const item = await prisma.inventoryItem.findUnique({ where: { id: existing.itemId } });
@@ -166,9 +175,9 @@ rndStoreRouter.post("/transfers/:id/confirm", async (req: AuthedRequest<{ id: st
 
       const updated = await prisma.$transaction(async (tx) => {
         await tx.rndStoreTransaction.create({
-          data: { itemId: existing.itemId, type: "INBOUND", quantity: existing.quantity, unit: existing.unit, transferId: existing.id, createdById: req.user!.id },
+          data: { itemId: existing.itemId, type: "INBOUND", quantity: received.receivedQty, unit: existing.unit, transferId: existing.id, createdById: req.user!.id },
         });
-        return tx.rndTransfer.update({ where: { id: existing.id }, data: { confirmedById: req.user!.id, confirmedAt: new Date() }, include: transferInclude });
+        return tx.rndTransfer.update({ where: { id: existing.id }, data: { confirmedById: req.user!.id, confirmedAt: new Date(), shortQty: received.shortQty, shortNote: received.shortNote }, include: transferInclude });
       });
 
       await recordAudit({ actorId: req.user!.id, action: "rnd_transfer.confirmed_at_rnd", entityType: "RndTransfer", entityId: updated.id });
@@ -185,7 +194,7 @@ rndStoreRouter.post("/transfers/:id/confirm", async (req: AuthedRequest<{ id: st
           type: "RECEIVED",
           date: new Date(),
           unit: existing.unit,
-          quantity: existing.quantity,
+          quantity: received.receivedQty,
           isRndReturn: true,
           receiptStatus: "ACCEPTED",
           acceptedById: req.user!.id,
@@ -194,11 +203,78 @@ rndStoreRouter.post("/transfers/:id/confirm", async (req: AuthedRequest<{ id: st
           createdById: req.user!.id,
         },
       });
-      return tx.rndTransfer.update({ where: { id: existing.id }, data: { confirmedById: req.user!.id, confirmedAt: new Date() }, include: transferInclude });
+      return tx.rndTransfer.update({ where: { id: existing.id }, data: { confirmedById: req.user!.id, confirmedAt: new Date(), shortQty: received.shortQty, shortNote: received.shortNote }, include: transferInclude });
     });
 
-    await recordAudit({ actorId: req.user!.id, action: "rnd_transfer.confirmed_at_warehouse", entityType: "RndTransfer", entityId: updated.id });
+    await recordAudit({ actorId: req.user!.id, action: "rnd_transfer.confirmed_at_warehouse", entityType: "RndTransfer", entityId: updated.id, metadata: received.shortQty ? { shortQty: received.shortQty, shortNote: received.shortNote } : undefined });
     res.json(serializeTransfer(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Takes a not-yet-confirmed transfer back out of the books, giving the material back to the sender. Used both by the sender
+ * cancelling a wrong send and by the receiver refusing it (`rejectedReason`). Confirmed transfers can't be undone this way.
+ */
+async function reversePendingTransfer(existing: { id: string; direction: string; itemId: string; quantity: number; sentById: string; sentAt: Date }, actorId: string, rejectedReason?: string) {
+  await prisma.$transaction(async (tx) => {
+    await tx.rndTransfer.update({ where: { id: existing.id }, data: { deletedAt: new Date(), deletedById: actorId, ...(rejectedReason ? { rejectedReason } : {}) } });
+    if (existing.direction === "TO_RND") {
+      // The Warehouse-side issue: linked directly on new rows; older rows are matched by item, quantity and moment of sending.
+      const linked = await tx.inventoryTransaction.findFirst({ where: { rndTransferId: existing.id, deletedAt: null }, select: { id: true } });
+      const legacy = linked
+        ? null
+        : await tx.inventoryTransaction.findFirst({
+            where: { type: "ISSUED_RND", itemId: existing.itemId, quantity: existing.quantity, deletedAt: null, rndTransferId: null, createdAt: { gte: new Date(existing.sentAt.getTime() - 60_000), lte: new Date(existing.sentAt.getTime() + 60_000) } },
+            select: { id: true },
+          });
+      const issueId = linked?.id ?? legacy?.id;
+      if (issueId) await tx.inventoryTransaction.update({ where: { id: issueId }, data: { deletedAt: new Date(), deletedById: actorId } });
+    } else {
+      // R&D's side of a return: the RETURNED row dropped its balance when it was sent.
+      await tx.rndStoreTransaction.updateMany({ where: { transferId: existing.id, deletedAt: null }, data: { deletedAt: new Date(), deletedById: actorId } });
+    }
+  });
+}
+
+// The sender takes back a transfer the other side has not confirmed yet (wrong item / quantity).
+rndStoreRouter.delete("/transfers/:id", async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.rndTransfer.findUnique({ where: { id: req.params.id }, include: { item: { select: { name: true } } } });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transfer not found" });
+    if (existing.confirmedAt) return res.status(409).json({ error: "Already confirmed by the receiving side - it can't be cancelled here." });
+    const isAdmin = req.user!.roles.includes("ADMIN");
+    if (!isAdmin && existing.sentById !== req.user!.id) return res.status(403).json({ error: "Only the person who sent this can cancel it." });
+    await reversePendingTransfer(existing, req.user!.id);
+    await recordAudit({ actorId: req.user!.id, action: "rnd_transfer.cancelled", entityType: "RndTransfer", entityId: existing.id });
+    res.status(204).send();
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The receiving side refuses a transfer (wrong item, damaged, not what was asked for): the material goes back to the sender.
+rndStoreRouter.post("/transfers/:id/reject", validateBody(rejectTransferSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.rndTransfer.findUnique({ where: { id: req.params.id }, include: { item: { select: { name: true } } } });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transfer not found" });
+    if (existing.confirmedAt) return res.status(409).json({ error: "Already confirmed - it can't be refused any more." });
+    const isAdmin = req.user!.roles.includes("ADMIN");
+    const roles = req.user!.roles;
+    // R&D receives what the Warehouse sends it; the Warehouse receives what R&D sends back.
+    if (existing.direction === "TO_RND" ? !roles.includes("RND") && !isAdmin : !roles.includes("STORE") && !isAdmin) {
+      return res.status(403).json({ error: existing.direction === "TO_RND" ? "Only R&D can refuse a sample sent to the R&D Store." : "Only Store can refuse material returned from the R&D Store." });
+    }
+    const { reason } = req.body as RejectTransferInput;
+    await reversePendingTransfer(existing, req.user!.id, reason);
+    await recordAudit({ actorId: req.user!.id, action: "rnd_transfer.refused", entityType: "RndTransfer", entityId: existing.id, metadata: { reason } });
+    await notifyUser(existing.sentById, {
+      title: `${existing.item.name} refused`,
+      body: `${existing.quantity} ${existing.unit} was refused: ${reason}. It is back in your stock.`,
+      link: "/rnd-store",
+    }).catch((err) => req.log?.error({ err }, "notify failed: rnd_transfer.refused"));
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

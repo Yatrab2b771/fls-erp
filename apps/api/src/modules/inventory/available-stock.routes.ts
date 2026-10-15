@@ -5,7 +5,7 @@ import { requireAuth, requireRole, type AuthedRequest } from "../../common/middl
 import { getRndStoreOnHand } from "../rnd-store/rnd-stock";
 import type { Prisma } from "@prisma/client";
 import { getScopedDayStoreIds, requireWarehouseSeat } from "./day-store-access";
-import { getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem } from "./stock";
+import { getExpiredReceipts, getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem } from "./stock";
 import { loadItemEntries, loadStockMovement } from "./stock-report";
 
 /**
@@ -104,8 +104,10 @@ async function loadItemDetails(itemIds: string[], warehouseSide: boolean): Promi
   const now = Date.now();
   const receipts = await prisma.inventoryTransaction.findMany({
     where: { type: "RECEIVED", deletedAt: null, itemId: { in: itemIds }, receiptStatus: { in: ["ACCEPTED", "PENDING_QC", "ON_HOLD"] } },
-    select: { itemId: true, receiptStatus: true, quantity: true, rejectedQty: true, expiryDate: true, expiryReleasedAt: true, date: true },
+    select: { id: true, itemId: true, receiptStatus: true, quantity: true, rejectedQty: true, expiryDate: true, expiryReleasedAt: true, date: true },
   });
+  // An expired receipt is in Quarantine only while material from it is still here (issued out before it expired = not quarantined).
+  const expiredLeft = new Map((await getExpiredReceipts(itemIds)).map((e) => [e.id, e.remaining]));
   const lines = warehouseSide
     ? await prisma.requirementPurchaseLine.findMany({ where: { status: "OPEN", requirement: { itemId: { in: itemIds }, deletedAt: null } }, select: { quantity: true, receivedQty: true, eta: true, requirement: { select: { itemId: true } } } })
     : [];
@@ -117,7 +119,7 @@ async function loadItemDetails(itemIds: string[], warehouseSide: boolean): Promi
   };
   for (const r of receipts) {
     const d = get(r.itemId);
-    const expired = !!r.expiryDate && r.expiryDate.getTime() < now && !r.expiryReleasedAt;
+    const expired = expiredLeft.has(r.id);
     if (r.receiptStatus === "ACCEPTED" && !expired) {
       if (r.expiryDate && (!d.earliestExpiry || r.expiryDate.toISOString() < d.earliestExpiry)) d.earliestExpiry = r.expiryDate.toISOString();
       if (warehouseSide) {
@@ -125,7 +127,7 @@ async function loadItemDetails(itemIds: string[], warehouseSide: boolean): Promi
         if (!d.lastReceived || r.date.toISOString() > d.lastReceived) d.lastReceived = r.date.toISOString();
       }
     } else if (warehouseSide) {
-      d.quarantineQty = round2(d.quarantineQty + r.quantity - (r.rejectedQty ?? 0));
+      d.quarantineQty = round2(d.quarantineQty + (expired ? (expiredLeft.get(r.id) ?? 0) : r.quantity - (r.rejectedQty ?? 0)));
     }
   }
   for (const l of lines) {
@@ -357,8 +359,9 @@ async function loadBatches(itemIds: string[], canSeeRate: boolean, period: Batch
     },
     orderBy: [{ date: "desc" }],
   });
+  const expiredLeft = new Set((await getExpiredReceipts(itemIds)).map((e) => e.id));
   const out = rows.map((r) => {
-    const expired = r.receiptStatus === "ACCEPTED" && !!r.expiryDate && r.expiryDate.getTime() < now && !r.expiryReleasedAt;
+    const expired = r.receiptStatus === "ACCEPTED" && expiredLeft.has(r.id);
     return {
       id: r.id,
       itemId: r.itemId,

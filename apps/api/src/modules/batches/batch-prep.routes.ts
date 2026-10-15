@@ -18,6 +18,7 @@ import { BATCH_LINE_CLEARANCE_ITEMS } from "./batch-checklists";
 import { utilizationGapMessage, utilizationOfBatches } from "./batch-utilization";
 import { withUtilization } from "./production-batches.routes";
 import { plantFreeQty } from "../plant-consumption/plant-position";
+import { recordDispensingLots, recordIssueLots } from "../inventory/lots";
 
 /**
  * The per-batch flow (a run started with batchFlow = true). Every batch goes through four steps of its own before its production starts:
@@ -341,7 +342,25 @@ const dispenseSchema = z.object({
   pmIssuedDate: z.coerce.date({ required_error: "Enter the PM issued date.", invalid_type_error: "Enter the PM issued date." }),
   dispensingRemarks: z.string().trim().max(1000).optional(),
   grnNo: z.string().trim().max(120).optional(), // optional: the GRN the material came on
+  // What the Day Store actually weighed out for each material. Leave a material out (or send no lines at all) and the plan quantity is
+  // taken as given - the usual one-click case. A weighing more than the tolerance away from the plan needs a note saying why.
+  lines: z
+    .array(
+      z.object({
+        itemId: z.string().uuid(),
+        actualQty: z.coerce.number().positive("The weighed quantity must be more than zero."),
+        grossWeight: z.coerce.number().nonnegative().optional(),
+        tareWeight: z.coerce.number().nonnegative().optional(),
+        arNo: z.string().trim().max(60).optional(),
+        note: z.string().trim().max(300).optional(),
+      }),
+    )
+    .max(200)
+    .optional(),
 });
+
+/** How far a weighed quantity may be from the plan before the Day Store has to say why. */
+const DISPENSE_TOLERANCE = 0.05;
 
 batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), validateBody(dispenseSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
@@ -352,8 +371,25 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
     if (batch.heldAt) return res.status(409).json({ error: HELD_MESSAGE });
     const plant = batch.preProduction.plant;
     const input = req.body as z.infer<typeof dispenseSchema>;
-    const required = await requirementsOf(batch);
-    if (required.length > 0 && !plant) return res.status(400).json({ error: "Assign a Plant to this run before dispensing." });
+    const planned = await requirementsOf(batch);
+    if (planned.length > 0 && !plant) return res.status(400).json({ error: "Assign a Plant to this run before dispensing." });
+
+    // What is actually given: the weighed quantity where one was entered, else the plan quantity. `requiredQty` below is what is GIVEN
+    // (it drives the Plant / Day Store stock check and the line); `plannedQty` keeps what the plan asked for.
+    const weighed = new Map((input.lines ?? []).map((l) => [l.itemId, l]));
+    for (const l of input.lines ?? []) {
+      if (!planned.some((p) => p.itemId === l.itemId)) return res.status(400).json({ error: "A weighed line is for a material that is not in this batch's plan. Material outside the plan goes through Extra Material." });
+    }
+    const required = planned.map((p) => {
+      const w = weighed.get(p.itemId);
+      const given = q3(w?.actualQty ?? p.requiredQty);
+      const off = p.requiredQty > 0 ? Math.abs(given - p.requiredQty) / p.requiredQty : 0;
+      return { ...p, plannedQty: p.requiredQty, requiredQty: given, weighing: w, off };
+    });
+    const unexplained = required.filter((r) => r.off > DISPENSE_TOLERANCE && !r.weighing?.note);
+    if (unexplained.length > 0) {
+      return res.status(400).json({ error: `Weighed more than ${Math.round(DISPENSE_TOLERANCE * 100)}% away from the plan - write why: ${unexplained.map((r) => `${r.itemName} (plan ${r.plannedQty}, weighed ${r.requiredQty} ${r.unit})`).join("; ")}.` });
+    }
 
     const updated = await runSerializable(async (tx) => {
       if (required.length > 0) {
@@ -372,15 +408,34 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
             include: { fulfillments: { where: { deletedAt: null }, select: { quantity: true } } },
             orderBy: { createdAt: "asc" },
           });
-          await tx.inventoryTransaction.create({
+          const issue = await tx.inventoryTransaction.create({
             data: { itemId: s.itemId, type: "ISSUED_PRODUCTION", date: new Date(), unit: s.unit, quantity: s.short, createdById: req.user!.id, dayStoreId: plant!.dayStoreId, plantId: plant!.id, fulfillsRequestId: open?.id ?? null, deliveredAt: new Date(), deliveredById: req.user!.id, remark: `Issued to the Plant at Dispensing (${batch.batchNo ?? "batch"})` },
           });
+          // Which lots that came out of the Day Store, oldest expiry first.
+          await recordIssueLots(tx, issue);
           if (open) {
             const issued = open.fulfillments.reduce((x, f) => x + f.quantity, 0) + s.short;
             await tx.inventoryRequest.update({ where: { id: open.id }, data: { status: issued >= open.requestedQty - 1e-9 ? "ISSUED" : "PARTIALLY_ISSUED" } });
           }
         }
-        await tx.batchDispensingLine.createMany({ data: required.map((r) => ({ productionBatchId: batch.id, itemId: r.itemId, quantity: r.requiredQty, unit: r.unit, createdById: req.user!.id })) });
+        // One line per material: what was weighed and given, what the plan asked for, and which lots (deliveries) it was drawn from.
+        for (const r of required) {
+          const line = await tx.batchDispensingLine.create({
+            data: {
+              productionBatchId: batch.id,
+              itemId: r.itemId,
+              quantity: r.requiredQty,
+              plannedQty: r.plannedQty,
+              unit: r.unit,
+              grossWeight: r.weighing?.grossWeight,
+              tareWeight: r.weighing?.tareWeight,
+              arNo: r.weighing?.arNo,
+              note: r.weighing?.note,
+              createdById: req.user!.id,
+            },
+          });
+          await recordDispensingLots(tx, line, plant!.id);
+        }
       }
       return tx.productionBatch.update({
         where: { id: batch.id },

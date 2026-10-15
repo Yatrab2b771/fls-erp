@@ -7,8 +7,14 @@ import { validateBody } from "../../common/middleware/validate";
 import { notifyRoles, notifyUser } from "../../common/lib/notify";
 import { runSerializable } from "../../common/lib/serializable-transaction";
 import { RouteError } from "../../common/lib/route-error";
+import { assertUnitMatchesItem } from "../../common/lib/units";
+import { rejectTransferSchema, resolveShortReceipt, type RejectTransferInput } from "./transit";
+import { recordIssueLots } from "./lots";
+import { lotsRouter } from "./lots.routes";
+import { rejectedStockRouter } from "./rejected-stock.routes";
 import { assertDayStoreAccess, getScopedDayStoreIds } from "./day-store-access";
-import { getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem, notifyIfNewlyAvailable } from "./stock";
+import { getRndStoreOnHand } from "../rnd-store/rnd-stock";
+import { emptyWarehouseLedger, expiredRemainingOf, getExpiredReceipts, getInTransitByItemId, getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem, getWarehouseLedger, notifyIfNewlyAvailable, usableOf } from "./stock";
 import { availableStockRouter } from "./available-stock.routes";
 import { stockReceivedRouter } from "./stock-received.routes";
 import { quarantineListRouter } from "./quarantine-list.routes";
@@ -274,47 +280,34 @@ inventoryRouter.post("/items/import-master", requireRole("STORE"), validateBody(
 // The per-item ledger totals behind Stock on Hand. `itemIds` restricts the
 // sums to one page of items (so a paginated request only aggregates what it shows).
 async function loadStockTotals(itemIds?: string[]) {
-  const itemFilter = itemIds ? { itemId: { in: itemIds } } : {};
-  const [receivedTotals, issuedDayStoreTotals, issuedRndTotals] = await Promise.all([
-    // Only ACCEPTED counts - a delivery still sitting in QC, or one QC
-    // rejected, hasn't actually become usable stock yet. rejectedQty is summed
-    // alongside quantity so a partially-rejected delivery only counts its
-    // actually-usable remainder (see qcReviewSchema). Same expiry-quarantine OR
-    // clause as getOnHandByItemId in stock.ts - this route runs its own
-    // separate query rather than calling that helper, so it repeats the
-    // exclusion (see GET /quarantine for where an excluded row shows up).
-    prisma.inventoryTransaction.groupBy({
-      by: ["itemId"],
-      where: { type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null, ...itemFilter, OR: [{ expiryDate: null }, { expiryDate: { gte: new Date() } }, { expiryReleasedAt: { not: null } }] },
-      _sum: { quantity: true, rejectedQty: true },
-    }),
-    prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_DAY_STORE", deletedAt: null, ...itemFilter }, _sum: { quantity: true } }),
-    // Sample sent to the R&D Store (see rnd-store.routes.ts) - an outflow here
-    // same as the two ISSUED_* types above, kept in its own bucket so this view
-    // can show it distinctly rather than folding it into Day Store/Production.
-    prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { type: "ISSUED_RND", deletedAt: null, ...itemFilter }, _sum: { quantity: true } }),
-  ]);
-
-  // Kept as one bulk breakdown (received/issued-day-store/issued-production/
-  // issued-rnd separately) for this full-ledger view, not routed through
-  // getOnHandByItemId's collapsed onHand-only map - that shared helper is for
-  // callers (like Pre-Inventory) that only need the final number.
-  const receivedGross = new Map(receivedTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
-  const rejected = new Map(receivedTotals.map((r) => [r.itemId, r._sum.rejectedQty ?? 0]));
-  const issuedDayStore = new Map(issuedDayStoreTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
-  const issuedRnd = new Map(issuedRndTotals.map((r) => [r.itemId, r._sum.quantity ?? 0]));
+  // The same ledger getOnHandByItemId reads (stock.ts), so this view and every other stock number can never disagree. Expired stock
+  // that is still in Quarantine is out of onHand but reported separately; expiry is applied first-expiry-first-out, so material that
+  // was issued before it expired does not turn the balance negative.
+  const ledgers = await getWarehouseLedger(itemIds);
 
   return (itemId: string) => {
-    const rejectedQty = rejected.get(itemId) ?? 0;
-    // Net of any partial QC rejection - what actually became usable stock.
-    const receivedQty = (receivedGross.get(itemId) ?? 0) - rejectedQty;
-    const issuedDayStoreQty = issuedDayStore.get(itemId) ?? 0;
+    const l = ledgers.get(itemId) ?? emptyWarehouseLedger();
+    // Net of any partial QC rejection - what actually became accepted stock.
+    const receivedQty = l.accepted;
+    const issuedDayStoreQty = l.issuedDayStore;
     // The Warehouse never issues to Production - only a Day Store does, out of its own shelf - so
     // nothing leaves the Warehouse this way. Kept as 0 so the response shape does not change.
     const issuedProductionQty = 0;
-    const issuedRndQty = issuedRnd.get(itemId) ?? 0;
+    const issuedRndQty = l.issuedRnd;
     const issuedQty = issuedDayStoreQty + issuedProductionQty + issuedRndQty;
-    return { receivedQty, rejectedQty, issuedDayStoreQty, issuedProductionQty, issuedRndQty, issuedQty, onHand: receivedQty - issuedQty };
+    return {
+      receivedQty,
+      rejectedQty: l.rejectedQty,
+      issuedDayStoreQty,
+      issuedProductionQty,
+      issuedRndQty,
+      issuedQty,
+      // Expired and still in Quarantine (not part of onHand), and approved corrections (found extra / written off).
+      expiredQty: expiredRemainingOf(l),
+      adjustmentInQty: l.adjustmentIn,
+      adjustmentOutQty: l.adjustmentOut + l.disposed,
+      onHand: usableOf(l),
+    };
   };
 }
 
@@ -331,6 +324,8 @@ const stockItemWhere = (category: InventoryCategory | undefined, search: string 
 inventoryRouter.use("/available-stock", availableStockRouter);
 inventoryRouter.use("/stock-received", stockReceivedRouter);
 inventoryRouter.use("/quarantine-list", quarantineListRouter);
+inventoryRouter.use("/rejected-stock", rejectedStockRouter);
+inventoryRouter.use("/lots", lotsRouter);
 inventoryRouter.use("/fg-list", fgListRouter);
 inventoryRouter.use("/stock-issued", stockIssuedRouter);
 inventoryRouter.use("/my-store", myStoreRouter);
@@ -505,6 +500,9 @@ inventoryRouter.get("/fg-stock", requireRole("STORE", "PPIC", "ACCOUNTS", "PURCH
 // Accounts/RND/PPIC just need visibility).
 inventoryRouter.get("/quarantine", requireRole("STORE", "QA_QC", "ACCOUNTS", "RND", "PPIC"), async (_req: AuthedRequest, res, next) => {
   try {
+    // Expired lots only while material from them is still physically here: stock issued out before it expired is not in Quarantine.
+    const expiredLeft = await getExpiredReceipts();
+    const remainingById = new Map(expiredLeft.map((e) => [e.id, e.remaining]));
     const [pendingQc, expired] = await Promise.all([
       prisma.inventoryTransaction.findMany({
         where: { deletedAt: null, type: "RECEIVED", receiptStatus: { in: [...INWARD_QC_REVIEWABLE_STATUSES] } },
@@ -512,7 +510,7 @@ inventoryRouter.get("/quarantine", requireRole("STORE", "QA_QC", "ACCOUNTS", "RN
         orderBy: { date: "desc" },
       }),
       prisma.inventoryTransaction.findMany({
-        where: { deletedAt: null, type: "RECEIVED", receiptStatus: "ACCEPTED", expiryDate: { lt: new Date() }, expiryReleasedAt: null },
+        where: { id: { in: [...remainingById.keys()] } },
         include: txnInclude,
         orderBy: { expiryDate: "asc" },
       }),
@@ -520,7 +518,7 @@ inventoryRouter.get("/quarantine", requireRole("STORE", "QA_QC", "ACCOUNTS", "RN
 
     const rows = [
       ...pendingQc.map((t) => ({ ...t, quarantineReason: t.receiptStatus === "ON_HOLD" ? ("ON_HOLD" as const) : ("PENDING_QC" as const) })),
-      ...expired.map((t) => ({ ...t, quarantineReason: "EXPIRED" as const })),
+      ...expired.map((t) => ({ ...t, quarantineReason: "EXPIRED" as const, remainingQty: remainingById.get(t.id) ?? t.quantity })),
     ];
 
     res.json(rows);
@@ -603,7 +601,7 @@ inventoryRouter.get("/dashboard-summary", requireRole("STORE"), async (_req: Aut
         select: { packApprovedQty: true, dispatchedQty: true, preProduction: { select: { purchaseOrderItem: { select: { productName: true, purchaseOrder: { select: { customerId: true } } } } } } },
       }),
       prisma.inventoryTransaction.count({ where: { deletedAt: null, type: "RECEIVED", receiptStatus: { in: [...INWARD_QC_REVIEWABLE_STATUSES] } } }),
-      prisma.inventoryTransaction.count({ where: { deletedAt: null, type: "RECEIVED", receiptStatus: "ACCEPTED", expiryDate: { lt: new Date() }, expiryReleasedAt: null } }),
+      getExpiredReceipts().then((rows) => rows.length),
     ]);
     const fgKeys = new Set<string>();
     for (const b of fgBatches) {
@@ -662,20 +660,23 @@ inventoryRouter.get("/items/:id/stock-by-location", requireRole("STORE", "PPIC",
   }
 });
 
-// --- Material Reconciliation — "of everything ever received, where did
-// it all actually go?" per item. The client's own example: ₹100 received,
-// ₹95 billed to a customer, ₹3 wastage/rejection, ₹2 unaccounted for —
-// that ₹2 usually turns out to be R&D sampling that was never tracked
-// anywhere, and it compounds year over year into a Tally suspense
-// account. This can't fully close that gap on the Warehouse/Production
-// side yet (RM/PM consumed in a batch isn't itself broken into used-vs-
-// wasted the way R&D's own ledger already is — Batch only tracks FG-
-// level wastage/rejection, not a per-raw-material figure), so
-// `consumedProduction` is one number, not a further split — but every
-// other leg (on hand at every location, and R&D's own full breakdown,
-// which already has that split) is real, live data, not an estimate.
-// variance is what SHOULD be ~0 for a clean item; a nonzero one is
-// exactly the kind of gap this report exists to surface early, per item,
+// --- Material Reconciliation — "of everything that came in, where did it all
+// actually go?" per item. The client's own example: 100 received, 95 billed to
+// a customer, 3 wastage/rejection, 2 unaccounted for - that 2 usually turns out
+// to be R&D sampling that was never tracked anywhere, and it compounds year over
+// year into a Tally suspense account.
+//
+// What came IN (the "sources"): accepted vendor deliveries, net of QC rejection
+// (a delivery R&D or a Day Store returned to the Warehouse is NOT a new source -
+// it is the same material coming back), material R&D bought directly, and the net
+// of approved stock adjustments.
+// Where it IS or WENT (the "accounted for"): on hand at the Warehouse / Day
+// Stores / Plants / R&D Store, expired and sitting in Quarantine, in transit
+// between two places, consumed in production (used / QC sample / dispensing
+// waste), used up or sent out by R&D, and lost in transit (a receiver counted
+// less than was sent).
+// variance = sources - accounted for. It should be ~0 for a clean item; a nonzero
+// one is exactly the kind of gap this report exists to surface early, per item,
 // instead of a lump sum discovered a year later. ---
 
 inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, next) => {
@@ -689,24 +690,33 @@ inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, ne
     ]);
     const itemIds = items.map((i) => i.id);
 
-    const [receivedTotals, warehouseOnHand, dayStoreBalances, plantBalances, consumedTotals, rndTotals] = await Promise.all([
-      prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null }, _sum: { quantity: true, rejectedQty: true } }),
-      getOnHandByItemId(itemIds),
+    const [vendorReceivedTotals, warehouseLedgers, dayStoreBalances, plantBalances, consumedTotals, rndTotals, rndOnHand, inTransit, adjustments, shortTotals] = await Promise.all([
+      // Vendor deliveries only: stock coming back from R&D / a Day Store is the same material returning, not a new source.
+      prisma.inventoryTransaction.groupBy({
+        by: ["itemId"],
+        where: { itemId: { in: itemIds }, type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null, isRndReturn: false, isStockTransferReceipt: false },
+        _sum: { quantity: true, rejectedQty: true },
+      }),
+      getWarehouseLedger(itemIds),
       Promise.all(dayStores.map((ds) => getOnHandByDayStoreAndItem(ds.id, itemIds))),
       Promise.all(plants.map((p) => getOnHandByPlantAndItem(p.id, itemIds))),
-      // Split by purpose, not just summed — the client asked to see how
-      // much of what left a Plant went into the real batch vs was pulled
-      // aside as a QC sample vs was lost at dispensing (see
-      // BatchConsumptionPurpose in schema.prisma). All three still leave
-      // the Plant's own balance the same way (see stock.ts
-      // getOnHandByPlantAndItem, unfiltered by purpose), so onHandPlants
-      // above already nets all of them out — this split is purely a
-      // reporting breakdown of the same total, not a second deduction.
+      // Split by purpose, not just summed — the client asked to see how much of what left a Plant went into the real batch vs was
+      // pulled aside as a QC sample vs was lost at dispensing (see BatchConsumptionPurpose in schema.prisma). All of them leave
+      // the Plant's own balance the same way, so this split is purely a reporting breakdown, not a second deduction.
       prisma.batchMaterialConsumption.groupBy({ by: ["itemId", "purpose"], where: { itemId: { in: itemIds } }, _sum: { quantity: true } }),
-      prisma.rndStoreTransaction.groupBy({ by: ["itemId", "type", "consumeReason"], where: { itemId: { in: itemIds }, deletedAt: null }, _sum: { quantity: true } }),
+      prisma.rndStoreTransaction.groupBy({ by: ["itemId", "type", "consumeReason", "transferId"], where: { itemId: { in: itemIds }, deletedAt: null }, _sum: { quantity: true } }),
+      getRndStoreOnHand(itemIds),
+      getInTransitByItemId(itemIds),
+      prisma.stockAdjustment.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, status: "APPROVED", deletedAt: null }, _sum: { quantityDelta: true } }),
+      // Quantity a receiver reported missing when it confirmed a transfer (a recorded transit loss).
+      Promise.all([
+        prisma.stockTransfer.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, deletedAt: null, confirmedAt: { not: null } }, _sum: { shortQty: true } }),
+        prisma.rndTransfer.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, deletedAt: null, confirmedAt: { not: null } }, _sum: { shortQty: true } }),
+        prisma.inventoryTransaction.groupBy({ by: ["itemId"], where: { itemId: { in: itemIds }, deletedAt: null, isTransitTracked: true }, _sum: { shortQty: true } }),
+      ]),
     ]);
 
-    const receivedByItem = new Map(receivedTotals.map((r) => [r.itemId, (r._sum.quantity ?? 0) - (r._sum.rejectedQty ?? 0)]));
+    const receivedByItem = new Map(vendorReceivedTotals.map((r) => [r.itemId, (r._sum.quantity ?? 0) - (r._sum.rejectedQty ?? 0)]));
     const consumedProductionByItem = new Map<string, number>();
     const consumedSampleByItem = new Map<string, number>();
     const consumedWasteByItem = new Map<string, number>();
@@ -720,12 +730,14 @@ inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, ne
     for (const balances of dayStoreBalances) for (const [itemId, b] of balances) dayStoreTotalByItem.set(itemId, (dayStoreTotalByItem.get(itemId) ?? 0) + b.onHand);
     const plantTotalByItem = new Map<string, number>();
     for (const balances of plantBalances) for (const [itemId, onHand] of balances) plantTotalByItem.set(itemId, (plantTotalByItem.get(itemId) ?? 0) + onHand);
+    const adjustedByItem = new Map(adjustments.map((a) => [a.itemId, a._sum.quantityDelta ?? 0]));
+    const shortByItem = new Map<string, number>();
+    for (const rows of shortTotals) for (const r of rows) shortByItem.set(r.itemId, (shortByItem.get(r.itemId) ?? 0) + (r._sum.shortQty ?? 0));
 
-    // Mirrors rnd-store.routes.ts GET /report's own aggregation — same
-    // four CONSUMED reasons plus DISPATCHED/RETURNED, just keyed by every
-    // item in this list rather than every item R&D has ever touched.
-    const rndByItem = new Map<string, { testing: number; formulationTrial: number; wastage: number; rejected: number; dispatched: number; returned: number }>();
-    const emptyRnd = () => ({ testing: 0, formulationTrial: 0, wastage: 0, rejected: 0, dispatched: 0, returned: 0 });
+    // Mirrors rnd-store.routes.ts GET /report's own aggregation — same four CONSUMED reasons plus DISPATCHED/RETURNED, just keyed by
+    // every item in this list. Material R&D bought itself (INBOUND with no Warehouse transfer behind it) is a source of its own.
+    const rndByItem = new Map<string, { testing: number; formulationTrial: number; wastage: number; rejected: number; dispatched: number; returned: number; directPurchase: number }>();
+    const emptyRnd = () => ({ testing: 0, formulationTrial: 0, wastage: 0, rejected: 0, dispatched: 0, returned: 0, directPurchase: 0 });
     for (const r of rndTotals) {
       const row = rndByItem.get(r.itemId) ?? emptyRnd();
       const qty = r._sum.quantity ?? 0;
@@ -736,34 +748,46 @@ inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, ne
         else if (r.consumeReason === "REJECTED") row.rejected += qty;
       } else if (r.type === "DISPATCHED") row.dispatched += qty;
       else if (r.type === "RETURNED") row.returned += qty;
+      else if (r.type === "INBOUND" && !r.transferId) row.directPurchase += qty;
       rndByItem.set(r.itemId, row);
     }
 
-    // Summing many float additions/subtractions across several groupBy
-    // calls accumulates binary floating-point noise (e.g. 1e-14) on a
-    // value that's mathematically exactly 0 — round everything to 3dp
-    // (this app's own real precision — see the Kg quantities throughout)
-    // so a clean item reads as a clean 0, not a false alarm.
+    // Summing many float additions/subtractions across several groupBy calls accumulates binary floating-point noise (e.g. 1e-14)
+    // on a value that's mathematically exactly 0 — round everything to 3dp (this app's own real precision) so a clean item reads
+    // as a clean 0, not a false alarm.
     const round = (n: number) => Math.round(n * 1000) / 1000;
 
     const rows = items
       .map((item) => {
+        const ledger = warehouseLedgers.get(item.id) ?? emptyWarehouseLedger();
         const receivedQty = round(receivedByItem.get(item.id) ?? 0);
-        const onHandWarehouse = round(warehouseOnHand.get(item.id) ?? 0);
+        const onHandWarehouse = round(usableOf(ledger));
+        const quarantineExpired = round(expiredRemainingOf(ledger));
         const onHandDayStores = round(dayStoreTotalByItem.get(item.id) ?? 0);
         const onHandPlants = round(plantTotalByItem.get(item.id) ?? 0);
+        const onHandRnd = round(rndOnHand.get(item.id) ?? 0);
+        const inTransitQty = round(inTransit.get(item.id) ?? 0);
+        const transitShort = round(shortByItem.get(item.id) ?? 0);
+        const adjustmentsNet = round(adjustedByItem.get(item.id) ?? 0);
         const consumedProduction = round(consumedProductionByItem.get(item.id) ?? 0);
         const consumedSample = round(consumedSampleByItem.get(item.id) ?? 0);
         const consumedWaste = round(consumedWasteByItem.get(item.id) ?? 0);
         const rnd = rndByItem.get(item.id) ?? emptyRnd();
         const rndOutflow = rnd.testing + rnd.formulationTrial + rnd.wastage + rnd.rejected + rnd.dispatched;
-        const accountedFor = round(onHandWarehouse + onHandDayStores + onHandPlants + consumedProduction + consumedSample + consumedWaste + rndOutflow);
+        const sources = receivedQty + rnd.directPurchase + adjustmentsNet;
+        const accountedFor = round(onHandWarehouse + quarantineExpired + onHandDayStores + onHandPlants + onHandRnd + inTransitQty + transitShort + consumedProduction + consumedSample + consumedWaste + rndOutflow);
         return {
           item: { id: item.id, name: item.name, category: item.category, unit: item.unit },
           receivedQty,
+          rndDirectPurchase: round(rnd.directPurchase),
+          adjustments: adjustmentsNet,
           onHandWarehouse,
+          quarantineExpired,
           onHandDayStores,
           onHandPlants,
+          onHandRnd,
+          inTransit: inTransitQty,
+          transitShort,
           consumedProduction,
           consumedSample,
           consumedWaste,
@@ -772,14 +796,13 @@ inventoryRouter.get("/reconciliation", requireRole("STORE"), async (req, res, ne
           rndWastage: round(rnd.wastage),
           rndRejected: round(rnd.rejected),
           rndDispatchedCustomer: round(rnd.dispatched),
-          rndReturnedToWarehouse: round(rnd.returned), // info only — already folded back into receivedQty, not into accountedFor
+          rndReturnedToWarehouse: round(rnd.returned), // info only — it comes back through the Warehouse's own on-hand, not as a new source
           accountedFor,
-          variance: round(receivedQty - accountedFor),
+          variance: round(sources - accountedFor),
         };
       })
-      // Nothing ever received for this item — not a reconciliation
-      // candidate, just noise (most of the catalog, on any given day).
-      .filter((r) => r.receivedQty !== 0);
+      // Nothing ever came in for this item — not a reconciliation candidate, just noise (most of the catalog, on any given day).
+      .filter((r) => r.receivedQty !== 0 || r.rndDirectPurchase !== 0 || r.adjustments !== 0);
 
     res.json(rows);
   } catch (err) {
@@ -956,16 +979,23 @@ inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(
     for (const row of rows) uniqueItems.set(`${row.category}::${row.itemName}`, { category: row.category, name: row.itemName });
 
     const itemIds = new Map<string, string>();
+    const itemUnits = new Map<string, { name: string; unit: string | null }>();
     let itemsCreated = 0;
     for (const [key, { category, name }] of uniqueItems) {
       const existing = await prisma.inventoryItem.findUnique({ where: { category_name: { category, name } } });
       if (existing) {
         itemIds.set(key, existing.id);
+        itemUnits.set(key, existing);
       } else {
         const created = await prisma.inventoryItem.create({ data: { category, name } });
         itemIds.set(key, created.id);
         itemsCreated += 1;
       }
+    }
+    // A row in another unit than its item is kept in would be summed with the rest as if it were the same unit - refuse the sheet.
+    for (const row of rows) {
+      const known = itemUnits.get(`${row.category}::${row.itemName}`);
+      if (known) assertUnitMatchesItem(known, row.unit);
     }
 
     // Resolve every distinct per-row Day Store name to an id, creating
@@ -1119,6 +1149,8 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
+    // Stock is added up per item as plain numbers, so a movement in another unit (gm against an item kept in Kg) is refused.
+    assertUnitMatchesItem(item, rest.unit);
 
     // A Store user scoped to specific store(s) via DayStoreAssignment
     // can't log an entry tagged to a store they don't manage — same
@@ -1170,9 +1202,15 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
           if (rest.quantity > currentStock) {
             throw new RouteError(409, `Only ${currentStock} ${rest.unit} actually on hand — can't issue more than what's in stock.`);
           }
-          return tx.inventoryTransaction.create({ data: createData, include: txnInclude });
+          const created = await tx.inventoryTransaction.create({ data: createData, include: txnInclude });
+          // Which lots (deliveries) this issue came out of, oldest expiry first - for expiry control and recall.
+          await recordIssueLots(tx, created);
+          return created;
         })
-      : await prisma.inventoryTransaction.create({ data: createData, include: txnInclude });
+      : await prisma.inventoryTransaction.create({ data: createData, include: txnInclude }).then(async (created) => {
+          await recordIssueLots(prisma, created);
+          return created;
+        });
 
     const auditAction =
       rest.type === "RECEIVED"
@@ -1224,12 +1262,16 @@ inventoryRouter.post("/transactions/:id/confirm-delivery", requireRole("STORE", 
     // only confirm arrivals at one they actually manage.
     if (existing.dayStoreId) await assertDayStoreAccess(req.user!.id, req.user!.roles, existing.dayStoreId);
 
-    const { note } = req.body as ConfirmDeliveryInput;
+    const { note, receivedQty } = req.body as ConfirmDeliveryInput;
+    // Less than was sent is allowed, but needs a reason; the difference is kept as a recorded transit loss.
+    const received = resolveShortReceipt(existing.quantity, { note, receivedQty });
     const updated = await prisma.inventoryTransaction.update({
       where: { id: existing.id },
       data: {
         deliveredAt: new Date(),
         deliveredById: req.user!.id,
+        shortQty: received.shortQty,
+        shortNote: received.shortNote,
         remark: note ? [existing.remark, note].filter(Boolean).join(" — ") : existing.remark,
       },
       include: txnInclude,
@@ -1247,11 +1289,40 @@ inventoryRouter.post("/transactions/:id/confirm-delivery", requireRole("STORE", 
     // "it's on its way" notification sent at dispatch time above.
     await notifyUser(existing.createdById, {
       title: `${updated.item.name} confirmed delivered`,
-      body: `${existing.quantity} ${existing.unit} arrived${updated.dayStore ? ` at ${updated.dayStore.name}` : updated.plant ? ` at ${updated.plant.name}` : ""}.`,
+      body: `${received.receivedQty} ${existing.unit} arrived${updated.dayStore ? ` at ${updated.dayStore.name}` : updated.plant ? ` at ${updated.plant.name}` : ""}${received.shortQty ? ` (${received.shortQty} ${existing.unit} short: ${received.shortNote})` : ""}.`,
       link: "/inventory",
     }).catch(notifyFailed(req, "inventory.transit_delivered"));
 
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The receiver refuses a transit-tracked issue (wrong item, damaged, not what was sent): the entry is cancelled, which gives the
+// material back to the sender's stock, and the sender is told why. Same people who may confirm it may refuse it.
+inventoryRouter.post("/transactions/:id/reject-delivery", requireRole("STORE", "PRODUCTION"), validateBody(rejectTransferSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const existing = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id }, include: { item: true } });
+    if (!existing || existing.deletedAt) return res.status(404).json({ error: "Transaction not found" });
+    if (!existing.isTransitTracked) return res.status(400).json({ error: "This entry isn't transit-tracked." });
+    if (existing.deliveredAt) return res.status(409).json({ error: "Already confirmed as delivered - it can't be refused any more." });
+    if (existing.dayStoreId) await assertDayStoreAccess(req.user!.id, req.user!.roles, existing.dayStoreId);
+
+    const { reason } = req.body as RejectTransferInput;
+    await prisma.inventoryTransaction.update({
+      where: { id: existing.id },
+      data: { deletedAt: new Date(), deletedById: req.user!.id, shortNote: `Refused by the receiver: ${reason}` },
+    });
+    if (existing.fulfillsRequestId) await resyncRequestStatus(existing.fulfillsRequestId);
+
+    await recordAudit({ actorId: req.user!.id, action: "inventory.transit_refused", entityType: "InventoryTransaction", entityId: existing.id, metadata: { itemId: existing.itemId, quantity: existing.quantity, reason } });
+    await notifyUser(existing.createdById, {
+      title: `${existing.item.name} refused`,
+      body: `${existing.quantity} ${existing.unit} was refused by the receiver: ${reason}. It is back in your stock.`,
+      link: "/inventory",
+    }).catch(notifyFailed(req, "inventory.transit_refused"));
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
@@ -1389,10 +1460,28 @@ inventoryRouter.patch("/transactions/:id", requireRole("STORE"), validateBody(up
   }
 });
 
+/** Puts a Material Request's status back in line with the issues that still count toward it (after one was deleted). */
+async function resyncRequestStatus(requestId: string): Promise<void> {
+  const request = await prisma.inventoryRequest.findUnique({ where: { id: requestId }, include: { fulfillments: { where: { deletedAt: null }, select: { quantity: true } } } });
+  if (!request || !["ISSUED", "PARTIALLY_ISSUED"].includes(request.status)) return;
+  const issued = request.fulfillments.reduce((sum, f) => sum + f.quantity, 0);
+  const status = issued >= request.requestedQty - 1e-9 ? "ISSUED" : issued > 1e-9 ? "PARTIALLY_ISSUED" : "APPROVED";
+  if (status !== request.status) await prisma.inventoryRequest.update({ where: { id: requestId }, data: { status } });
+}
+
 inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const txn = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
     if (!txn || txn.deletedAt) return res.status(404).json({ error: "Transaction not found" });
+
+    // Some rows are one half of a movement between two places. Deleting just this half would make material vanish from (or appear
+    // in) the other place, so the movement itself has to be reversed instead.
+    if (txn.type === "RECEIVED" && (txn.isRndReturn || txn.isStockTransferReceipt)) {
+      return res.status(409).json({ error: "This entry is the Warehouse's side of a confirmed return. It can't be deleted on its own - record a stock adjustment if the quantity is wrong." });
+    }
+    if (txn.type === "ISSUED_RND") {
+      return res.status(409).json({ error: "This entry belongs to a transfer to the R&D Store. Cancel that transfer (while R&D has not confirmed it) instead of deleting this entry." });
+    }
 
     // Deleting a row can send stock negative from either direction:
     // - An ACCEPTED RECEIVED row is an inflow to the Warehouse-wide
@@ -1448,6 +1537,9 @@ inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: Au
           await tx.inventoryTransaction.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } });
         })
       : prisma.inventoryTransaction.update({ where: { id: req.params.id }, data: { deletedAt: new Date(), deletedById: req.user!.id } }));
+
+    // An issue that filled a Material Request no longer counts toward it: the request goes back to what is really issued.
+    if (txn.fulfillsRequestId) await resyncRequestStatus(txn.fulfillsRequestId);
 
     await recordAudit({ actorId: req.user!.id, action: "inventory.transaction_removed", entityType: "InventoryTransaction", entityId: req.params.id, metadata: { itemId: txn.itemId, type: txn.type } });
 
@@ -1528,6 +1620,7 @@ inventoryRouter.patch("/transactions/:id/qc", requireRole("RND"), validateBody(i
         itemId: updated.itemId,
         addedQty: updated.quantity - (updated.rejectedQty ?? 0),
         actorId: req.user!.id,
+        vendorName: updated.vendorName,
         onFail: (label) => notifyFailed(req, label),
       });
       await notifyIfPoNewlyReady({
@@ -1632,6 +1725,7 @@ inventoryRouter.post("/transactions/:id/accept", requireRole("STORE"), async (re
       itemId: updated.itemId,
       addedQty: updated.quantity - (updated.rejectedQty ?? 0),
       actorId: req.user!.id,
+      vendorName: updated.vendorName,
       onFail: (label) => notifyFailed(req, label),
     });
     await notifyIfPoNewlyReady({
@@ -1901,6 +1995,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
       // rest. Each issue is its own transaction (see fulfillments).
       const alreadyIssued = existing.fulfillments.reduce((sum, f) => sum + f.quantity, 0);
       const remaining = existing.requestedQty - alreadyIssued;
+      assertUnitMatchesItem((await tx.inventoryItem.findUniqueOrThrow({ where: { id: existing.itemId }, select: { name: true, unit: true } })), data.unit);
       if (data.quantity > remaining) {
         throw new RouteError(400, `That's more than what's left on this request — ${remaining} remaining.`);
       }
@@ -1961,6 +2056,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         },
         include: txnInclude,
       });
+      await recordIssueLots(tx, txn);
       await tx.inventoryRequest.update({ where: { id: existing.id }, data: { status: newStatus } });
 
       return { existing, txn, newStatus, newTotal };

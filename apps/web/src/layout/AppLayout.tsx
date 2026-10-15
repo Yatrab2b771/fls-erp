@@ -24,6 +24,9 @@ import {
   Microscope,
   Package,
   PackageMinus,
+  PackageX,
+  Boxes,
+  Scale,
   PauseCircle,
   Recycle,
   RotateCcw,
@@ -132,6 +135,10 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE"] },
       { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["PRODUCTION", "STORE", "QA_QC"] },
       { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC"] },
+      // Fix a balance that does not match the shelf (a second person approves it), deal with what QC rejected, and trace a delivery.
+      { to: "/stock-adjustments", label: "Stock Corrections", icon: Scale, roles: ["STORE", "PRODUCTION", "RND", "ACCOUNTS"] },
+      { to: "/rejected-stock", label: "Rejected Stock", icon: PackageX, roles: ["STORE", "QA_QC", "ACCOUNTS"] },
+      { to: "/lots", label: "Lots & Recall", icon: Boxes, roles: ["STORE", "QA_QC", "RND", "PPIC", "ACCOUNTS", "PRODUCTION"] },
     ],
   },
   {
