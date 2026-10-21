@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Beaker, Factory, Lock, Package, Recycle } from "lucide-react";
+import { Beaker, Factory, Lock, Package, Recycle, RotateCcw, Trash2 } from "lucide-react";
 import { useAuth } from "../lib/auth";
+import { ApiError } from "../lib/api";
+import { useToast } from "../components/Toast";
 import { EmptyState } from "../components/EmptyState";
 import { StatTile } from "../components/StatTile";
-import { useRecycleStoreByBatch, useRecycleStoreByItem, useRecycleStoreTransactions } from "../lib/hooks";
+import { useRecycleDecision, useRecycleStoreByBatch, useRecycleStoreByItem, useRecycleStoreTransactions } from "../lib/hooks";
 import type { RecycleStoreByBatchRow, RecycleStoreByItemRow, RecycleStoreTransaction } from "../lib/types";
 
 // Items/batches here can be in Kg, Ltr, Count, SKU — summing raw
@@ -52,7 +55,7 @@ export function RecycleStorePage() {
           <Recycle className="h-5 w-5 text-brand-600" strokeWidth={2.25} /> Recycle Store
         </h1>
         <p className="mt-1 text-xs text-slate-500">
-          Everything wasted, in one place — real RM/PM lost at Dispensing, and each QA gate's own Wastage bucket. A one-way sink: nothing here is ever sent back out, so there's nothing to act on, only to see.
+          Everything wasted or rejected, in one place. Wastage is gone for good. Raw / packaging material rejected at the Plant waits here for QA: put it back into the Plant's stock (Reuse) or destroy it.
         </p>
       </div>
 
@@ -71,9 +74,105 @@ export function RecycleStorePage() {
         </div>
       )}
 
+      <ToDecidePanel rows={transactions} canDecide={hasRole("QA_QC", "ADMIN")} />
       <ByItemPanel loading={loadingByItem} rows={byItem} />
       <ByBatchPanel loading={loadingByBatch} rows={byBatch} />
       <ActivityFeedPanel loading={loadingTxns} rows={transactions} />
+    </div>
+  );
+}
+
+/** Rejected raw / packaging material that QA has not decided about yet: Reuse (back into the Plant's stock) or Destroy. */
+function ToDecidePanel({ rows, canDecide }: { rows: RecycleStoreTransaction[] | undefined; canDecide: boolean }) {
+  const waiting = (rows ?? []).filter((r) => r.kind === "material" && r.recycleKind === "REJECTED" && (r.toDecide ?? 0) > 1e-6);
+  const [open, setOpen] = useState<{ id: string; decision: "REUSE" | "DESTROY" } | null>(null);
+  if (waiting.length === 0) return null;
+  return (
+    <div className="card overflow-hidden">
+      <div className="border-b border-slate-100 bg-amber-50/70 px-4 py-3">
+        <h3 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-amber-800">
+          <Recycle className="h-3.5 w-3.5" /> Waiting for QA's decision ({waiting.length})
+        </h3>
+        <p className="mt-0.5 text-micro text-amber-700">Rejected at the Plant. Reuse puts it back into the Plant's stock; Destroy writes it off with a certificate.</p>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {waiting.map((r) => (
+          <div key={r.id} className="px-4 py-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate font-bold text-slate-700">
+                  {r.itemName}
+                  {r.productName && <span className="font-normal text-slate-400"> · {r.productName} {r.poNumber ? `(${r.poNumber})` : ""}</span>}
+                </p>
+                <p className="text-slate-400">
+                  {r.plantName && `${r.plantName} · `}
+                  {new Date(r.date).toLocaleDateString()}
+                  {r.note ? ` · ${r.note}` : ""}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-mono font-bold text-slate-800">
+                  {r.toDecide} of {r.quantity} {r.unit} waiting
+                </span>
+                {canDecide && (
+                  <>
+                    <button type="button" className="btn-primary btn-sm" onClick={() => setOpen(open?.id === r.id && open.decision === "REUSE" ? null : { id: r.id, decision: "REUSE" })}>
+                      <RotateCcw className="h-3.5 w-3.5" strokeWidth={2.25} /> Reuse
+                    </button>
+                    <button type="button" className="btn-ghost btn-sm text-rose-700" onClick={() => setOpen(open?.id === r.id && open.decision === "DESTROY" ? null : { id: r.id, decision: "DESTROY" })}>
+                      <Trash2 className="h-3.5 w-3.5" strokeWidth={2.25} /> Destroy
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+            {open?.id === r.id && <DecisionForm row={r} decision={open.decision} onDone={() => setOpen(null)} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DecisionForm({ row, decision, onDone }: { row: RecycleStoreTransaction; decision: "REUSE" | "DESTROY"; onDone: () => void }) {
+  const toast = useToast();
+  const decide = useRecycleDecision();
+  const left = row.toDecide ?? 0;
+  const [qty, setQty] = useState(String(left));
+  const [note, setNote] = useState("");
+  const [cert, setCert] = useState("");
+  const n = Number(qty);
+  const ok = n > 0 && n <= left + 1e-9;
+
+  async function save() {
+    try {
+      await decide.mutateAsync({ id: row.id, decision, quantity: n, note: note.trim() || undefined, certificateNo: decision === "DESTROY" ? cert.trim() || undefined : undefined });
+      toast.success(decision === "REUSE" ? `${n} ${row.unit} is back in the Plant's stock.` : `${n} ${row.unit} destroyed.`);
+      onDone();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save");
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-end gap-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+      <div className="w-40">
+        <label className="label">{decision === "REUSE" ? "How much to reuse" : "How much to destroy"} (max {left})</label>
+        <input className="field font-mono" type="number" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} />
+      </div>
+      {decision === "DESTROY" && (
+        <div className="w-48">
+          <label className="label">Certificate no. (optional)</label>
+          <input className="field" value={cert} onChange={(e) => setCert(e.target.value)} />
+        </div>
+      )}
+      <div className="min-w-[14rem] flex-1">
+        <label className="label">{decision === "REUSE" ? "Why is it fine to reuse? (optional)" : "Note (optional)"}</label>
+        <input className="field" value={note} onChange={(e) => setNote(e.target.value)} placeholder={decision === "REUSE" ? "e.g. re-sieved, checked, within spec" : ""} />
+      </div>
+      <button type="button" className={decision === "REUSE" ? "btn-primary btn-sm" : "btn-danger btn-sm"} disabled={!ok || decide.isPending} onClick={() => void save()}>
+        {decide.isPending ? "Saving…" : decision === "REUSE" ? "Put back into the Plant's stock" : "Destroy"}
+      </button>
     </div>
   );
 }
@@ -193,6 +292,11 @@ function ActivityFeedPanel({ loading, rows }: { loading: boolean; rows: RecycleS
               <span className={`pill ${r.kind === "material" ? "border-amber-200 bg-amber-50 text-amber-700" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
                 {r.kind === "material" ? "RM/PM" : "Batch Output"}
               </span>
+              {r.kind === "material" && (
+                <span className={`pill ${r.recycleKind === "REJECTED" ? ((r.toDecide ?? 0) > 1e-6 ? "border-violet-200 bg-violet-50 text-violet-700" : "border-emerald-200 bg-emerald-50 text-emerald-700") : "border-slate-200 bg-slate-50 text-slate-500"}`} title={(r.decisions ?? []).map((d) => `${d.decision === "REUSE" ? "Reused" : "Destroyed"} ${d.quantity}${d.certificateNo ? ` (cert ${d.certificateNo})` : ""}`).join(" · ")}>
+                  {r.recycleKind === "REJECTED" ? ((r.toDecide ?? 0) > 1e-6 ? `Waiting for QA${(r.decisions ?? []).length ? ` (${r.toDecide} left)` : ""}` : "Decided") : "Wastage - closed"}
+                </span>
+              )}
               <span className="font-mono font-bold text-slate-700">
                 {r.quantity} {r.unit}
               </span>

@@ -62,8 +62,8 @@ export function PlantStockPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-teal-500/10 text-teal-600">
             <Factory className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -75,9 +75,28 @@ export function PlantStockPage() {
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
+      </div>
+
+      <div className="grid gap-3 rounded-xl border border-slate-200 bg-white p-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <p className="font-bold text-slate-800">On hand</p>
+          <p className="text-slate-500">What the Plant physically holds now.</p>
+        </div>
+        <div>
+          <p className="font-bold text-violet-700">Reserved for batches</p>
+          <p className="text-slate-500">Given to a batch that has not yet written its Utilization (used A–D, or left over E). It belongs to that batch.</p>
+        </div>
+        <div>
+          <p className="font-bold text-emerald-700">Free = On hand − Reserved</p>
+          <p className="text-slate-500">Not any batch's. It can go to a new batch, or you can send it back to the Day Store with "Send back".</p>
+        </div>
+        <div>
+          <p className="font-bold text-amber-700">Leftover to send back</p>
+          <p className="text-slate-500">What batches marked as E (Return to Store) and is still at the Plant. It goes back first.</p>
+        </div>
       </div>
 
       <TileFilterBar filters={filters} tileKey="plant-stock" fields={fields} dateLabel="Date" hideDates />

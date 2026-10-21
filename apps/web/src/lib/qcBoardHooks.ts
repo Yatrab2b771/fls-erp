@@ -1,14 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 
-// QA/QC's own stages, one list each (see apps/api/src/modules/qc/qc-board.ts): Line Clearance is a run; IPQC, the two QA gates and
+// QA/QC's own stages, one list each (see apps/api/src/modules/qc/qc-board.ts): IPQC, the two QA gates and
 // the finished-goods release are batches.
 
-export type QcBoardStage = "LINE_CLEARANCE" | "IPQC" | "QA_GATE_MFG" | "QA_GATE_PACKAGING" | "FG_QC_RELEASE";
+export type QcBoardStage = "IPQC" | "QA_GATE_MFG" | "QA_GATE_PACKAGING" | "FG_QC_RELEASE";
 export type QcBoardView = QcBoardStage | "ON_HOLD";
 
 export interface QcBoardRow {
-  kind: "RUN" | "BATCH";
+  kind: "BATCH";
   id: string;
   stage: QcBoardStage;
   stageLabel: string;
@@ -69,8 +69,6 @@ export function buildQcStageBody(i: QcActInput): Record<string, unknown> {
   const status = decision === "APPROVE" ? "Approved" : "Hold";
   const note = remarks.trim() || undefined;
   switch (row.stage) {
-    case "LINE_CLEARANCE":
-      return { action: "FORWARD", sampleQcStatus: status, sampleQcRemarks: note };
     case "IPQC":
       return { action: "FORWARD", ipqcStatus: status, ipqcRemarks: note };
     case "QA_GATE_MFG":
@@ -85,7 +83,7 @@ export function buildQcStageBody(i: QcActInput): Record<string, unknown> {
 export function useQcAct() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (i: QcActInput) => api(`/api/${i.row.kind === "RUN" ? "pre-productions" : "production-batches"}/${i.row.id}/stage`, { method: "PATCH", body: buildQcStageBody(i) }),
+    mutationFn: (i: QcActInput) => api(`/api/production-batches/${i.row.id}/stage`, { method: "PATCH", body: buildQcStageBody(i) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["qc-board"] });
       qc.invalidateQueries({ queryKey: ["qc"] });

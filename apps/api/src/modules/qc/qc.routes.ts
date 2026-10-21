@@ -24,7 +24,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
       heldDispatches,
       heldMfgLotsRaw,
       heldPackLotsRaw,
-      pendingSampleQcRunsRaw,
       pendingIpqcLotsRaw,
       pendingBulkQcLotsRaw,
     ] = await Promise.all([
@@ -39,22 +38,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
       // stale history from being miscounted as a live hold.
       prisma.combinedLot.findMany({ where: { currentStageId: "QA_GATE_MFG", OR: [{ mfgQaStatus: "Hold" }, { mfgQcStatus: "Hold" }] }, include: combinedLotInclude }),
       prisma.combinedLot.findMany({ where: { currentStageId: "QA_GATE_PACKAGING", OR: [{ packQaStatus: "Hold" }, { packQcStatus: "Hold" }] }, include: combinedLotInclude }),
-      // Every run sitting at the pre-production gate needs QC's
-      // attention, not just the ones explicitly marked Hold — unlike the
-      // two QA gates above (which only block on a literal "Hold", so
-      // "not yet reviewed" already passes through), this stage blocks on
-      // anything other than a literal "Approved" (see
-      // pre-production-transition.ts's isSampleQcBlocked), so a run
-      // freshly arrived with no status set yet is just as much "waiting
-      // on QC" as one already marked Hold. SAMPLE_QC_APPROVAL is this
-      // tier's own terminal stage — it completes in place, so
-      // currentStageId alone can't tell "still pending" from "already
-      // Approved and done" the way every other stage here can; the
-      // sampleQcStatus filter is what actually excludes the resolved ones.
-      prisma.preProduction.findMany({
-        where: { currentStageId: "SAMPLE_QC_APPROVAL", OR: [{ sampleQcStatus: null }, { sampleQcStatus: { not: "Approved" } }] },
-        include: preProductionInclude,
-      }),
       // Same rule again, for the CombinedLot side's own hard gates.
       prisma.combinedLot.findMany({ where: { currentStageId: "IPQC" }, include: combinedLotInclude }),
       prisma.combinedLot.findMany({ where: { currentStageId: "BULK_QC" }, include: combinedLotInclude }),
@@ -62,7 +45,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
 
     const heldMfgLots = heldMfgLotsRaw.map(serializeCombinedLot);
     const heldPackLots = heldPackLotsRaw.map(serializeCombinedLot);
-    const pendingSampleQcRuns = pendingSampleQcRunsRaw.map(serializePreProduction);
     const pendingIpqcLots = pendingIpqcLotsRaw.map(serializeCombinedLot);
     const pendingBulkQcLots = pendingBulkQcLotsRaw.map(serializeCombinedLot);
 
@@ -75,7 +57,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
         onHoldDispatchQc: heldDispatches.length,
         onHoldMfgBatches: heldMfgLots.length,
         onHoldPackBatches: heldPackLots.length,
-        pendingSampleQcBatches: pendingSampleQcRuns.length,
         pendingIpqcBatches: pendingIpqcLots.length,
         pendingBulkQcBatches: pendingBulkQcLots.length,
       },
@@ -84,7 +65,6 @@ qcRouter.get("/dashboard", requireRole("QA_QC"), async (_req, res, next) => {
       batches: {
         onHoldMfg: heldMfgLots,
         onHoldPack: heldPackLots,
-        pendingSampleQc: pendingSampleQcRuns,
         pendingIpqc: pendingIpqcLots,
         pendingBulkQc: pendingBulkQcLots,
       },

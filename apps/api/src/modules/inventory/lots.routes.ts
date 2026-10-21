@@ -175,7 +175,7 @@ lotsRouter.get("/trace/batch/:batchId", async (req: AuthedRequest<{ batchId: str
         id: true,
         batchNo: true,
         preProduction: { select: { purchaseOrderItem: { select: { productName: true, purchaseOrder: { select: { poNumber: true, customer: { select: { companyName: true } } } } } } } },
-        dispensingLines: { select: { id: true, itemId: true, quantity: true, plannedQty: true, unit: true, lotsDrawn: { select: { receiptId: true, quantity: true } } } },
+        dispensingLines: { where: { deliveryStatus: { not: "REFUSED" } }, select: { id: true, itemId: true, quantity: true, plannedQty: true, unit: true, lotsDrawn: { select: { receiptId: true, quantity: true } } } },
       },
     });
     if (!batch) return res.status(404).json({ error: "Batch not found" });

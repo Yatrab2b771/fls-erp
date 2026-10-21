@@ -1,5 +1,4 @@
 import bcrypt from "bcryptjs";
-import { BATCH_LINE_CLEARANCE_ITEMS } from "../src/modules/batches/batch-checklists";
 import request from "supertest";
 import type { RoleName } from "@prisma/client";
 import { createApp } from "../src/app";
@@ -447,7 +446,7 @@ const PO_B_GOALS: Goal[] = [
   { run: 0, batch: false, batchSteps: 0, handover: false, ship: 0 }, // run opened, waiting at Material Received
   { run: 1, batch: false, batchSteps: 0, handover: false, ship: 0 }, // run at Indent Issue
   { run: 2, batch: false, batchSteps: 0, handover: false, ship: 0 }, // run at Dispensing
-  { run: 3, batch: false, batchSteps: 0, handover: false, ship: 0 }, // dispensing done: waiting for QA's Line Clearance
+  { run: 3, batch: false, batchSteps: 0, handover: false, ship: 0 }, // dispensing done: READY, production not started
   { run: 4, batch: false, batchSteps: 0, handover: false, ship: 0 }, // Line Clearance approved, no batch
   ...BATCH_STEPS.map((_s, i) => ({ run: 4 as const, batch: true, batchSteps: i, handover: false, ship: 0 })), // batch waiting at each of the 8 steps
   { run: 4, batch: true, batchSteps: 8, handover: true, ship: 0 }, // with Dispatch, nothing shipped
@@ -494,23 +493,18 @@ async function runProduction(po: PoRef, products: Product[], goals: Goal[], tag 
     await call("RND", "post", `/api/production-batches/${batch.id}/batch-no/allocate`, { batchNo: `DEMO-${tag}${String(i + 1).padStart(2, "0")}` });
     if (goal.run === 2) continue; // waits at Dispensing
     await call("ADMIN", "post", `/api/production-batches/${batch.id}/dispense`, { rmDispensingDate: day(-4), pmIssuedDate: day(-4), grnNo: `DEMO-GRN-${tag}${i + 1}`, dispensingRemarks: "DEMO: batch material dispensed" });
-    if (goal.run === 3) continue; // waits at Line Clearance (QA)
-    await call("QA_QC", "post", `/api/production-batches/${batch.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceRemarks: "DEMO: line clear", lineClearanceChecks: Object.fromEntries(BATCH_LINE_CLEARANCE_ITEMS.map((i) => [i.key, true])) });
-    if (!goal.batch) continue; // cleared, production not started
+    await receiveAll(batch.id); // Production confirms what the Day Store sent
+    if (!goal.batch) continue; // ready, production not started
 
-    // Production runs the batch: the start fields, then the RM Utilization (everything the Day Store gave it), then the end and completion.
-    // Input and output come from that Utilization.
+    // Production runs the batch: the start fields, then the end and the bulk made. The Utilization comes later, at Packaging.
     const start = new Date(Date.now() - 4 * 86_400_000);
     await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shift: "Day", manpowerCount: 8, shiftStartAt: start.toISOString() });
-    const util = (await call<{ utilization: { items: { itemId: string; category: string; unit: string; givenQty: number }[] } }[]>("PRODUCTION", "get", `/api/pre-productions/${run.id}/production-batches`)).find((b: any) => b.id === batch.id)!.utilization.items;
-    const logUsage = async (category: string) => {
-      for (const n of util.filter((x) => x.category === category)) {
-        await call("PRODUCTION", "post", `/api/plant-consumption/${run.id}/entries`, { itemId: n.itemId, unit: n.unit, productionBatchId: batch.id, consumedQty: n.givenQty, note: "DEMO: batch usage" });
-      }
-    };
-    await logUsage("RM");
-    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed" });
+    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed", outputQty: 100 });
     await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/complete`, {});
+    const util = (await call<{ utilization: { items: { itemId: string; category: string; unit: string; givenQty: number }[] } }[]>("PRODUCTION", "get", `/api/pre-productions/${run.id}/production-batches`)).find((b: any) => b.id === batch.id)!.utilization.items;
+    // The Utilization of the whole batch: what was produced, and each material of the plan used as it was given.
+    const saveUtilization = async (category: "RM" | "PM") =>
+      call("PRODUCTION", "put", `/api/production-batches/${batch.id}/utilization/${category}`, { producedQty: 100, wasteQty: 0, rejectQty: 0, sampleQty: 0, lines: util.filter((x) => x.category === category).map((n) => ({ itemId: n.itemId, consumedQty: n.givenQty })) });
 
     const step = (role: RoleName, body: Record<string, unknown>) => call(role, "patch", `/api/production-batches/${batch.id}/stage`, { action: "FORWARD", ...body });
     const bodies: [RoleName, Record<string, unknown>][] = [
@@ -527,7 +521,8 @@ async function runProduction(po: PoRef, products: Product[], goals: Goal[], tag 
     for (let s = 0; s < Math.min(goal.batchSteps, bodies.length); s++) {
       if (s === 3) {
         // Packaging: the PM Utilization, the packaging sheet (shift, manpower, start and end), then hand over to QA
-        await logUsage("PM");
+        await saveUtilization("RM");
+        await saveUtilization("PM");
         await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}/packaging`, { packagingShift: "Day", packagingManpowerCount: 6, packagingStartAt: new Date(Date.now() - 3 * 86_400_000).toISOString(), packagingEndAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), packagingStatus: "Completed", packagingRemarks: "DEMO: packed" });
         await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/handover`, {});
       } else {
@@ -552,3 +547,11 @@ main()
     process.exitCode = 1;
   })
   .finally(() => prisma.$disconnect());
+
+
+/** Production's Receive step: confirms everything the Day Store sent for the batch (Admin acts as Production). */
+async function receiveAll(batchId: string) {
+  const board = await call<{ id: string; receiveLines?: { lineId: string }[] }[]>("ADMIN", "get", "/api/production-batches/prep-board?stage=RECEIVE");
+  const row = board.find((r) => r.id === batchId);
+  if (row?.receiveLines?.length) await call("ADMIN", "post", `/api/production-batches/${batchId}/receive`, { lines: row.receiveLines.map((l) => ({ lineId: l.lineId, action: "RECEIVE" })) });
+}

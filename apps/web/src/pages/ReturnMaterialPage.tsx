@@ -179,8 +179,8 @@ export function ReturnMaterialPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-amber-500/10 text-amber-600">
             <ArrowLeftRight className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -196,7 +196,7 @@ export function ReturnMaterialPage() {
           <button type="button" className="btn-primary btn-sm" onClick={() => setShowForm((v) => !v)}>
             <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> New return
           </button>
-          <button type="button" className="btn-ghost btn-sm" disabled={rows.length === 0} onClick={download}>
+          <button type="button" className="btn-ghost btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
             <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
           </button>
         </div>

@@ -71,8 +71,8 @@ export function StockReceivedPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-sky-500/10 text-sky-600">
             <ArrowDownToLine className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -85,7 +85,7 @@ export function StockReceivedPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button className="btn-ghost btn-sm" disabled={paged.total === 0 || exporting} onClick={exportAll}>
+          <button className="btn-ghost btn-sm shrink-0" disabled={paged.total === 0 || exporting} onClick={exportAll}>
             <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> {exporting ? "Preparing…" : `Download Report${isFiltered ? " (Filtered)" : ""}`}
           </button>
           {canLog && (

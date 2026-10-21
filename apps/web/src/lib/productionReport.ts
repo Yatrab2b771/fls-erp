@@ -74,7 +74,7 @@ export interface ProductReport {
 const pct = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 1000) / 10 : null);
 const hoursBetween = (a: string | null, b: string | null) => (a && b ? Math.round(((new Date(b).getTime() - new Date(a).getTime()) / 3_600_000) * 10) / 10 : null);
 
-const PREP_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", LINE_CLEARANCE: "Line Clearance" };
+const PREP_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", LINE_CLEARANCE: "Line Clearance" };
 // Stages a batch passes before Packaging is finished: after these it has been handed over to QA.
 const BEFORE_HANDOVER = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING"];
 

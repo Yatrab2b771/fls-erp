@@ -2,6 +2,7 @@ import { prisma } from "../../common/lib/prisma";
 import { getTotalAvailableByItemId } from "../inventory/stock";
 import type { RmMasterResult } from "../rm-costing/rm-costing-engine";
 import { pmLineName, type BomResult } from "../packaging-bom/bom-engine";
+import { allowedKeysOf, rulesForPoItems, vendorStockByItem } from "../product-vendors/vendor-rules";
 
 /**
  * Material Planning — for every PO product whose plans have been generated
@@ -50,6 +51,10 @@ export interface MaterialPlanningRow {
   // Live company-wide stock of this material; null when the plan's name
   // doesn't match any catalog item (nothing to compare against).
   onHand: number | null;
+  // Approved vendors: when the product may take this material only from certain vendors, their names and how much of the stock is
+  // theirs (the rest is not counted for this product). null/[] when the material is unrestricted.
+  approvedVendors: string[];
+  approvedOnHand: number | null;
   coveredQty: number | null;
   shortQty: number | null;
   status: MaterialStatus;
@@ -82,6 +87,8 @@ export interface MaterialPlanningProduct {
   bomPlanned: boolean;
   // When both plans were calculated - the product has been in Material Planning since then (its Aging).
   plannedAt: string | null;
+  // The BOM version its plan is made from: DISPLAY (the catalog's own) or one of R&D's V1 / V2.
+  activeBomSlot: string;
 }
 
 export interface MaterialPlanningResult {
@@ -123,6 +130,7 @@ export async function getMaterialPlanning(): Promise<MaterialPlanningResult> {
       regulatoryStatus: true,
       plannedPlantId: true,
       sentToRegulatoryAt: true,
+      activeBomSlot: true,
       planSentToProductionAt: true,
       materialHeldAt: true,
       purchaseOrder: { select: { id: true, poNumber: true, orderDate: true, createdAt: true, customer: { select: { companyName: true } } } },
@@ -157,6 +165,15 @@ export async function getMaterialPlanning(): Promise<MaterialPlanningResult> {
   const catalogByKey = new Map(catalogItems.map((c) => [`${c.category}::${c.name}`, c]));
   const stock = await getTotalAvailableByItemId(catalogItems.map((c) => c.id));
 
+  // --- Approved vendors. A product that may take a material only from certain vendors counts only THEIR stock as available for it.
+  // The stock of each such material is split by vendor (from the lots); a restricted claim draws only from its approved vendors, and an
+  // unrestricted claim draws from stock no restricted product is waiting on first, so it cannot eat a restricted product's share.
+  const rules = await rulesForPoItems(items.map((i) => i.id));
+  const restrictedItemIds = [...new Set([...rules.values()].flatMap((m) => [...m.entries()].filter(([, r]) => allowedKeysOf(r)).map(([itemId]) => itemId)))];
+  const vendorStock = await vendorStockByItem(restrictedItemIds);
+  const reservedKeys = new Map<string, Set<string>>();
+  for (const m of rules.values()) for (const [itemId, r] of m) for (const k of allowedKeysOf(r) ?? []) reservedKeys.set(itemId, (reservedKeys.get(itemId) ?? new Set()).add(k));
+
   // --- Queue.
   const stateOf = (i: (typeof items)[number]): MaterialProductState =>
     i.planSentToProductionAt && i.releasedQty == null ? "SENT" : i.materialHeldAt ? "HELD" : i.regulatoryStatus === "Not Approved" ? "NOT_APPROVED" : "ACTIVE";
@@ -187,20 +204,53 @@ export async function getMaterialPlanning(): Promise<MaterialPlanningResult> {
         isPreview: preview,
       };
       if (!catalogItem) {
-        rows.push({ ...base, unit: need.type === "RM" ? "Kg" : "Nos", onHand: null, coveredQty: null, shortQty: null, status: "NOT_IN_CATALOG" });
+        rows.push({ ...base, unit: need.type === "RM" ? "Kg" : "Nos", approvedVendors: [], approvedOnHand: null, onHand: null, coveredQty: null, shortQty: null, status: "NOT_IN_CATALOG" });
         continue;
       }
-      const available = Math.max(0, balance.get(catalogItem.id) ?? 0);
+      const total = Math.max(0, balance.get(catalogItem.id) ?? 0);
+      const rule = rules.get(item.id)?.get(catalogItem.id);
+      const keys = allowedKeysOf(rule);
+      const vendors = vendorStock.get(catalogItem.id);
+      // Restricted: only the approved vendors' remaining stock is available to this product.
+      const approvedLeft = keys && vendors ? [...keys].reduce((s, k) => s + (vendors.get(k)?.qty ?? 0), 0) : keys ? 0 : null;
+      const available = approvedLeft === null ? total : Math.min(total, approvedLeft);
       const covered = Math.min(need.qty, available);
       // Claimers take their share out of the balance; a non-claimer's preview
       // also draws it down (against the other previews only — every claimer
       // has already been through by then) so two held products competing for
       // the same material don't both preview as fully covered.
-      balance.set(catalogItem.id, available - covered);
+      balance.set(catalogItem.id, total - covered);
+      if (vendors) {
+        // Take it out of the vendors' balances too: a restricted claim from its approved vendors; an unrestricted one first from stock
+        // that is not attributed to a vendor, then from vendors no restricted product waits on, and only then from the reserved ones.
+        const drawFrom = (order: string[], qty: number) => {
+          let left = qty;
+          for (const k of order) {
+            const v = vendors.get(k);
+            if (!v || left <= 1e-9) continue;
+            const take = Math.min(v.qty, left);
+            v.qty -= take;
+            left -= take;
+          }
+          return left;
+        };
+        if (keys) drawFrom([...keys], covered);
+        else {
+          const attributed = [...vendors.values()].reduce((s, v) => s + v.qty, 0);
+          const unattributed = Math.max(0, total - attributed);
+          const rest = Math.max(0, covered - unattributed);
+          const reserved = reservedKeys.get(catalogItem.id) ?? new Set<string>();
+          const open = [...vendors.keys()].filter((k) => !reserved.has(k));
+          const left = drawFrom(open, rest);
+          drawFrom([...reserved], left);
+        }
+      }
       const short = need.qty - covered;
       rows.push({
         ...base,
         unit: catalogItem.unit ?? (need.type === "RM" ? "Kg" : "Nos"),
+        approvedVendors: keys && rule ? rule.vendorNames : [],
+        approvedOnHand: keys && vendors ? round2([...keys].reduce((s, k) => s + (vendors.get(k)?.qty ?? 0), 0) + covered) : null,
         onHand: round2(stock.get(catalogItem.id) ?? 0),
         coveredQty: round2(covered),
         shortQty: round2(short),
@@ -237,6 +287,7 @@ export async function getMaterialPlanning(): Promise<MaterialPlanningResult> {
       rmPlanned: !!item.rmPlans[0],
       bomPlanned: !!item.bomPlans[0],
       plannedAt: plannedAtOf(item.rmPlans[0]?.calculatedAt, item.bomPlans[0]?.calculatedAt),
+      activeBomSlot: item.activeBomSlot,
     };
   });
 

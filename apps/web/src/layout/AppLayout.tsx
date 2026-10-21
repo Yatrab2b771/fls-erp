@@ -1,3 +1,4 @@
+import { PageErrorBoundary } from "../components/PageErrorBoundary";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -26,10 +27,11 @@ import {
   PackageMinus,
   PackageX,
   Boxes,
-  Scale,
   PauseCircle,
   Recycle,
   RotateCcw,
+  Undo2,
+  Wrench,
   Search,
   ShieldCheck,
   ShoppingBag,
@@ -99,6 +101,9 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // user) so it's a one-line change to bring either back.
       { to: "/purchase-orders", label: "Order Tracking", icon: Truck, roles: ["BD", "PPIC", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
   { to: "/accounts-dispatch", label: "Dispatch Invoices", icon: FileText, roles: ["ACCOUNTS"] },
+      // Goods a customer sent back: Dispatch decides what to do with what QA passed, Accounts makes the credit note
+      { to: "/returned-goods-dispatch", label: "Returned Goods", icon: RotateCcw, roles: ["DISPATCH"] },
+      { to: "/credit-notes", label: "Credit Notes", icon: FileText, roles: ["ACCOUNTS"] },
       { to: "/customers", label: "Customers", icon: Building2, roles: ["BD"] },
       { to: "/leads", label: "Leads", icon: Users, roles: ["BD"] },
       { to: "/visiting-cards", label: "Visiting Cards", icon: ScanLine, roles: ["BD"] },
@@ -109,7 +114,7 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Planning & Procurement",
     items: [
-      { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"] },
+      { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS"] },
   { to: "/vendor-payments", label: "Vendor Payments", icon: Wallet, roles: ["ACCOUNTS", "PURCHASE"] },
       // The supplier directory (contact, GST, address): Purchase keeps it, Store and Accounts use it. PPIC and Production see what is ordered and its ETA in Pre-Inventory / Vendor POs instead.
       { to: "/vendors", label: "Vendors", icon: Factory, roles: ["STORE", "PURCHASE", "ACCOUNTS"] },
@@ -129,16 +134,20 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Warehouse & Quality",
     items: [
       // Not for PPIC or Purchase: they follow stock and what is short in Material Planning / PO Readiness / Pre-Inventory (Purchase logs its PIs there)
-      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "QA_QC", "RND", "PRODUCTION", "DISPATCH", "ACCOUNTS"] },
+      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "QA_QC", "RND", "DISPATCH", "ACCOUNTS"] },
       // Not for PPIC (it could only look): stock moves, plant usage, material usage and the Recycle Store belong to Store, Production and QA
-      { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE", "PRODUCTION"] },
-      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["PRODUCTION", "STORE"] },
-      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["PRODUCTION", "STORE", "QA_QC"] },
-      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "PRODUCTION", "QA_QC"] },
+      { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE"] },
+      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["STORE"] },
+      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["STORE", "QA_QC"] },
+      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "QA_QC"] },
       // Fix a balance that does not match the shelf (a second person approves it), deal with what QC rejected, and trace a delivery.
-      { to: "/stock-adjustments", label: "Stock Corrections", icon: Scale, roles: ["STORE", "PRODUCTION", "RND", "ACCOUNTS"] },
+      // Stock Corrections is hidden from the menu for now (the page and its API are still there; the route redirects to the Dashboard)
       { to: "/rejected-stock", label: "Rejected Stock", icon: PackageX, roles: ["STORE", "QA_QC", "ACCOUNTS"] },
-      { to: "/lots", label: "Lots & Recall", icon: Boxes, roles: ["STORE", "QA_QC", "RND", "PPIC", "ACCOUNTS", "PRODUCTION"] },
+      // Customer returns: the Warehouse records them, QA decides, Production reworks what can be fixed
+      { to: "/customer-returns", label: "Customer Returns", icon: Undo2, roles: ["STORE"] },
+      { to: "/returned-goods", label: "Returned Goods", icon: ShieldCheck, roles: ["QA_QC"] },
+      { to: "/rework", label: "Rework", icon: Wrench, roles: ["PRODUCTION"] },
+      { to: "/lots", label: "Lots & Recall", icon: Boxes, roles: ["STORE", "QA_QC", "RND", "PPIC", "ACCOUNTS"] },
     ],
   },
   {
@@ -168,6 +177,8 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // on this route — only RND edits recipes, only PPIC sends to
       // Pre-Inventory), same reasoning as PURCHASE's Packaging BOM above.
       { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND"] },
+      // Which vendors a product may take a material from (R&D decides; Purchase and Store see it so they order and issue the right one)
+      { to: "/approved-vendors", label: "Approved Vendors", icon: ShieldCheck, roles: ["RND", "PURCHASE", "PPIC", "STORE"] },
       { to: "/sample-requests", label: "Sample Request", icon: Beaker, roles: ["RND", "BD", "REGULATORY"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND"] },
       { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
@@ -192,6 +203,7 @@ const DETAIL_ROUTE_TITLES: { prefix: string; label: string; section: string }[] 
   { prefix: "/po-review/", label: "PO Review", section: "Order to Dispatch" },
   { prefix: "/qc/", label: "QA / QC", section: "Warehouse & Quality" },
   { prefix: "/bom-board", label: "BOM", section: "R&D" },
+  { prefix: "/bom-production", label: "In Production: BOM change", section: "R&D" },
   { prefix: "/purchase-orders/", label: "Purchase Order", section: "Order to Dispatch" },
   { prefix: "/pre-productions/", label: "Production Run", section: "Order to Dispatch" },
   { prefix: "/combined-lots/", label: "Combined Lot", section: "Order to Dispatch" },
@@ -657,7 +669,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 accent="slate"
               />
             ) : (
-              children
+              <PageErrorBoundary>{children}</PageErrorBoundary>
             )}
           </div>
         </main>

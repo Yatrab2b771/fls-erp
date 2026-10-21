@@ -327,7 +327,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     const ppicInbox = await request(app).get("/api/notifications").set(authHeader(ppicToken));
     expect(ppicInbox.body.notifications.some((n: { title: string }) => n.title === "Whey Protein now available")).toBe(true);
     const productionInbox = await request(app).get("/api/notifications").set(authHeader(productionToken));
-    expect(productionInbox.body.notifications.some((n: { title: string }) => n.title === "Whey Protein now available")).toBe(true);
+    expect(productionInbox.body.notifications.some((n: { title: string }) => n.title === "Whey Protein now available")).toBe(false); // Production no longer has Pre-Inventory
 
     // Second delivery on top of existing stock — no repeat alert, it already crossed.
     await request(app).post("/api/notifications/read-all").set(authHeader(ppicToken));

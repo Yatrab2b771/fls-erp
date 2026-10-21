@@ -120,6 +120,7 @@ plantConsumptionRouter.post(
             data: sink.map((r) => ({
               itemId: input.itemId,
               type: "ISSUED_RECYCLE" as const,
+              recycleKind: r.purpose === "REJECTED" ? "REJECTED" : "WASTAGE",
               date: new Date(),
               unit: input.unit,
               quantity: r.quantity,

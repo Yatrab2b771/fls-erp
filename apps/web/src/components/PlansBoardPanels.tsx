@@ -12,6 +12,8 @@ import { useToast } from "./Toast";
 import { ApiError } from "../lib/api";
 import type { PreProductionStageId, ProductionBatch, UtilizationItem } from "../lib/types";
 import { fmtQty } from "../lib/format";
+import { leftToPlan } from "../lib/plansBoardExport";
+import { CloseShortControl } from "./CloseShortControl";
 
 // The Batch and Utilization dropdowns of the New Plan list.
 
@@ -70,6 +72,7 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
       {shown.length === 0 && <p className="text-xs text-slate-400">{flow ? "No batch is cleared for production yet. A batch comes here once its indent, batch number, Dispensing and Line Clearance are done." : "No batches yet."}</p>}
       {shown.length > 0 && <ProductTotal row={row} columns={[...UTILIZATION_COLUMNS]} />}
       <ProductionBatchesTable preProductionId={run.id} batches={shown} renderUtilization={(b) => <UtilizationSheet row={row} batch={b} category="RM" />} />
+      {flow && <PreparingBatches row={row} />}
       {!flow && row.unassigned.length > 0 && (
         <div className="overflow-hidden rounded-xl border border-dashed border-slate-300 bg-white">
           <p className="border-b border-slate-100 bg-slate-50/80 px-3 py-2 text-xs font-bold text-slate-500">Given at Dispensing, not booked to a batch <span className="font-normal text-slate-400">(the material the Day Store gave this run as a whole)</span></p>
@@ -86,7 +89,7 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
   );
 }
 
-const PREP_STAGE_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue (Production)", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing (Day Store)", LINE_CLEARANCE: "Line Clearance (QA)" };
+const PREP_STAGE_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue (Production)", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing (Day Store)", RECEIVE: "Receive (Production)" };
 
 // New Plan's Batches dropdown: the run is started, and Production divides the plan into batches here (just the quantity of each). Each batch
 // then goes through its own Indent Issue, Batch No, Dispensing and Line Clearance on those tiles.
@@ -115,7 +118,9 @@ export function DividePanel({ row, onStart, starting }: { row: PlanBoardRow; onS
   }
   const list = batches ?? [];
   const planned = list.reduce((sum, b) => sum + b.plannedQty, 0);
-  const left = Math.max(0, q3(row.releasedQty - planned));
+  // What is left to plan counts what the finished batches actually made, so a batch that made less than planned leaves a shortfall
+  const left = leftToPlan(row);
+  const shortfall = list.length > 0 && planned + 1e-6 >= row.releasedQty && left > 1e-6;
   const materialsOf = (b: ProductionBatch) => {
     const items = b.utilization?.items ?? [];
     if (items.length === 0) return "—";
@@ -131,8 +136,13 @@ export function DividePanel({ row, onStart, starting }: { row: PlanBoardRow; onS
         <span>
           Planned in batches <b className="text-slate-800">{fmtQty(planned)} {row.unit}</b>
         </span>
+        {shortfall && (
+          <span>
+            Made so far <b className="text-slate-800">{fmtQty(run.combinedQty)} {row.unit}</b>
+          </span>
+        )}
         <span>
-          Left to plan <b className={left > 0 ? "text-amber-600" : "text-emerald-600"}>{fmtQty(left)} {row.unit}</b>
+          {shortfall ? "Shortfall" : "Left to plan"} <b className={left > 0 ? "text-amber-600" : "text-emerald-600"}>{fmtQty(left)} {row.unit}</b>
         </span>
       </div>
       {list.length > 0 && (
@@ -166,7 +176,8 @@ export function DividePanel({ row, onStart, starting }: { row: PlanBoardRow; onS
         </div>
       )}
       {list.length === 0 && <p className="text-xs text-slate-400">No batches yet. Add the first one: its quantity is all that is needed now.</p>}
-      {left > 0 ? <NewProductionBatchForm key={left} preProductionId={run.id} remainingQty={left} /> : <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">All of the {fmtQty(row.releasedQty)} {row.unit} PPIC has released is divided into batches. More batches open when PPIC releases more.</p>}
+      {shortfall && <CloseShortControl row={row} />}
+      {left > 0 ? <NewProductionBatchForm key={left} preProductionId={run.id} remainingQty={left} shortfall={{ plannedAll: planned, released: row.releasedQty }} /> : <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800">All of the {fmtQty(row.releasedQty)} {row.unit} PPIC has released is divided into batches. More batches open when PPIC releases more.</p>}
     </div>
   );
 }
@@ -316,6 +327,42 @@ function UsageForm({ row, batchId, onDone, initialItemId, planItems }: { row: Pl
   );
 }
 
+/**
+ * The product's other batches: planned, but not cleared for production yet (indent, batch number, Dispensing, Receive or Line Clearance still to do).
+ * They are counted in "Batches" above but only the cleared ones have a row in the table, so this says where each of the others is.
+ */
+function PreparingBatches({ row }: { row: PlanBoardRow }) {
+  const waiting = row.batches.filter((b) => b.status === "IN_PROGRESS" && b.prepStageId !== "READY");
+  if (waiting.length === 0) return null;
+  return (
+    <div className="overflow-hidden rounded-xl border border-dashed border-amber-300 bg-amber-50/40">
+      <p className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800">
+        {waiting.length} more batch{waiting.length === 1 ? " is" : "es are"} still being prepared. {waiting.length === 1 ? "It comes" : "They come"} to the table above once QA clears the line.
+      </p>
+      <table className="w-full whitespace-nowrap text-xs">
+        <thead>
+          <tr className="text-left text-micro font-bold uppercase tracking-wide text-slate-400">
+            <th className="px-3 py-2">Batch</th>
+            <th className="px-3 py-2 text-right">Quantity</th>
+            <th className="px-3 py-2">Where it is now</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-amber-100">
+          {waiting.map((b, i) => (
+            <tr key={b.id}>
+              <td className="px-3 py-2 font-bold text-slate-700">{b.batchNo ?? <span className="font-normal text-slate-400">No number yet (Batch {i + 1})</span>}</td>
+              <td className="px-3 py-2 text-right font-mono text-slate-700">
+                {fmtQty(b.plannedQty)} {row.unit}
+              </td>
+              <td className="px-3 py-2 text-slate-600">{PREP_STAGE_LABEL[b.prepStageId] ?? b.prepStageId}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // The product as a whole: how much of it is made so far, and every material added up over all its batches.
 function ProductTotal({ row, columns }: { row: PlanBoardRow; columns: typeof UTILIZATION_COLUMNS[number][] }) {
   const run = row.run!;
@@ -324,10 +371,13 @@ function ProductTotal({ row, columns }: { row: PlanBoardRow; columns: typeof UTI
   const done = row.batches.filter((b) => b.status === "COMPLETED").length;
   const inputSum = row.batches.reduce((sum, b) => sum + (b.inputQty ?? 0), 0);
   const outputSum = row.batches.reduce((sum, b) => sum + (b.outputQty ?? 0), 0);
-  const stat = (label: string, value: string, tone = "text-slate-800") => (
+  const ready = row.batches.filter((b) => b.status === "IN_PROGRESS" && b.prepStageId === "READY").length;
+  const preparing = row.batches.filter((b) => b.status === "IN_PROGRESS" && b.prepStageId !== "READY").length;
+  const stat = (label: string, value: string, tone = "text-slate-800", sub?: string) => (
     <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
       <p className="text-micro font-bold uppercase tracking-wide text-slate-400">{label}</p>
       <p className={`font-mono text-sm font-black ${tone}`}>{value}</p>
+      {sub && <p className="font-sans text-micro font-semibold text-slate-400">{sub}</p>}
     </div>
   );
 
@@ -357,7 +407,7 @@ function ProductTotal({ row, columns }: { row: PlanBoardRow; columns: typeof UTI
         {stat("Planned", `${fmtQty(run.plannedQty)} ${row.unit}`)}
         {stat("Made so far", `${fmtQty(run.combinedQty)} ${row.unit}`, "text-emerald-700")}
         {stat("Left to make", `${fmtQty(Math.max(0, run.plannedQty - run.combinedQty))} ${row.unit}`, "text-amber-700")}
-        {stat("Batches", `${done} of ${row.batches.length} done`)}
+        {stat("Batches", `${done} of ${row.batches.length} done`, "text-slate-800", run.batchFlow ? `${ready} in production · ${preparing} in preparation` : undefined)}
         {stat("Input → Output", `${fmtQty(inputSum)} → ${fmtQty(outputSum)}`)}
       </div>
       <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">

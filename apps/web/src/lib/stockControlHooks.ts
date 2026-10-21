@@ -253,3 +253,114 @@ export interface ItemLots {
 export function useItemLots(itemId: string | undefined) {
   return useQuery({ queryKey: ["inventory", "lots", "item", itemId], queryFn: () => api<ItemLots>(`/api/inventory/lots/item/${itemId}`), enabled: !!itemId });
 }
+
+// ---------------------------------------------------------------- approved vendors
+// Which vendors a product may take a material from. See product-vendors.routes.ts in the API.
+
+export type VendorRuleKind = "RM" | "PM";
+
+export interface VendorProductRow {
+  id: string;
+  name: string;
+  customerName: string | null;
+  materialCount: number;
+  restrictedCount: number;
+}
+
+export interface VendorProductMaterial {
+  key: string;
+  itemId: string | null;
+  name: string;
+  detail: string;
+  approved: { vendorId: string; name: string }[];
+}
+
+export interface VendorProduct {
+  kind: VendorRuleKind;
+  id: string;
+  name: string;
+  customerName: string | null;
+  materials: VendorProductMaterial[];
+}
+
+export interface WaitingBatch {
+  batchId: string;
+  batchNo: string | null;
+  purchaseOrderItemId: string;
+  poNumber: string | null;
+  customerName: string;
+  productName: string;
+  plantName: string;
+  itemId: string;
+  material: string;
+  unit: string;
+  neededQty: number;
+  approvedQty: number;
+  otherVendorsQty: number;
+  approvedVendors: string[];
+}
+
+export interface VendorDeviationRow {
+  id: string;
+  purchaseOrderItemId: string;
+  productName: string;
+  poNumber: string | null;
+  customerName: string;
+  itemId: string;
+  material: string;
+  approvedVendors: string[];
+  reason: string;
+  approvedByName: string;
+  createdAt: string;
+}
+
+export function useVendorOptions() {
+  return useQuery({ queryKey: ["product-vendors", "vendors"], queryFn: () => api<{ id: string; name: string }[]>("/api/product-vendors/vendors") });
+}
+
+export function useVendorProducts(kind: VendorRuleKind, search: string) {
+  return useQuery({
+    queryKey: ["product-vendors", "products", kind, search],
+    queryFn: () => api<VendorProductRow[]>(`/api/product-vendors/products?kind=${kind}&search=${encodeURIComponent(search)}`),
+  });
+}
+
+export function useVendorProduct(kind: VendorRuleKind, id: string | null) {
+  return useQuery({
+    queryKey: ["product-vendors", "product", kind, id],
+    queryFn: () => api<VendorProduct>(`/api/product-vendors/products/${kind}/${id}`),
+    enabled: !!id,
+  });
+}
+
+export function useSetMaterialVendors(kind: VendorRuleKind, id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { name?: string; itemId?: string; vendorIds: string[] }) => api<VendorProduct>(`/api/product-vendors/products/${kind}/${id}/materials`, { method: "PUT", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["product-vendors"] }),
+  });
+}
+
+export function useWaitingForVendor() {
+  return useQuery({ queryKey: ["product-vendors", "waiting"], queryFn: () => api<WaitingBatch[]>("/api/product-vendors/waiting") });
+}
+
+export function useVendorDeviations() {
+  return useQuery({ queryKey: ["product-vendors", "deviations"], queryFn: () => api<VendorDeviationRow[]>("/api/product-vendors/deviations") });
+}
+
+export function useAllowOtherVendor() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { purchaseOrderItemId: string; itemId: string; reason: string }) => api("/api/product-vendors/deviations", { method: "POST", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["product-vendors"] }),
+  });
+}
+
+export function useWithdrawDeviation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/product-vendors/deviations/${id}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["product-vendors"] }),
+  });
+}

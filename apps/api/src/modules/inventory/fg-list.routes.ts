@@ -13,6 +13,7 @@ import { agingRanges, inAnyRange, inRange, type TileFilters } from "../ppic/ppic
  * reached the FG Store (or any later stage) and has quantity left after what Dispatch has shipped.
  *
  *   GET /           ?po ?product ?customer ?plant ?batch (multi), ?dateFrom/?dateTo (FG Store date), ?aging
+ *                   ?group=product: one row per PRODUCT of a PO instead (its batches added up, and listed under `batches`)
  *   GET /options    dropdown values for those filters
  *
  * Aging = whole days since it reached the FG Store (a legacy lot: since its packaging ended).
@@ -27,6 +28,7 @@ const many = (raw: unknown): string[] => (Array.isArray(raw) ? raw : raw === und
 const isoDay = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
 
 const itemSelect = {
+  id: true,
   productName: true,
   unit: true,
   purchaseOrder: { select: { poNumber: true, customer: { select: { companyName: true } } } },
@@ -35,6 +37,8 @@ const runSelect = { plant: { select: { name: true } }, purchaseOrderItem: { sele
 
 interface FgRow {
   id: string;
+  /** The PO line (product) this batch / lot belongs to. */
+  itemId: string;
   kind: "BATCH" | "COMBINED_LOT";
   poNumber: string | null;
   productName: string;
@@ -65,6 +69,7 @@ async function loadRows(): Promise<FgRow[]> {
     const fg = warehouseFgOf(b);
     rows.push({
       id: b.id,
+      itemId: item.id,
       kind: "BATCH",
       poNumber: item.purchaseOrder.poNumber,
       productName: item.productName,
@@ -83,6 +88,7 @@ async function loadRows(): Promise<FgRow[]> {
     const produced = l.packApprovedQty ?? 0;
     rows.push({
       id: l.id,
+      itemId: item.id,
       kind: "COMBINED_LOT",
       poNumber: item.purchaseOrder.poNumber,
       productName: item.productName,
@@ -126,6 +132,33 @@ fgListRouter.get("/", async (req: AuthedRequest, res, next) => {
       )
       // Newest into the FG Store first; rows with no date last.
       .sort((a, b) => (b.fgStoreDate?.getTime() ?? 0) - (a.fgStoreDate?.getTime() ?? 0) || a.productName.localeCompare(b.productName));
+
+    if (q.group === "product") {
+      // One row per product (PO line): what all its batches / lots hold added up. Newest into the FG Store first, like the batch rows.
+      const byItem = new Map<string, FgRow[]>();
+      for (const r of rows) byItem.set(r.itemId, [...(byItem.get(r.itemId) ?? []), r]);
+      const products = [...byItem.entries()].map(([itemId, batches]) => {
+        const first = batches[0]!;
+        const dates = batches.map((b) => b.fgStoreDate?.getTime()).filter((t): t is number => t !== undefined);
+        return {
+          itemId,
+          poNumber: first.poNumber,
+          productName: first.productName,
+          customerName: first.customerName,
+          plantName: first.plantName,
+          unit: first.unit,
+          batchCount: batches.length,
+          producedQty: round(batches.reduce((s, b) => s + b.producedQty, 0)),
+          dispatchedQty: round(batches.reduce((s, b) => s + b.dispatchedQty, 0)),
+          onHandQty: round(batches.reduce((s, b) => s + b.onHandQty, 0)),
+          // the oldest batch still in the FG Store sets the aging
+          fgStoreDate: dates.length ? new Date(Math.min(...dates)) : null,
+          batches,
+        };
+      });
+      setPaginationHeaders(res, products.length, pagination);
+      return res.json(products.slice(pagination.skip, pagination.skip + pagination.take));
+    }
 
     setPaginationHeaders(res, rows.length, pagination);
     res.json(rows.slice(pagination.skip, pagination.skip + pagination.take));

@@ -89,7 +89,6 @@ async function main() {
     return uniq(batches.map((b) => keyOf(b.preProduction.purchaseOrderItem.purchaseOrder.poNumber, b.preProduction.purchaseOrderItem.productName)));
   };
   const prepShown = async (token: string, stage: string) => uniq((await getAll(token, `/api/production-batches/prep-board?stage=${stage}`)).map((r) => keyOf(r.poNumber, r.productName)));
-  report("Line Clearance (batches dispensed, waiting for QA)", await prepExpected("LINE_CLEARANCE"), await prepShown(qa, "LINE_CLEARANCE"));
   report("IPQC", keys(rows.filter((r) => r.batchStages.includes("IPQC"))), await board("IPQC"));
   report("QA Gate: Manufacturing", keys(rows.filter((r) => r.batchStages.includes("QA_GATE_MFG"))), await board("QA_GATE_MFG"));
   report("QA Gate: Packaging", keys(rows.filter((r) => r.batchStages.includes("QA_GATE_PACKAGING"))), await board("QA_GATE_PACKAGING"));

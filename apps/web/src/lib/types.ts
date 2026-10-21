@@ -331,6 +331,9 @@ export interface MaterialPlanningRow {
   unit: string;
   requiredQty: number;
   onHand: number | null;
+  // Set when the product may take this material only from certain vendors: they, and how much of the stock is theirs.
+  approvedVendors: string[];
+  approvedOnHand: number | null;
   coveredQty: number | null;
   shortQty: number | null;
   status: MaterialStatus;
@@ -361,6 +364,8 @@ export interface MaterialPlanningProduct {
   bomPlanned: boolean;
   // When both plans were calculated - in Material Planning since then (its Aging).
   plannedAt: string | null;
+  // The BOM version its plan is made from: DISPLAY (the catalog's own) or one of R&D's V1 / V2.
+  activeBomSlot: string;
 }
 
 export interface MaterialPlanningResult {
@@ -613,6 +618,11 @@ export interface RecycleStoreTransaction {
   note: string | null;
   date: string;
   createdByName: string;
+  /** material only: wastage is gone for good; rejected waits for QA's decision (reuse or destroy) */
+  recycleKind?: "WASTAGE" | "REJECTED";
+  /** material only: how much of a rejected entry QA has not decided about yet */
+  toDecide?: number;
+  decisions?: { id: string; decision: string; quantity: number; note: string | null; certificateNo: string | null; at: string }[];
 }
 
 export interface RecycleStoreByItemRow {
@@ -754,7 +764,7 @@ export interface CoaTestResult {
 
 // Tier 2 — one small manufacturing run against a PreProduction. No stage
 // machine — just IN_PROGRESS -> COMPLETED.
-export type BatchPrepStageId = "INDENT_ISSUE" | "BATCH_NO" | "DISPENSING" | "LINE_CLEARANCE" | "READY";
+export type BatchPrepStageId = "INDENT_ISSUE" | "BATCH_NO" | "DISPENSING" | "RECEIVE" | "LINE_CLEARANCE" | "READY";
 export interface UtilizationPart {
   required: number;
   logged: number;
@@ -768,6 +778,32 @@ export interface UtilizationItem {
   unit: string;
   requiredQty: number;
   givenQty: number;
+}
+/** What Production entered for the whole batch (Produced, Waste, Reject, Sample) for one kind of material. */
+export interface UtilizationSheetValues {
+  producedQty: number;
+  wasteQty: number;
+  rejectQty: number;
+  sampleQty: number;
+}
+/** One material's saved Utilization on a batch (A used, B waste, C reject, D sample): plan material or extra. */
+export interface UtilizationEntry {
+  itemId: string;
+  itemName: string;
+  category: "RM" | "PM";
+  unit: string;
+  consumedQty: number;
+  wastedQty: number;
+  rejectedQty: number;
+  sampleQty: number;
+}
+export interface BatchUtilization extends UtilizationPart {
+  pm: UtilizationPart;
+  items: UtilizationItem[];
+  sheets: { RM: UtilizationSheetValues | null; PM: UtilizationSheetValues | null };
+  entries: UtilizationEntry[];
+  /** Finished packs this batch is planned to make (the PM plan's target yield, scaled to the batch): the basis the PM sheet is shared on. */
+  pmPacks: number | null;
 }
 
 export interface ProductionBatch {
@@ -792,7 +828,7 @@ export interface ProductionBatch {
   // Where its Utilization stands. The fields here are the RM sheet (every plan RM needs a Production quantity on the batch before the end
   // time and Mark Completed open); `pm` is the packaging-material sheet (Packaging); `items` are the plan's materials for this batch
   // with what the Day Store dispensed for it.
-  utilization?: UtilizationPart & { pm: UtilizationPart; items: UtilizationItem[] };
+  utilization?: BatchUtilization;
   // The per-batch preparation (a run started with batchFlow): Indent (Production), Batch No (R&D), Dispensing (Day Store), Line Clearance (QA).
   prepStageId: BatchPrepStageId;
   prodIndentSlipSign: string | null;
@@ -2021,13 +2057,12 @@ export interface QcDashboard {
     onHoldPackBatches: number;
     // Every batch sitting at one of the three hard-gate stages, not just
     // ones explicitly on Hold — see qc.routes.ts's own comment on why.
-    pendingSampleQcBatches: number;
     pendingIpqcBatches: number;
     pendingBulkQcBatches: number;
   };
   receipts: { pending: InventoryTransaction[]; onHold: InventoryTransaction[] };
   dispatches: { pending: DispatchTransfer[]; onHold: DispatchTransfer[] };
-  batches: { onHoldMfg: CombinedLot[]; onHoldPack: CombinedLot[]; pendingSampleQc: PreProduction[]; pendingIpqc: CombinedLot[]; pendingBulkQc: CombinedLot[] };
+  batches: { onHoldMfg: CombinedLot[]; onHoldPack: CombinedLot[]; pendingIpqc: CombinedLot[]; pendingBulkQc: CombinedLot[] };
 }
 
 // --- System Health / Audit Log — Admin-only operational tooling, see

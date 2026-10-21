@@ -346,7 +346,9 @@ function CardReview({ card, kinds, setKinds, onBack, onSaved }: { card: Business
   const [dups, setDups] = useState<{ id: string; name: string; company: string; addedBy: string }[] | null>(null);
   const [zoom, setZoom] = useState(false);
   const [focus, setFocus] = useState<keyof typeof f | null>(null);
-  useEffect(() => window.scrollTo({ top: 0 }), []);
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, []);
 
   const unsure = (key: string, value: string) => !!card?.confidence && !!value && (card.confidence[key] ?? 1) < SURE_ENOUGH;
   const phoneList = () => f.phones.split(",").map((p) => p.trim()).filter(Boolean);

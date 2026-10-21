@@ -15,7 +15,8 @@ const hours = (a: string | null, b: string | null) => (a && b ? Math.round(((new
 export function isUnderProcess(row: PlanBoardRow): boolean {
   if (!row.run) return true;
   const allDone = row.batches.length > 0 && row.batches.every((b) => b.status === "COMPLETED");
-  return !(allDone && row.run.combinedQty >= row.run.plannedQty - 1e-6);
+  // A product closed short is done once every batch is: it ends at what it made
+  return !(allDone && (row.run.combinedQty >= row.run.plannedQty - 1e-6 || !!row.closedShort));
 }
 
 // Each tile only its own stage.
@@ -24,7 +25,26 @@ export function isUnderProcess(row: PlanBoardRow): boolean {
 // A plan that has produced everything is in neither (it is in the Production Report). The batches' own preparation (Indent Issue, Batch No,
 // Dispensing, Line Clearance) is listed by batch on its own tiles.
 const plannedInBatches = (row: PlanBoardRow) => row.batches.reduce((sum, b) => sum + b.plannedQty, 0);
-export const isNewPlan = (row: PlanBoardRow) => isUnderProcess(row) && (row.run?.batchFlow ? plannedInBatches(row) + 1e-6 < row.releasedQty : ["NOT_STARTED", "PREPARING"].includes(planStatusOf(row).key));
+
+/** A batch that makes a little less than planned is normal process loss: only a gap bigger than this share of the order counts as a shortfall. */
+export const SHORTFALL_TOLERANCE = 0.05;
+
+/** What can still be planned into new batches: released - made so far (the completed batches' output) - what batches in progress are planned for. */
+export const leftToPlan = (row: PlanBoardRow): number => {
+  if (!row.run?.batchFlow || row.closedShort) return 0;
+  const inProgress = row.batches.filter((b) => b.status === "IN_PROGRESS").reduce((sum, b) => sum + b.plannedQty, 0);
+  return Math.max(0, q3(row.releasedQty - row.run.combinedQty - inProgress));
+};
+
+/** The quantity still missing once every batch is planned and some are done, but they made less than planned (0 when there is none). */
+export const shortfallQty = (row: PlanBoardRow): number => {
+  if (!row.run?.batchFlow || !row.batches.some((b) => b.status === "COMPLETED")) return 0;
+  if (plannedInBatches(row) + 1e-6 < row.releasedQty) return 0; // still being divided: that is not a shortfall
+  const left = leftToPlan(row);
+  return left > Math.max(1e-6, SHORTFALL_TOLERANCE * row.releasedQty) ? left : 0;
+};
+
+export const isNewPlan = (row: PlanBoardRow) => isUnderProcess(row) && (row.run?.batchFlow ? plannedInBatches(row) + 1e-6 < row.releasedQty || shortfallQty(row) > 0 : ["NOT_STARTED", "PREPARING"].includes(planStatusOf(row).key));
 export const isBatchStage = (row: PlanBoardRow) =>
   isUnderProcess(row) && (row.run?.batchFlow ? row.batches.some((b) => b.status === "IN_PROGRESS" && b.prepStageId === "READY") : ["READY", "IN_PRODUCTION"].includes(planStatusOf(row).key));
 

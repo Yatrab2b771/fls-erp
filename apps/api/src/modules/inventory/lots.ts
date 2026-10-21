@@ -20,8 +20,13 @@ export interface LotSlice {
   quantity: number;
 }
 
+/** A vendor name made comparable: "Yantai  Co" and "yantai co" are the same vendor. */
+export const vendorKey = (name: string | null | undefined): string => (name ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
 export interface LotBalance {
   receiptId: string;
+  /** Who supplied it (the delivery's vendor name), for the approved-vendor rules. */
+  vendorName: string | null;
   remaining: number;
   expiryDate: Date | null;
   receivedOn: Date;
@@ -32,7 +37,7 @@ export interface LotBalance {
 const EPS = 1e-9;
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
-type LotInfo = { id: string; expiryDate: Date | null; expiryReleasedAt: Date | null; date: Date; quantity: number; rejectedQty: number | null };
+type LotInfo = { id: string; vendorName: string | null; expiryDate: Date | null; expiryReleasedAt: Date | null; date: Date; quantity: number; rejectedQty: number | null };
 
 const byExpiryThenDate = (a: { expiryDate: Date | null; receivedOn: Date }, b: { expiryDate: Date | null; receivedOn: Date }) =>
   (a.expiryDate?.getTime() ?? Infinity) - (b.expiryDate?.getTime() ?? Infinity) || a.receivedOn.getTime() - b.receivedOn.getTime();
@@ -53,7 +58,7 @@ function consume(lots: LotBalance[], qty: number): number {
 
 async function lotInfo(db: Db, ids: string[]): Promise<Map<string, LotInfo>> {
   if (ids.length === 0) return new Map();
-  const rows = await db.inventoryTransaction.findMany({ where: { id: { in: ids } }, select: { id: true, expiryDate: true, expiryReleasedAt: true, date: true, quantity: true, rejectedQty: true } });
+  const rows = await db.inventoryTransaction.findMany({ where: { id: { in: ids } }, select: { id: true, vendorName: true, expiryDate: true, expiryReleasedAt: true, date: true, quantity: true, rejectedQty: true } });
   return new Map(rows.map((r) => [r.id, r]));
 }
 
@@ -66,7 +71,7 @@ export async function getWarehouseLots(db: Db, itemId: string, pendingIssueQty =
   const now = new Date();
   const receipts = await db.inventoryTransaction.findMany({
     where: { itemId, type: "RECEIVED", receiptStatus: "ACCEPTED", deletedAt: null },
-    select: { id: true, expiryDate: true, expiryReleasedAt: true, date: true, quantity: true, rejectedQty: true },
+    select: { id: true, vendorName: true, expiryDate: true, expiryReleasedAt: true, date: true, quantity: true, rejectedQty: true },
   });
   if (receipts.length === 0) return [];
 
@@ -81,6 +86,7 @@ export async function getWarehouseLots(db: Db, itemId: string, pendingIssueQty =
   const lots: LotBalance[] = receipts
     .map((r) => ({
       receiptId: r.id,
+      vendorName: r.vendorName,
       remaining: Math.max(0, r.quantity - (r.rejectedQty ?? 0) - (allocatedBy.get(r.id) ?? 0)),
       expiryDate: r.expiryDate,
       receivedOn: r.date,
@@ -116,7 +122,7 @@ async function locationLots(db: Db, where: { inflow: Prisma.LotAllocationWhereIn
     .flatMap((i) => {
       const l = info.get(i.receiptId);
       if (!l) return [];
-      return [{ receiptId: i.receiptId, remaining: Math.max(0, (i._sum.quantity ?? 0) - (outBy.get(i.receiptId) ?? 0)), expiryDate: l.expiryDate, receivedOn: l.date, expired: isExpired(l, now) }];
+      return [{ receiptId: i.receiptId, vendorName: l.vendorName, remaining: Math.max(0, (i._sum.quantity ?? 0) - (outBy.get(i.receiptId) ?? 0)), expiryDate: l.expiryDate, receivedOn: l.date, expired: isExpired(l, now) }];
     })
     .filter((l) => l.remaining > EPS)
     .sort(byExpiryThenDate);
@@ -155,9 +161,12 @@ export function getPlantLots(db: Db, plantId: string, itemId: string): Promise<L
   );
 }
 
-/** FEFO pick of `qty` from usable (not expired) lots. Returns the slices it could cover - possibly less than asked (rest = lot unknown). */
-export function pickFefo(lots: LotBalance[], qty: number): LotSlice[] {
-  const usable = lots.filter((l) => !l.expired && l.remaining > EPS).sort(byExpiryThenDate);
+/**
+ * FEFO pick of `qty` from usable (not expired) lots. Returns the slices it could cover - possibly less than asked (rest = lot unknown).
+ * `allow`: only lots of these vendors (vendorKey) may be drawn - the approved vendors of a product that has such a rule.
+ */
+export function pickFefo(lots: LotBalance[], qty: number, allow?: Set<string>): LotSlice[] {
+  const usable = lots.filter((l) => !l.expired && l.remaining > EPS && (!allow || allow.has(vendorKey(l.vendorName)))).sort(byExpiryThenDate);
   const slices: LotSlice[] = [];
   let left = qty;
   for (const lot of usable) {
@@ -176,29 +185,29 @@ async function save(db: Db, itemId: string, slices: LotSlice[], target: { issueT
 }
 
 /** Records the lots a just-created Warehouse issue (to a Day Store or the R&D Store) came out of. Call inside the issuing transaction. */
-export async function recordWarehouseIssueLots(db: Db, txn: { id: string; itemId: string; quantity: number }) {
+export async function recordWarehouseIssueLots(db: Db, txn: { id: string; itemId: string; quantity: number }, allow?: Set<string>) {
   // The issue row exists already but has no allocations yet: leave its own quantity out of the balances it is drawing from.
   const lots = await getWarehouseLots(db, txn.itemId, txn.quantity);
-  return save(db, txn.itemId, pickFefo(lots, txn.quantity), { issueTxnId: txn.id });
+  return save(db, txn.itemId, pickFefo(lots, txn.quantity, allow), { issueTxnId: txn.id });
 }
 
 /** Records the lots a just-created Day Store -> Plant issue came out of. */
-export async function recordDayStoreIssueLots(db: Db, txn: { id: string; itemId: string; quantity: number; dayStoreId: string }) {
+export async function recordDayStoreIssueLots(db: Db, txn: { id: string; itemId: string; quantity: number; dayStoreId: string }, allow?: Set<string>) {
   const lots = await getDayStoreLots(db, txn.dayStoreId, txn.itemId, txn.quantity);
-  return save(db, txn.itemId, pickFefo(lots, txn.quantity), { issueTxnId: txn.id });
+  return save(db, txn.itemId, pickFefo(lots, txn.quantity, allow), { issueTxnId: txn.id });
 }
 
 /** Records the lots of whichever issue was just created (Warehouse -> Day Store / R&D, or Day Store -> Plant). Other types carry no lots. */
-export async function recordIssueLots(db: Db, txn: { id: string; itemId: string; type: string; quantity: number; dayStoreId: string | null }) {
-  if (txn.type === "ISSUED_DAY_STORE" || txn.type === "ISSUED_RND") return recordWarehouseIssueLots(db, txn);
-  if (txn.type === "ISSUED_PRODUCTION" && txn.dayStoreId) return recordDayStoreIssueLots(db, { ...txn, dayStoreId: txn.dayStoreId });
+export async function recordIssueLots(db: Db, txn: { id: string; itemId: string; type: string; quantity: number; dayStoreId: string | null }, allow?: Set<string>) {
+  if (txn.type === "ISSUED_DAY_STORE" || txn.type === "ISSUED_RND") return recordWarehouseIssueLots(db, txn, allow);
+  if (txn.type === "ISSUED_PRODUCTION" && txn.dayStoreId) return recordDayStoreIssueLots(db, { ...txn, dayStoreId: txn.dayStoreId }, allow);
   return [];
 }
 
 /** Records the lots a batch's dispensing line was drawn from (the Plant's lots). */
-export async function recordDispensingLots(db: Db, line: { id: string; itemId: string; quantity: number }, plantId: string) {
+export async function recordDispensingLots(db: Db, line: { id: string; itemId: string; quantity: number }, plantId: string, allow?: Set<string>) {
   const lots = await getPlantLots(db, plantId, line.itemId);
-  return save(db, line.itemId, pickFefo(lots, line.quantity), { dispensingLineId: line.id });
+  return save(db, line.itemId, pickFefo(lots, line.quantity, allow), { dispensingLineId: line.id });
 }
 
 /** A lot's identity, for showing: the supplier delivery it came from. */

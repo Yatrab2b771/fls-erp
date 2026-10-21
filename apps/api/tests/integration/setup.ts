@@ -50,6 +50,9 @@ beforeEach(async () => {
     // Lot allocations, rejected-stock dispositions and stock corrections reference InventoryTransaction / InventoryItem / DayStore /
     // Plant (RESTRICT) - they go first, same reasoning as everything else in this list.
     prisma.lotAllocation.deleteMany(),
+    // Approved-vendor rules reference InventoryItem (RESTRICT) and Vendor.
+    prisma.vendorDeviation.deleteMany(),
+    prisma.productMaterialVendor.deleteMany(),
     prisma.rejectedDisposition.deleteMany(),
     prisma.stockAdjustment.deleteMany(),
     prisma.dispatchTransfer.deleteMany(),
@@ -85,6 +88,7 @@ beforeEach(async () => {
     // inventoryItem below, same RESTRICT-FK reasoning as everything else
     // in this list.
     prisma.batchMaterialConsumption.deleteMany(),
+    prisma.productBomVersion.deleteMany(),
     prisma.preProductionChecklistItem.deleteMany(),
     prisma.preProductionStageEvent.deleteMany(),
     prisma.preProduction.deleteMany(),

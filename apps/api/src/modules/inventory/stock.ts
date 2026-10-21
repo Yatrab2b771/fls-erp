@@ -402,6 +402,7 @@ export async function notifyIfNewlyAvailable(params: { itemId: string; addedQty:
   if (!item || requirements.length === 0) return; // nobody's waiting on this one
 
   await Promise.all([
+    // Whoever asked for it (PPIC) hears it; Production no longer has Pre-Inventory, so it is not told here.
     ...requirements.map((r) =>
       notifyUser(r.requestedById, {
         title: `${item.name} now available`,
@@ -409,11 +410,6 @@ export async function notifyIfNewlyAvailable(params: { itemId: string; addedQty:
         link: "/pre-inventory",
       }).catch(onFail(`pre_inventory.stock_available.requester.${r.id}`)),
     ),
-    notifyRoles(
-      ["PRODUCTION"],
-      { title: `${item.name} now available`, body: `${currentStock}${item.unit ? ` ${item.unit}` : ""} on hand.`, link: "/pre-inventory" },
-      actorId,
-    ).catch(onFail("pre_inventory.stock_available.production")),
   ]);
 }
 

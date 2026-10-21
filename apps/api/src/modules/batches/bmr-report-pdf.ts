@@ -146,6 +146,7 @@ export function buildBmrReportPdf(
   lineClearanceStatus: string | null,
   lineClearanceRemarks: string | null,
   dispensingSheet: RecipeIngredientConsumptionRow[],
+  bomVersion: { label: string; note: string | null } | null = null,
 ): PDFKit.PDFDocument {
   const doc = new PDFDocument({ size: "A4", margin: 40 });
   const item = batch.preProduction.purchaseOrderItem;
@@ -160,7 +161,7 @@ export function buildBmrReportPdf(
     .fontSize(10)
     .fillColor("#475569")
     .text(
-      `${item.productName} · ${po.customer.companyName}${po.poNumber ? ` · PO ${po.poNumber}` : ""}\nBatch No. ${batch.batchNo ?? batch.id.slice(0, 8)} · Planned ${batch.plannedQty} ${item.unit} · Output ${formatValue(batch.outputQty)} ${item.unit} · Wastage ${formatValue(wastageQty)} ${item.unit}\nManufacturing ${formatValue(batch.manufacturingStartDate)} — ${formatValue(batch.manufacturingEndDate)}`,
+      `${item.productName} · ${po.customer.companyName}${po.poNumber ? ` · PO ${po.poNumber}` : ""}\nBatch No. ${batch.batchNo ?? batch.id.slice(0, 8)} · Planned ${batch.plannedQty} ${item.unit} · Output ${formatValue(batch.outputQty)} ${item.unit} · Wastage ${formatValue(wastageQty)} ${item.unit}\nManufacturing ${formatValue(batch.manufacturingStartDate)} — ${formatValue(batch.manufacturingEndDate)}${bomVersion ? `\nBOM version used: ${bomVersion.label}${bomVersion.note ? ` (${bomVersion.note})` : ""}` : ""}`,
     );
   doc.fillColor("#000000");
   doc.moveDown(1);

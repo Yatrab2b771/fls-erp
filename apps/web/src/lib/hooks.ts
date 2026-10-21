@@ -898,7 +898,7 @@ export function useProductionBatches(preProductionId: string | undefined) {
 export function useCreateProductionBatch(preProductionId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { batchNo?: string; plannedQty: number }) => api<ProductionBatch>(`/api/pre-productions/${preProductionId}/production-batches`, { method: "POST", body }),
+    mutationFn: (body: { batchNo?: string; plannedQty: number; reason?: string }) => api<ProductionBatch>(`/api/pre-productions/${preProductionId}/production-batches`, { method: "POST", body }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pre-productions", preProductionId, "production-batches"] });
       qc.invalidateQueries({ queryKey: ["pre-productions", "plans-board"] });
@@ -2209,6 +2209,8 @@ export interface PlanBoardRow {
   unit: string;
   plant: { id: string; name: string } | null;
   sentAt: string;
+  /** Production closed the product short: it ends at `qty`, not at the ordered quantity. */
+  closedShort: { at: string; qty: number | null; reason: string | null } | null;
   run: { id: string; currentStageId: string; sampleQcStatus: string | null; batchFlow: boolean; plannedQty: number; combinedQty: number } | null;
   batches: BoardBatch[];
   // Usage logged for the run without a batch (older entries, or logged for the run as a whole)
@@ -2481,6 +2483,15 @@ export interface MaterialBoardRow {
   availableQty: number | null;
   status: MaterialBoardStatus;
   sentAt: string;
+  // Only on the batch-wise lines (a batch of a run that works batch by batch): which batch, and what went to waste / rejected / sample.
+  batchId?: string;
+  batchNo?: string | null;
+  batchQty?: number;
+  prepStageId?: string;
+  batchStatus?: string;
+  wastedQty?: number;
+  rejectedQty?: number;
+  sampleQty?: number;
 }
 
 // Production's Indent Issue tile: runs waiting at Indent Issue, with the plan's materials (nothing is typed per material).
@@ -2584,10 +2595,21 @@ export function useStoreStageForward() {
   });
 }
 
-export function useMaterialBoard(options?: { enabled?: boolean }) {
+// legacyOnly: leave out the products whose run works batch by batch (the batch-wise board lists those).
+export function useMaterialBoard(options?: { enabled?: boolean; legacyOnly?: boolean }) {
   return useQuery({
-    queryKey: ["pre-productions", "material-board"],
-    queryFn: () => api<MaterialBoardRow[]>("/api/pre-productions/material-board"),
+    queryKey: ["pre-productions", "material-board", options?.legacyOnly ? "legacy" : "all"],
+    queryFn: () => api<MaterialBoardRow[]>(`/api/pre-productions/material-board${options?.legacyOnly ? "?legacyOnly=1" : ""}`),
+    enabled: options?.enabled,
+    staleTime: 15_000,
+  });
+}
+
+/** Material Received, batch by batch: one line per batch and material of its plan. */
+export function useBatchMaterialBoard(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["production-batches", "material-board"],
+    queryFn: () => api<MaterialBoardRow[]>("/api/production-batches/material-board"),
     enabled: options?.enabled,
     staleTime: 15_000,
   });
@@ -3103,6 +3125,8 @@ export function useRecordPlantConsumption(preProductionId: string) {
       qc.invalidateQueries({ queryKey: ["stock-transfers"] });
       qc.invalidateQueries({ queryKey: ["inventory"] });
       qc.invalidateQueries({ queryKey: ["pre-productions"] });
+      // The batch lists (Packaging, Batch tile) carry each batch's Utilization status ("0 of 3", the end fields locked until it is complete).
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
     },
   });
 }
@@ -3154,6 +3178,23 @@ export function useRecycleStoreTransactions() {
   return useQuery({ queryKey: ["recycle-store", "transactions"], queryFn: () => api<RecycleStoreTransaction[]>("/api/recycle-store/transactions") });
 }
 
+export function useRecycleSummary(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["recycle-store", "summary"], queryFn: () => api<{ toDecide: number }>("/api/recycle-store/summary"), enabled: options?.enabled, staleTime: 15_000 });
+}
+
+/** QA decides about rejected raw / packaging material: REUSE puts it back into the Plant's stock, DESTROY writes it off (with a certificate no.). */
+export function useRecycleDecision() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; decision: "REUSE" | "DESTROY"; quantity: number; note?: string; certificateNo?: string }) => api<{ id: string; left: number }>(`/api/recycle-store/entries/${id}/decision`, { method: "POST", body }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["recycle-store"] });
+      void qc.invalidateQueries({ queryKey: ["inventory"] });
+      void qc.invalidateQueries({ queryKey: ["plant-stock"] });
+    },
+  });
+}
+
 export function useRecycleStoreByItem() {
   return useQuery({ queryKey: ["recycle-store", "by-item"], queryFn: () => api<RecycleStoreByItemRow[]>("/api/recycle-store/by-item") });
 }
@@ -3198,13 +3239,10 @@ export interface BatchPrepRow {
   dispensingRemarks: string | null;
   dispensedAt: string | null;
   grnNo: string | null;
-  lineClearanceStatus: string | null;
-  lineClearanceRemarks: string | null;
-  /** QA's BMR 4.0 checklist for this batch: every item must be ticked before the line can be Approved. */
-  lineClearanceChecklist: { key: string; label: string; ok: boolean }[];
-  lineClearanceAt: string | null;
   /** Dispensing only: this batch's materials and whether the Plant and its Day Store hold them. */
-  requirements?: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean }[];
+  requirements?: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean; dispensed: boolean; refusedNote: string | null }[];
+  /** Receive only: what the Day Store sent to the Plant for this batch and Production has not confirmed yet, material by material. */
+  receiveLines?: { lineId: string; itemId: string; itemName: string; category: string; unit: string; plannedQty: number | null; givenQty: number; sentQty: number }[];
 }
 
 export function usePrepBoard(stage: BatchPrepStageId, options?: { enabled?: boolean; all?: boolean }) {
@@ -3225,8 +3263,8 @@ export function usePrepSummary(options?: { enabled?: boolean }) {
   });
 }
 
-/** One step of a batch's preparation (indent, batch-no/allocate, dispense, line-clearance). */
-export function useBatchPrepAction(step: "indent" | "batch-no/allocate" | "dispense" | "line-clearance") {
+/** One step of a batch's preparation (indent, batch-no/allocate, dispense, receive). */
+export function useBatchPrepAction(step: "indent" | "batch-no/allocate" | "dispense" | "receive") {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string } & Record<string, unknown>) => api<BatchPrepRow>(`/api/production-batches/${id}/${step}`, { method: "POST", body }),
@@ -3254,6 +3292,28 @@ export function useUpdatePackaging() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["production-batches"] });
       qc.invalidateQueries({ queryKey: ["pre-productions"] });
+    },
+  });
+}
+
+/** The Utilization of a whole batch, RM (before Packaging) or PM (after): the four batch numbers and the lines worked out from them. Saving replaces the earlier one. */
+export interface SaveUtilizationPayload {
+  producedQty: number;
+  wasteQty: number;
+  rejectQty: number;
+  sampleQty: number;
+  lines: { itemId: string; consumedQty: number; wastedQty: number; rejectedQty: number; sampleQty: number }[];
+}
+export function useSaveUtilization() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, category, ...body }: { id: string; category: "RM" | "PM" } & SaveUtilizationPayload) => api<ProductionBatch>(`/api/production-batches/${id}/utilization/${category}`, { method: "PUT", body }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["production-batches"] });
+      qc.invalidateQueries({ queryKey: ["pre-productions"] });
+      qc.invalidateQueries({ queryKey: ["plant-consumption"] });
+      qc.invalidateQueries({ queryKey: ["plant-stock"] });
+      qc.invalidateQueries({ queryKey: ["inventory"] });
     },
   });
 }
@@ -3325,6 +3385,9 @@ export interface BatchReportMaterial extends BoardMaterial {
 export interface BatchReportDetail {
   batchId: string;
   batchNo: string | null;
+  /** The BOM version the batch was made from (Display BOM, V1 or V2) and, for a V1 / V2, who changed it, when and why. */
+  bomVersion: string;
+  bomVersionNote: string | null;
   plannedQty: number;
   status: "IN_PROGRESS" | "COMPLETED";
   prepStageId: BatchPrepStageId;

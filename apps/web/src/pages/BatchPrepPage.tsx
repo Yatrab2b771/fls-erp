@@ -1,7 +1,8 @@
 import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
-import { ArrowLeft, ChevronDown, ClipboardList, Download, Hash, Send, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ClipboardList, Download, Hash, PackageCheck, Pencil, Send } from "lucide-react";
+import { ActionMenu } from "../components/ActionMenu";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useBatchPrepAction, useCorrectBatchNo, usePrepBoard, type BatchPrepRow } from "../lib/hooks";
@@ -20,15 +21,15 @@ import { customerTypeLabel } from "../lib/customerTags";
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 const today = () => new Date().toISOString().slice(0, 10);
 
-type Stage = Exclude<BatchPrepStageId, "READY">;
+type Stage = Exclude<BatchPrepStageId, "READY" | "LINE_CLEARANCE">;
 
-// One page for the four steps every batch goes through before its production, each on its own tile and each done by its own department:
-//   Indent Issue (Production) -> Batch No (R&D) -> Dispensing (Day Store) -> Line Clearance (QA)
+// One page for the steps every batch goes through before its production, each on its own tile and each done by its own department:
+//   Indent Issue (Production) -> Batch No (R&D) -> Dispensing (Day Store)
 const STAGE_INFO: Record<Stage, { title: string; tileKey: string; role: "PRODUCTION" | "RND" | "STORE" | "QA_QC"; icon: typeof ClipboardList; accent: string; blurb: string; empty: string }> = {
   INDENT_ISSUE: { title: "Indent Issue", tileKey: "batch-indent", role: "PRODUCTION", icon: ClipboardList, accent: "bg-amber-500/10 text-amber-600", blurb: "Sign the indent of each batch. The materials come from the plan, scaled to the batch's quantity. R&D gives the batch number next.", empty: "A batch shows here once Production has divided a plan into batches (New Plan)." },
   BATCH_NO: { title: "Batch No", tileKey: "batch-no", role: "RND", icon: Hash, accent: "bg-orange-500/10 text-orange-600", blurb: "Allocate the batch number. The system gives the next serial (FLS-26-0001, ...), never repeated. The numbers you have given stay in the list (a number can be changed until the batch is dispensed).", empty: "A batch shows here once Production has signed its indent." },
-  DISPENSING: { title: "Dispensing", tileKey: "batch-dispensing", role: "STORE", icon: Send, accent: "bg-emerald-500/10 text-emerald-600", blurb: "Dispense each batch's material to the Plant: only what that batch needs. QA clears the line next.", empty: "A batch shows here once R&D has given it a batch number." },
-  LINE_CLEARANCE: { title: "Line Clearance", tileKey: "batch-line-clearance", role: "QA_QC", icon: ShieldCheck, accent: "bg-violet-500/10 text-violet-600", blurb: "Clear the line for each batch. Approved lets Production start the batch.", empty: "A batch shows here once the Day Store has dispensed its material." },
+  DISPENSING: { title: "Dispensing", tileKey: "batch-dispensing", role: "STORE", icon: Send, accent: "bg-emerald-500/10 text-emerald-600", blurb: "Dispense each batch's material to the Plant: only what that batch needs. Production can start the batch once its material is there.", empty: "A batch shows here once R&D has given it a batch number." },
+  RECEIVE: { title: "Receive Material", tileKey: "batch-receive", role: "PRODUCTION", icon: PackageCheck, accent: "bg-sky-500/10 text-sky-600", blurb: "The Day Store has sent each batch's material to the Plant. Confirm what arrived, material by material: all of it, less (say why), or refuse it (it goes back to the Day Store). Production can start the batch once everything is received.", empty: "A batch shows here once the Day Store has dispensed it and sent material to the Plant." },
 };
 
 export function BatchPrepPage({ stage }: { stage: Stage }) {
@@ -36,29 +37,32 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
   const { hasRole } = useAuth();
   const canAct = hasRole(info.role, "ADMIN");
   // R&D's Batch No list also shows the numbers it has already allocated (and where those batches are now).
-  const { data, isLoading } = usePrepBoard(stage, { all: stage === "BATCH_NO" });
+  // Batch No and Indent Issue also keep the batches already done at their step (with where they are now), so the history is not lost.
+  const listsDone = stage === "BATCH_NO" || stage === "INDENT_ISSUE";
+  const { data, isLoading } = usePrepBoard(stage, { all: listsDone });
   const filters = useTileFilters();
   const [openId, setOpenId] = useState<string | null>(null);
   const picked = (key: string) => filters.applied.picks[key] ?? [];
   const everyRow = data ?? [];
   const distinct = (xs: (string | null | undefined)[]) => [...new Set(xs.filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  const showPlant = distinct(everyRow.map((r) => r.plant?.name)).length > 1;
   const withNo = stage !== "INDENT_ISSUE";
-  const waitingCount = stage === "BATCH_NO" ? everyRow.filter((r) => r.prepStageId === "BATCH_NO").length : everyRow.length;
+  const waitingCount = listsDone ? everyRow.filter((r) => r.prepStageId === stage).length : everyRow.length;
+  const waitLabel = stage === "INDENT_ISSUE" ? "Waiting for indent" : "Waiting for number";
+  const doneLabel = stage === "INDENT_ISSUE" ? "Indent signed" : "Allocated";
 
   const fields: FilterField[] = [
     { key: "po", label: "PO Number", options: distinct(everyRow.map((r) => r.poNumber)) },
     { key: "product", label: "Product", options: distinct(everyRow.map((r) => r.productName)) },
     ...(withNo ? [{ key: "batchno", label: "Batch No", options: distinct(everyRow.map((r) => r.batchNo)) }] : []),
-    ...(stage === "BATCH_NO" ? [{ key: "bnstatus", label: "Status", options: ["Waiting for number", "Allocated"] }] : []),
-    ...(showPlant ? [{ key: "plant", label: "Plant", options: distinct(everyRow.map((r) => r.plant?.name)) }] : []),
+    ...(listsDone ? [{ key: "bnstatus", label: "Status", options: [waitLabel, doneLabel] }] : []),
+    { key: "plant", label: "Location", options: distinct(everyRow.map((r) => r.plant?.name)) },
   ];
   const rows = everyRow.filter(
     (r) =>
       (!picked("po").length || picked("po").includes(r.poNumber ?? "")) &&
       (!picked("product").length || picked("product").includes(r.productName)) &&
       (!picked("batchno").length || picked("batchno").includes(r.batchNo ?? "")) &&
-      (!picked("bnstatus").length || picked("bnstatus").includes(r.prepStageId === "BATCH_NO" ? "Waiting for number" : "Allocated")) &&
+      (!picked("bnstatus").length || picked("bnstatus").includes(r.prepStageId === stage ? waitLabel : doneLabel)) &&
       (!picked("plant").length || picked("plant").includes(r.plant?.name ?? "")),
   );
   const pg = useClientPaging(rows);
@@ -85,27 +89,27 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
     XLSX.writeFile(wb, stampedName(`FLS_${info.title.replace(/\s+/g, "_")}`));
   }
 
-  const cols = 5 + (showPlant ? 1 : 0);
+  const cols = 7; // Batch, PO Number, Product, Location, Quantity, stage column, Action
   return (
     <div className="space-y-5">
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className={`stat-icon ${info.accent}`}>
             <Icon className="h-5 w-5" strokeWidth={2} />
           </div>
           <div>
             <h1 className="text-2xl font-black tracking-tight text-slate-900">{info.title}</h1>
             <p className="text-sm text-slate-500">
-              {(stage === "BATCH_NO" ? waitingCount : rows.length).toLocaleString()} batch{(stage === "BATCH_NO" ? waitingCount : rows.length) === 1 ? "" : "es"}
-              {stage !== "BATCH_NO" && isFiltered ? ` of ${everyRow.length}` : ""} waiting. {info.blurb}
+              {(listsDone ? waitingCount : rows.length).toLocaleString()} batch{(listsDone ? waitingCount : rows.length) === 1 ? "" : "es"}
+              {!listsDone && isFiltered ? ` of ${everyRow.length}` : ""} waiting{listsDone && everyRow.length > waitingCount ? ` (${everyRow.length} listed, including the ones already done)` : ""}. {info.blurb}
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download} title="Downloads the rows that match the filters above">
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -123,10 +127,11 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
               <thead>
                 <tr className="border-b border-slate-100 text-left text-micro font-bold uppercase tracking-wide text-slate-400">
                   <th className="px-4 py-2.5">Batch</th>
+                  <th className="px-4 py-2.5">PO Number</th>
                   <th className="px-4 py-2.5">Product</th>
-                  {showPlant && <th className="px-4 py-2.5">Plant</th>}
+                  <th className="px-4 py-2.5">Location</th>
                   <th className="px-4 py-2.5 text-right">Quantity</th>
-                  <th className="px-4 py-2.5">{stage === "INDENT_ISSUE" ? "Indent" : stage === "BATCH_NO" ? "Indent signed" : stage === "DISPENSING" ? "Material" : "Dispensed"}</th>
+                  <th className="px-4 py-2.5">{stage === "INDENT_ISSUE" ? "Indent" : stage === "BATCH_NO" ? "Indent signed" : stage === "DISPENSING" ? "Material" : stage === "RECEIVE" ? "On its way" : "Dispensed"}</th>
                   <th className="px-4 py-2.5 text-right">Action</th>
                 </tr>
               </thead>
@@ -138,21 +143,30 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
                     <Fragment key={r.id}>
                       <tr className="border-b border-slate-50 align-top">
                         <td className="px-4 py-2.5">{r.batchNo ? <span className="font-mono font-black text-orange-800">{r.batchNo}</span> : <span className="text-slate-400">Batch {i + 1 + (pg.page - 1) * pg.pageSize}</span>}</td>
+                        <td className="px-4 py-2.5 font-mono font-bold text-slate-700">{r.poNumber ?? "—"}</td>
                         <td className="px-4 py-2.5 font-bold text-slate-800">
                           {r.productName}
                           <span className="block text-micro font-normal text-slate-400">
-                            {r.poNumber ?? "—"} · <CustomerName name={r.customerName} />
+                            <CustomerName name={r.customerName} />
                           </span>
                         </td>
-                        {showPlant && <td className="px-4 py-2.5 text-slate-600">{r.plant?.name ?? "—"}</td>}
+                        <td className="px-4 py-2.5 text-slate-600">{r.plant?.name ?? "—"}</td>
                         <td className="px-4 py-2.5 text-right font-mono text-slate-700">
                           {fmtQty(r.plannedQty)} {r.unit}
                         </td>
                         <td className="px-4 py-2.5 text-slate-600">
-                          {stage === "INDENT_ISSUE" && (
+                          {stage === "INDENT_ISSUE" && r.prepStageId === "INDENT_ISSUE" && (
                             <>
                               <span className="text-slate-400">Not signed</span>
                               <span className="block text-micro text-slate-400">{(r.requirements ?? []).length} material{(r.requirements ?? []).length === 1 ? "" : "s"}{notEnough > 0 ? ` · ${notEnough} short` : ""}</span>
+                            </>
+                          )}
+                          {stage === "INDENT_ISSUE" && r.prepStageId !== "INDENT_ISSUE" && (
+                            <>
+                              <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Signed {day(r.indentSignedAt)}</span>
+                              <span className="block text-micro text-slate-400">
+                                {r.prodIndentSlipSign ? `Slip ${r.prodIndentSlipSign} · ` : ""}Now at {r.batchStatus === "COMPLETED" ? "Completed" : ({ BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", READY: "Production" } as Record<string, string>)[r.prepStageId] ?? r.prepStageId}
+                              </span>
                             </>
                           )}
                           {stage === "BATCH_NO" && (
@@ -166,7 +180,7 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
                                 <>
                                   <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Allocated {day(r.batchNoAllocatedAt)}</span>
                                   <span className="block text-micro text-slate-400">
-                                    Now at {r.batchStatus === "COMPLETED" ? "Completed" : ({ DISPENSING: "Dispensing", LINE_CLEARANCE: "Line Clearance", READY: "Production" } as Record<string, string>)[r.prepStageId] ?? r.prepStageId}
+                                    Now at {r.batchStatus === "COMPLETED" ? "Completed" : ({ DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", READY: "Production" } as Record<string, string>)[r.prepStageId] ?? r.prepStageId}
                                   </span>
                                 </>
                               )}
@@ -178,21 +192,20 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
                               {notEnough > 0 ? ` · ${notEnough} short` : " · all available"}
                             </span>
                           )}
-                          {stage === "LINE_CLEARANCE" && (
-                            <>
-                              {day(r.dispensedAt)}
-                              {r.lineClearanceStatus && <span className="block text-micro font-bold text-amber-600">{r.lineClearanceStatus}</span>}
-                            </>
+                          {stage === "RECEIVE" && (
+                            <span className="pill border-sky-200 bg-sky-50 text-sky-700">
+                              {(r.receiveLines ?? []).length} material{(r.receiveLines ?? []).length === 1 ? "" : "s"} to confirm
+                            </span>
                           )}
                         </td>
                         <td className="px-4 py-2.5 text-right">
                           {stage === "BATCH_NO" && canAct ? (
                             r.prepStageId === "BATCH_NO" ? <AllocateCell row={r} /> : <CorrectCell row={r} />
-                          ) : stage === "BATCH_NO" ? (
+                          ) : stage === "BATCH_NO" || (stage === "INDENT_ISSUE" && r.prepStageId !== "INDENT_ISSUE") ? (
                             <span className="text-slate-400">—</span>
                           ) : (
                             <button type="button" className="btn-ghost btn-sm" onClick={() => setOpenId(open ? null : r.id)}>
-                              {canAct ? (stage === "INDENT_ISSUE" ? "Sign indent" : stage === "DISPENSING" ? "Dispense" : "Clear the line") : "View"}{" "}
+                              {canAct ? (stage === "INDENT_ISSUE" ? "Sign indent" : stage === "DISPENSING" ? "Dispense" : stage === "RECEIVE" ? "Receive material" : "View") : "View"}{" "}
                               <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} strokeWidth={2.5} />
                             </button>
                           )}
@@ -203,7 +216,7 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
                           <td colSpan={cols} className="whitespace-normal bg-slate-50/70 px-4 py-4">
                             {stage === "INDENT_ISSUE" && <IndentForm row={r} canAct={canAct} onDone={() => setOpenId(null)} />}
                             {stage === "DISPENSING" && <DispenseForm row={r} canAct={canAct} onDone={() => setOpenId(null)} />}
-                            {stage === "LINE_CLEARANCE" && <LineClearanceForm row={r} canAct={canAct} onDone={() => setOpenId(null)} />}
+                            {stage === "RECEIVE" && <ReceiveForm row={r} canAct={canAct} onDone={() => setOpenId(null)} />}
                           </td>
                         </tr>
                       )}
@@ -256,15 +269,19 @@ function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { 
               )}
               {reqs.map((m) => (
                 <tr key={m.itemId}>
-                  <td className="px-3 py-1.5 font-bold text-slate-700">{m.itemName}</td>
+                  <td className="px-3 py-1.5 font-bold text-slate-700">
+                    {m.itemName}
+                    {m.refusedNote && <span className="block font-normal text-micro text-rose-600">Production refused it: {m.refusedNote}</span>}
+                  </td>
                   <td className="px-3 py-1.5 text-slate-500">{m.category}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">
                     {fmtQty(m.requiredQty)} {m.unit}
                   </td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.plantFreeQty)}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.dayStoreQty)}</td>
-                  <td className="px-3 py-1.5">{m.enough ? <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Available</span> : <span className="pill border-amber-200 bg-amber-50 text-amber-700">Short</span>}</td>
-                  {weighing && (
+                  <td className="px-3 py-1.5">{m.dispensed ? <span className="pill border-sky-200 bg-sky-50 text-sky-700">Already dispensed</span> : m.enough ? <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Available</span> : <span className="pill border-amber-200 bg-amber-50 text-amber-700">Short</span>}</td>
+                  {weighing && m.dispensed && <td className="px-3 py-1.5 text-slate-300">—</td>}
+                  {weighing && !m.dispensed && (
                     <td className="px-3 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <input
@@ -351,22 +368,28 @@ function AllocateCell({ row }: { row: BatchPrepRow }) {
       toast.error(err instanceof ApiError ? err.message : "Could not allocate the batch number");
     }
   }
-  return (
-    <div className="flex items-center justify-end gap-2">
-      {typing && <input className="field !h-8 !w-40 !py-0 font-mono !text-xs" placeholder="Type a number" value={typed} onChange={(e) => setTyped(e.target.value)} />}
-      {typing ? (
+  // One Action menu with both ways of giving the number; typing your own swaps it for a small input.
+  if (typing) {
+    return (
+      <div className="flex items-center justify-end gap-2">
+        <input className="field !h-8 !w-40 !py-0 font-mono !text-xs" placeholder="Type a number" value={typed} autoFocus onChange={(e) => setTyped(e.target.value)} />
         <button type="button" className="btn-primary btn-sm" disabled={act.isPending || !typed.trim()} onClick={() => go(typed.trim())}>
           Allocate
         </button>
-      ) : (
-        <button type="button" className="btn-primary btn-sm" disabled={act.isPending} onClick={() => go()}>
-          {act.isPending ? "Allocating…" : "Generate batch no."}
+        <button type="button" className="btn-ghost btn-sm" onClick={() => setTyping(false)}>
+          Cancel
         </button>
-      )}
-      <button type="button" className="text-tiny font-bold text-slate-500 hover:text-brand-600" onClick={() => setTyping((t) => !t)}>
-        {typing ? "Use serial" : "Type my own"}
-      </button>
-    </div>
+      </div>
+    );
+  }
+  return (
+    <ActionMenu
+      busy={act.isPending}
+      items={[
+        { key: "generate", label: "Generate batch no.", icon: Hash, tone: "primary", onClick: () => void go() },
+        { key: "type", label: "Type my own number", icon: Pencil, onClick: () => setTyping(true) },
+      ]}
+    />
   );
 }
 
@@ -376,7 +399,7 @@ function CorrectCell({ row }: { row: BatchPrepRow }) {
   const correct = useCorrectBatchNo();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(row.batchNo ?? "");
-  // Until the Day Store dispenses the batch the number can be corrected; once Dispensing is done (the batch is at Line Clearance, in production or completed) it is locked.
+  // Until the Day Store dispenses the batch the number can be corrected; once Dispensing is done (the batch is in production or completed) it is locked.
   if (row.prepStageId !== "DISPENSING") return <span className="text-micro font-bold text-slate-400" title="Dispensing is already done for this batch, so its number can no longer be changed">Locked: Dispensing is done</span>;
   async function save() {
     try {
@@ -401,6 +424,114 @@ function CorrectCell({ row }: { row: BatchPrepRow }) {
     <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(true)}>
       Change number
     </button>
+  );
+}
+
+// Production confirms what the Day Store sent to the Plant for this batch, material by material.
+type ReceiveChoice = { action: "RECEIVE" | "REFUSE"; qty: string; note: string };
+
+export function ReceiveForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: boolean; onDone: () => void }) {
+  const toast = useToast();
+  const act = useBatchPrepAction("receive");
+  const lines = row.receiveLines ?? [];
+  const [choice, setChoice] = useState<Record<string, ReceiveChoice>>({});
+  const [error, setError] = useState<string | null>(null);
+  const of = (lineId: string, sent: number): ReceiveChoice => choice[lineId] ?? { action: "RECEIVE", qty: String(sent), note: "" };
+  const set = (lineId: string, sent: number, patch: Partial<ReceiveChoice>) => setChoice((c) => ({ ...c, [lineId]: { ...of(lineId, sent), ...patch } }));
+
+  async function submit() {
+    setError(null);
+    const body = lines.map((l) => {
+      const c = of(l.lineId, l.sentQty);
+      const qty = Number(c.qty);
+      if (c.action === "REFUSE") return { lineId: l.lineId, action: "REFUSE" as const, note: c.note.trim() };
+      return { lineId: l.lineId, action: "RECEIVE" as const, ...(qty < l.sentQty - 1e-9 ? { receivedQty: qty } : {}), note: c.note.trim() || undefined };
+    });
+    for (const [i, l] of lines.entries()) {
+      const c = of(l.lineId, l.sentQty);
+      const qty = Number(c.qty);
+      if (c.action === "REFUSE" && c.note.trim().length < 3) return setError(`Write why ${l.itemName} is refused.`);
+      if (c.action === "RECEIVE" && (!(qty > 0) || qty > l.sentQty + 1e-9)) return setError(`${l.itemName}: enter a quantity up to ${fmtQty(l.sentQty)}.`);
+      if (c.action === "RECEIVE" && qty < l.sentQty - 1e-9 && c.note.trim().length < 3) return setError(`${l.itemName}: only ${fmtQty(qty)} of ${fmtQty(l.sentQty)} arrived - write what happened to the rest.`);
+      void i;
+    }
+    try {
+      const res = await act.mutateAsync({ id: row.id, lines: body });
+      const refused = body.filter((b) => b.action === "REFUSE").length;
+      toast.success(res.prepStageId === "READY" ? `${row.batchNo ?? "Batch"}: material received. Production can start it.` : refused ? "Refused material goes back to the Day Store, which dispenses it again." : "Saved.");
+      onDone();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not save");
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="label">Material sent for {row.batchNo ?? "this batch"}</p>
+      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead className="bg-slate-50 text-micro font-bold uppercase tracking-wide text-slate-400">
+            <tr>
+              <th className="px-3 py-2 text-left">Material</th>
+              <th className="px-3 py-2 text-left">Type</th>
+              <th className="px-3 py-2 text-right">Needed (weighed)</th>
+              <th className="px-3 py-2 text-right">Sent</th>
+              <th className="px-3 py-2 text-left">What happened</th>
+              <th className="px-3 py-2 text-left">Received</th>
+              <th className="px-3 py-2 text-left">Note</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {lines.map((l) => {
+              const c = of(l.lineId, l.sentQty);
+              const short = c.action === "RECEIVE" && Number(c.qty) < l.sentQty - 1e-9;
+              return (
+                <tr key={l.lineId}>
+                  <td className="px-3 py-1.5 font-bold text-slate-700">{l.itemName}</td>
+                  <td className="px-3 py-1.5 text-slate-500">{l.category}</td>
+                  <td className="px-3 py-1.5 text-right font-mono text-slate-700">
+                    {fmtQty(l.givenQty)} {l.unit}
+                  </td>
+                  <td className="px-3 py-1.5 text-right font-mono font-bold text-sky-700">
+                    {fmtQty(l.sentQty)} {l.unit}
+                  </td>
+                  <td className="px-3 py-1.5">
+                    <select className="field !h-8 !w-28 !py-0 !text-xs" value={c.action} disabled={!canAct} onChange={(e) => set(l.lineId, l.sentQty, { action: e.target.value as ReceiveChoice["action"] })}>
+                      <option value="RECEIVE">Receive</option>
+                      <option value="REFUSE">Refuse</option>
+                    </select>
+                  </td>
+                  <td className="px-3 py-1.5">
+                    {c.action === "RECEIVE" ? (
+                      <div className="flex items-center gap-1.5">
+                        <input type="number" min="0" step="any" className="field !h-8 !w-24 !py-0 font-mono !text-xs" value={c.qty} disabled={!canAct} onChange={(e) => set(l.lineId, l.sentQty, { qty: e.target.value })} />
+                        <span className="text-micro text-slate-400">{l.unit}</span>
+                      </div>
+                    ) : (
+                      <span className="text-slate-300">goes back to the Day Store</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5">
+                    {c.action === "REFUSE" || short ? (
+                      <input className="field !h-8 !w-56 !py-0 !text-xs" placeholder={c.action === "REFUSE" ? "Why is it refused? *" : "What happened to the rest? *"} value={c.note} disabled={!canAct} onChange={(e) => set(l.lineId, l.sentQty, { note: e.target.value })} />
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-micro text-slate-400">A material you receive joins the Plant&apos;s stock. A shortage is kept as a recorded loss. A refused material goes back to the Day Store, and the batch returns to Dispensing for that material only.</p>
+      {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
+      {canAct && (
+        <button type="button" className="btn-primary btn-sm" disabled={act.isPending || lines.length === 0} onClick={submit}>
+          <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> {act.isPending ? "Saving…" : "Confirm"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -430,7 +561,7 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
     if (unexplained) return setError(`Write why ${unexplained.itemName} was weighed different from the plan.`);
     try {
       await act.mutateAsync({ id: row.id, rmDispensingDate: rmDate, pmIssuedDate: pmDate, dispensingRemarks: remarks || undefined, grnNo: grn || undefined, ...(lines.length ? { lines } : {}) });
-      toast.success(`${row.batchNo ?? "Batch"} dispensed. QA clears the line next.`);
+      toast.success(`${row.batchNo ?? "Batch"} dispensed.`);
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not dispense this batch");
@@ -470,74 +601,6 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
         <RequirementsTable row={row} weighing={{ values: weights, onChange: setWeight, disabled: !canAct }} />
         <p className="mt-1 text-micro text-slate-400">The Plant gives what it already holds; the Day Store issues the rest to the Plant when you dispense. If you weighed something different from the plan, enter it - leave it blank and the plan quantity is taken as given.</p>
       </div>
-    </div>
-  );
-}
-
-function LineClearanceForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: boolean; onDone: () => void }) {
-  const toast = useToast();
-  const act = useBatchPrepAction("line-clearance");
-  const [status, setStatus] = useState(row.lineClearanceStatus ?? "Approved");
-  const [remarks, setRemarks] = useState(row.lineClearanceRemarks ?? "");
-  const [checks, setChecks] = useState<Record<string, boolean>>(() => Object.fromEntries(row.lineClearanceChecklist.map((i) => [i.key, i.ok])));
-  const [error, setError] = useState<string | null>(null);
-  const left = row.lineClearanceChecklist.filter((i) => !checks[i.key]).length;
-  async function submit() {
-    setError(null);
-    if (status !== "Approved" && !remarks.trim()) return setError("Write the remark for Not Approved / Hold.");
-    if (status === "Approved" && left > 0) return setError(`Tick every checklist item before approving (${left} left).`);
-    try {
-      await act.mutateAsync({ id: row.id, lineClearanceStatus: status, lineClearanceRemarks: remarks.trim() || undefined, lineClearanceChecks: checks });
-      toast.success(status === "Approved" ? `${row.batchNo} is cleared. Production can start it.` : "Saved. The batch stays here until it is Approved.");
-      onDone();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save");
-    }
-  }
-  return (
-    <div className="flex flex-wrap items-end gap-3">
-      <div className="w-full rounded-lg border border-slate-200 bg-white">
-        <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
-          <p className="text-micro font-bold uppercase tracking-wide text-slate-500">Line Clearance checklist (BMR 4.0)</p>
-          <div className="flex items-center gap-3">
-            <span className={`text-micro font-bold ${left === 0 ? "text-emerald-600" : "text-amber-600"}`}>{left === 0 ? "All items ticked" : `${left} of ${row.lineClearanceChecklist.length} left`}</span>
-            {canAct && (
-              <button type="button" className="text-micro font-bold text-brand-600 hover:underline" onClick={() => setChecks(Object.fromEntries(row.lineClearanceChecklist.map((i) => [i.key, left > 0])))}>
-                {left > 0 ? "Tick all" : "Clear all"}
-              </button>
-            )}
-          </div>
-        </div>
-        <ul className="divide-y divide-slate-100">
-          {row.lineClearanceChecklist.map((i, n) => (
-            <li key={i.key}>
-              <label className={`flex items-start gap-2.5 px-3 py-1.5 text-xs ${canAct ? "cursor-pointer hover:bg-slate-50" : ""}`}>
-                <input type="checkbox" className="mt-0.5 h-3.5 w-3.5 accent-emerald-600" checked={!!checks[i.key]} disabled={!canAct} onChange={(e) => setChecks((c) => ({ ...c, [i.key]: e.target.checked }))} />
-                <span className="font-mono text-slate-400">{n + 1}.</span>
-                <span className={checks[i.key] ? "text-slate-700" : "text-slate-500"}>{i.label}</span>
-              </label>
-            </li>
-          ))}
-        </ul>
-      </div>
-      <div className="w-44">
-        <label className="mb-0.5 block text-micro text-slate-400">Line Clearance</label>
-        <select className="field !py-1.5 text-xs" value={status} disabled={!canAct} onChange={(e) => setStatus(e.target.value)}>
-          <option>Approved</option>
-          <option>Not Approved</option>
-          <option>Hold</option>
-        </select>
-      </div>
-      <div className="min-w-[16rem] flex-1">
-        <label className="mb-0.5 block text-micro text-slate-400">Remarks</label>
-        <input className="field !py-1.5 text-xs" value={remarks} disabled={!canAct} onChange={(e) => setRemarks(e.target.value)} />
-      </div>
-      {canAct && (
-        <button type="button" className="btn-primary btn-sm" disabled={act.isPending} onClick={submit}>
-          <ShieldCheck className="h-3.5 w-3.5" strokeWidth={2.5} /> {act.isPending ? "Saving…" : "Save"}
-        </button>
-      )}
-      {error && <p className="w-full text-xs font-bold text-rose-600">{error}</p>}
     </div>
   );
 }

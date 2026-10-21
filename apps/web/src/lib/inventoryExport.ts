@@ -786,6 +786,7 @@ export function exportQuarantineReport(rows: QuarantineListRow[]) {
 // Finished Goods - one batch / lot at or past the FG Store with stock left.
 export interface FgListRow {
   id: string;
+  itemId: string;
   kind: "BATCH" | "COMBINED_LOT";
   poNumber: string | null;
   productName: string;
@@ -797,6 +798,45 @@ export interface FgListRow {
   dispatchedQty: number;
   onHandQty: number;
   fgStoreDate: string | null;
+}
+
+// Finished Goods, product-wise - one PO line (product) with all its batches / lots added up.
+export interface FgProductRow {
+  itemId: string;
+  poNumber: string | null;
+  productName: string;
+  customerName: string;
+  plantName: string | null;
+  unit: string;
+  batchCount: number;
+  producedQty: number;
+  dispatchedQty: number;
+  onHandQty: number;
+  fgStoreDate: string | null;
+  batches: FgListRow[];
+}
+
+export function exportFgProductReport(rows: FgProductRow[]) {
+  const now = Date.now();
+  download(
+    "Finished Goods (product-wise)",
+    rows.map((r) => ({
+      "PO Number": r.poNumber ?? "",
+      Product: r.productName,
+      Customer: r.customerName,
+      "Customer Type": customerTypeLabel(r.customerName),
+      Plant: r.plantName ?? "",
+      Batches: r.batchCount,
+      "Batch / Lot": r.batches.map((b) => b.label).join(", "),
+      Unit: r.unit,
+      "Produced Qty": r.producedQty,
+      "Dispatched Qty": r.dispatchedQty,
+      "On Hand Qty": r.onHandQty,
+      "Oldest in FG Store Since": day(r.fgStoreDate),
+      "Aging (Days)": r.fgStoreDate ? Math.max(0, Math.floor((now - new Date(r.fgStoreDate).getTime()) / 86_400_000)) : "",
+    })),
+    `FLS_Finished_Goods_Product_wise_${todayStamp()}.xlsx`,
+  );
 }
 
 export function exportFgListReport(rows: FgListRow[]) {

@@ -10,6 +10,8 @@ import { useTileFilters } from "../lib/tileFilters";
 import { AgingCell } from "../components/AgingCell";
 import { EmptyState } from "../components/EmptyState";
 import { ProductActions } from "./PpicPlanningDetailPage";
+import { RndBomControl, SlotPill } from "../components/RndBomControl";
+import { useAuth } from "../lib/auth";
 import type { MaterialPlanningProduct } from "../lib/types";
 import { CustomerName } from "../components/CustomerName";
 
@@ -28,6 +30,7 @@ interface ReadyRow {
 // Planning). A product doesn't wait for the other products on its PO. Computed,
 // searched and paged on the server; only the page on screen is loaded here.
 export function PpicReadyPosPage() {
+  const { hasRole } = useAuth();
   const tileFilters = useTileFilters();
   const paged = usePagedList<ReadyRow>({ key: ["purchase-orders", "ppic", "ready-products"], path: "/api/ppic/ready-products", params: tileFilters.params, noSearch: true });
   const setHold = useSetItemMaterialHold();
@@ -96,7 +99,10 @@ export function PpicReadyPosPage() {
                     </Link>
                   </td>
                   <td className="min-w-[120px] px-3 py-2.5 text-slate-600"><CustomerName name={product.customerName} /></td>
-                  <td className="min-w-[150px] px-3 py-2.5 text-slate-700">{product.productName}</td>
+                  <td className="min-w-[150px] px-3 py-2.5 text-slate-700">
+                    {product.productName}
+                    {product.activeBomSlot !== "DISPLAY" && <span className="ml-1.5 align-middle"><SlotPill slot={product.activeBomSlot} /></span>}
+                  </td>
                   <td className="px-3 py-2.5 text-slate-500">{product.productCategory ?? "—"}</td>
                   <td className="px-3 py-2.5">
                     <AgingCell since={sinceAt} />
@@ -120,6 +126,8 @@ export function PpicReadyPosPage() {
                   <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">{orderDate?.slice(0, 10) ?? "—"}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 text-slate-500">{expectedDeliveryDate?.slice(0, 10) ?? "—"}</td>
                   <td className="sticky right-0 bg-white px-3 py-2.5 text-right shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.12)] group-hover:bg-slate-50">
+                    {hasRole("RND") && <RndBomControl product={product} showSend />}
+                    {hasRole("PPIC") && (
                     <ProductActions
                       stage="ready"
                       poId={product.purchaseOrderId}
@@ -135,6 +143,7 @@ export function PpicReadyPosPage() {
                       onToggleHold={toggleHold}
                       busy={setHold.isPending}
                     />
+                    )}
                   </td>
                 </tr>
               ))}

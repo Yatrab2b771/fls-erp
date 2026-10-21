@@ -36,7 +36,7 @@ export const poInclude = {
           id: true,
           combinedLot: { select: { currentStageId: true, dispatchDate: true, dispatchedQty: true } },
           // fgShipments: what Dispatch has sent to the customer from this batch's finished goods (the Warehouse transfers are not a sale).
-          productionBatches: { select: { currentStageId: true, prepStageId: true, dispatchDate: true, dispatchedQty: true, handedOverToDispatchAt: true, fgShipments: { where: { type: "CUSTOMER", status: "DISPATCHED", deletedAt: null }, select: { quantity: true, dispatchDate: true } } } },
+          productionBatches: { select: { currentStageId: true, prepStageId: true, dispatchDate: true, dispatchedQty: true, handedOverToDispatchAt: true, fgShipments: { where: { type: "CUSTOMER", status: "DISPATCHED", deletedAt: null }, select: { quantity: true, dispatchDate: true } }, customerReturns: { select: { quantity: true } } } },
         },
       },
     },
@@ -96,9 +96,13 @@ export function computeItemDispatch(item: PoItemWithBatches): { dispatchedQty: n
       dispatchedQty += s.quantity;
       if (s.dispatchDate) dispatchDates.push(s.dispatchDate);
     }
+    // What the customer sent back is not with the customer any more
+    for (const r of batch.customerReturns) dispatchedQty -= r.quantity;
   }
 
-  return { dispatchedQty: round3(dispatchedQty), isDone: round3(dispatchedQty) >= round3(item.quantity) - 1e-6, dispatchDates };
+  // A product Production closed short ends at what it made (closedShortQty), not at the ordered quantity
+  const requiredQty = item.closedShortAt && item.closedShortQty != null ? item.closedShortQty : item.quantity;
+  return { dispatchedQty: round3(dispatchedQty), isDone: round3(dispatchedQty) >= round3(requiredQty) - 1e-6, dispatchDates };
 }
 
 export function computeCompletion(po: PoWithBatches): { isCompleted: boolean; completionDate: string | null; daysTaken: number | null } {

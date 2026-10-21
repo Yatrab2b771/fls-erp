@@ -12,7 +12,7 @@ import { useClientPaging } from "../lib/useClientPaging";
 import { ClientPager } from "../components/Pagination";
 import { ActionMenu, type ActionMenuItem } from "../components/ActionMenu";
 import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
-import { UtilizationSheet } from "../components/PlansBoardPanels";
+import { UtilizationFillForm } from "../components/UtilizationFillForm";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { fmtQty } from "../lib/format";
@@ -27,9 +27,10 @@ const toLocalInput = (iso: string | null) => {
 };
 const isCompleted = (status: string | null) => String(status ?? "").trim().toLowerCase() === "completed";
 
-// Production's Packaging tile: the batches that have passed Bulk QC. Each row is one batch number with its own packaging production sheet
-// (shift, manpower, start and end date-time, status, remarks) and the PM Utilization (label, tub, carton...). The end of Packaging (status
-// Completed, end time, remarks) opens only once every plan PM has its quantity; then the batch is handed over to QA.
+// Production's Packaging tile: the batches that have passed Bulk QC. Each row is one batch number. First the RM Utilization of the whole batch is
+// filled (produced, waste, reject, sample; every material fills itself from the plan and can be edited), and only then Packaging opens: its own
+// production sheet (shift, manpower, start and end date-time, status, remarks) and, after the packing, the PM Utilization (label, tub, carton...).
+// The end of Packaging (status Completed, end time, remarks) opens only once every plan PM has its quantity; then the batch is handed over to QA.
 export function PackagingPage() {
   const { hasRole } = useAuth();
   const canAct = hasRole("PRODUCTION", "ADMIN");
@@ -65,6 +66,7 @@ export function PackagingPage() {
       "Start": b.packagingStartAt ? new Date(b.packagingStartAt).toLocaleString("en-GB") : "",
       "End": b.packagingEndAt ? new Date(b.packagingEndAt).toLocaleString("en-GB") : "",
       "Packaging Status": b.packagingStatus ?? "",
+      "RM Utilization": b.utilization ? (b.utilization.complete ? "Done" : "Pending") : "",
       "PM Utilization": b.utilization ? `${b.utilization.pm.logged} of ${b.utilization.pm.required}` : "",
       Remarks: b.packagingRemarks ?? "",
     }));
@@ -79,8 +81,8 @@ export function PackagingPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-sky-500/10 text-sky-600">
             <PackageCheck className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -88,11 +90,11 @@ export function PackagingPage() {
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Packaging</h1>
             <p className="text-sm text-slate-500">
               {rows.length.toLocaleString()} batch{rows.length === 1 ? "" : "es"}
-              {isFiltered ? ` of ${everyRow.length}` : ""} that passed Bulk QC. Fill the packaging sheet and the PM Utilization of each batch, then hand it over to QA.
+              {isFiltered ? ` of ${everyRow.length}` : ""} that passed Bulk QC. Fill the RM Utilization first, then the packaging sheet and the PM Utilization of each batch, then hand it over to QA.
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -112,6 +114,7 @@ export function PackagingPage() {
                   <th className="px-3 py-2.5">Batch No</th>
                   <th className="px-3 py-2.5">Product</th>
                   <th className="px-3 py-2.5 text-right">Qty</th>
+                  <th className="px-3 py-2.5">RM Utilization</th>
                   <th className="px-3 py-2.5">Shift</th>
                   <th className="px-3 py-2.5">Manpower</th>
                   <th className="px-3 py-2.5">Start date &amp; time</th>
@@ -139,7 +142,7 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
   const toast = useToast();
   const update = useUpdatePackaging();
   const handOver = useHandOverBatch();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!(batch.utilization ? batch.utilization.complete : true));
   const [v, setV] = useState({
     packagingShift: batch.packagingShift ?? "",
     packagingManpowerCount: batch.packagingManpowerCount != null ? String(batch.packagingManpowerCount) : "",
@@ -151,9 +154,12 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
   const set = (k: keyof typeof v) => (e: { target: { value: string } }) => setV((cur) => ({ ...cur, [k]: e.target.value }));
   const pm = batch.utilization?.pm;
   const pmDone = pm ? pm.complete : true;
+  // Packaging opens only once the RM Utilization of the whole batch is filled.
+  const rmDone = batch.utilization ? batch.utilization.complete : true;
   const startFilled = !!batch.packagingShift && !!batch.packagingManpowerCount && !!batch.packagingStartAt;
-  const finishLocked = !canAct || !pmDone || !startFilled;
-  const tip = !startFilled ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !pmDone ? "Fill the PM Utilization first" : undefined;
+  const sheetLocked = !canAct || !rmDone;
+  const finishLocked = sheetLocked || !pmDone || !startFilled;
+  const tip = !rmDone ? "Fill the RM Utilization first" : !startFilled ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !pmDone ? "Fill the PM Utilization first" : undefined;
   const done = isCompleted(batch.packagingStatus);
   const item = batch.preProduction.purchaseOrderItem;
 
@@ -199,20 +205,25 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
           {fmtQty(batch.plannedQty)} {item.unit}
         </td>
         <td className="px-3 py-1.5">
-          <select disabled={!canAct} className={`${CELL} w-24`} value={v.packagingShift} onChange={set("packagingShift")}>
+          <button type="button" onClick={() => setOpen((o) => !o)} className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-tiny font-bold ${rmDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`} title={rmDone ? "RM Utilization is saved (editable until handover)" : "Fill the RM Utilization of the whole batch first"}>
+            {rmDone ? "Done" : "Fill"} {open ? "▴" : "▾"}
+          </button>
+        </td>
+        <td className="px-3 py-1.5">
+          <select disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-24`} value={v.packagingShift} onChange={set("packagingShift")}>
             <option value="">—</option>
             <option value="Day">Day</option>
             <option value="Night">Night</option>
           </select>
         </td>
         <td className="px-3 py-1.5">
-          <input disabled={!canAct} className={`${CELL} w-20 font-mono`} type="number" min="1" step="1" value={v.packagingManpowerCount} onChange={set("packagingManpowerCount")} />
+          <input disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-20 font-mono`} type="number" min="1" step="1" value={v.packagingManpowerCount} onChange={set("packagingManpowerCount")} />
         </td>
         <td className="px-3 py-1.5">
-          <input disabled={!canAct} className={`${CELL} w-44`} type="datetime-local" value={v.packagingStartAt} onChange={set("packagingStartAt")} />
+          <input disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-44`} type="datetime-local" value={v.packagingStartAt} onChange={set("packagingStartAt")} />
         </td>
         <td className="px-3 py-1.5">
-          <select disabled={!canAct} title={isCompleted(v.packagingStatus) ? undefined : tip && v.packagingStatus ? undefined : undefined} className={`${CELL} w-40`} value={v.packagingStatus} onChange={set("packagingStatus")}>
+          <select disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-40`} value={v.packagingStatus} onChange={set("packagingStatus")}>
             <option value="">—</option>
             {PACKAGING_STATUSES.map((s) => (
               <option key={s} value={s} disabled={isCompleted(s) && finishLocked}>
@@ -241,14 +252,21 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
       </tr>
       {open && (
         <tr className="bg-slate-50/70">
-          <td colSpan={10} className="whitespace-normal px-4 py-3">
-            <div className="space-y-3">
+          <td colSpan={11} className="whitespace-normal px-4 py-3">
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <p className="text-micro font-bold uppercase tracking-wide text-brand-700">1 · RM Utilization (whole batch, before Packaging)</p>
+                {batch.utilization ? <UtilizationFillForm batch={batch} category="RM" plantId={plan?.plant?.id} canEdit={canAct} /> : <p className="text-xs text-slate-400">Loading…</p>}
+              </div>
               <div className="flex items-center gap-3">
-                <label className="text-xs font-bold text-slate-600">Remarks</label>
-                <input disabled={finishLocked} title={tip} className="field !h-8 flex-1 !py-0 !text-xs" value={v.packagingRemarks} onChange={set("packagingRemarks")} placeholder={finishLocked ? "Opens once the PM Utilization is complete" : ""} />
+                <label className="text-xs font-bold text-slate-600">Packaging remarks</label>
+                <input disabled={finishLocked} title={tip} className="field !h-8 flex-1 !py-0 !text-xs" value={v.packagingRemarks} onChange={set("packagingRemarks")} placeholder={finishLocked ? "Opens once the RM and PM Utilization are complete" : ""} />
                 {done && <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700"><Check className="h-3 w-3" strokeWidth={2.5} /> Completed</span>}
               </div>
-              {plan ? <UtilizationSheet row={plan} batch={batch} category="PM" /> : <p className="text-xs text-slate-400">Loading the plan's material...</p>}
+              <div className="space-y-1.5">
+                <p className="text-micro font-bold uppercase tracking-wide text-brand-700">2 · PM Utilization (after Packaging)</p>
+                {!rmDone ? <p className="text-xs text-slate-400">Fill the RM Utilization first.</p> : batch.utilization ? <UtilizationFillForm batch={batch} category="PM" plantId={plan?.plant?.id} canEdit={canAct} /> : null}
+              </div>
             </div>
           </td>
         </tr>

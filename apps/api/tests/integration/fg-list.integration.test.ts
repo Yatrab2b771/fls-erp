@@ -65,3 +65,37 @@ describe("Finished Goods list - batches at or past the FG Store with stock left"
     expect((await request(app).get("/api/inventory/fg-list").set(authHeader(other))).status).toBe(403);
   });
 });
+
+describe("Finished Goods list - product-wise", () => {
+  it("adds up every batch of a product (and shows its batches), per product, with the same filters", async () => {
+    const { token: bd } = await createUser(["BD"]);
+    const { token, user } = await createUser(["STORE"]);
+    // One product made in three batches: 400 + 350 (100 of it dispatched) + 250 still at the Day Store (not in the FG stock)
+    const first = await fgBatch(bd, user.id, { po: "FGP-PO-1", product: "FGP Cocoa", customer: "FGP Customer", plant: "FGP Plant", stage: "DISPATCH_PLAN", produced: 400, fgDate: daysAgo(10), batchNo: "FGP-B1" });
+    const more = (batchNo: string, qty: number, stage: string, dispatched: number | null, fgDate: Date | null) =>
+      prisma.productionBatch.create({ data: { preProduction: { connect: { id: first.preProductionId } }, createdBy: { connect: { id: user.id } }, batchNo, plannedQty: qty, outputQty: qty, dispatchedQty: dispatched, currentStageId: stage as never, fgStoreReceivedDate: fgDate } });
+    await more("FGP-B2", 350, "DISPATCH_PLAN", 100, daysAgo(4));
+    await more("FGP-B3", 250, "PACKAGING", null, null);
+    // A second product of another customer
+    await fgBatch(bd, user.id, { po: "FGP-PO-2", product: "FGP Whey", customer: "FGP Other", stage: "DISPATCH_PLAN", produced: 120, fgDate: daysAgo(2), batchNo: "FGP-B4" });
+
+    const scope = "customer=FGP%20Customer&customer=FGP%20Other";
+    const res = await request(app).get(`/api/inventory/fg-list?${scope}&group=product`).set(authHeader(token));
+    expect(res.status).toBe(200);
+    expect(res.headers["x-total-count"]).toBe("2"); // two products, not four batches
+    const cocoa = res.body.find((r: { productName: string }) => r.productName === "FGP Cocoa");
+    expect(cocoa).toMatchObject({ poNumber: "FGP-PO-1", customerName: "FGP Customer", plantName: "FGP Plant", unit: "Kg", batchCount: 2, producedQty: 750, dispatchedQty: 100, onHandQty: 650 });
+    expect(cocoa.batches.map((b: { label: string }) => b.label).sort()).toEqual(["FGP-B1", "FGP-B2"]);
+    // The oldest batch in the FG Store sets the date
+    expect(cocoa.fgStoreDate.slice(0, 10)).toBe(daysAgo(10).toISOString().slice(0, 10));
+
+    // The filters still apply: only FGP-B2 -> the product shows with just that batch
+    const one = await request(app).get(`/api/inventory/fg-list?${scope}&group=product&batch=FGP-B2`).set(authHeader(token));
+    expect(one.body).toHaveLength(1);
+    expect(one.body[0]).toMatchObject({ batchCount: 1, producedQty: 350, onHandQty: 250 });
+
+    // The batch-wise list is unchanged
+    const batchWise = await request(app).get(`/api/inventory/fg-list?${scope}`).set(authHeader(token));
+    expect(batchWise.headers["x-total-count"]).toBe("3");
+  });
+});

@@ -3,7 +3,6 @@ import request from "supertest";
 import { createApp } from "../../src/app";
 import { authHeader, createUser } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
-import { BATCH_LINE_CLEARANCE_ITEMS } from "../../src/modules/batches/batch-checklists";
 
 const app = createApp();
 
@@ -73,14 +72,9 @@ describe("Batch-wise Hold: PPIC holds the product, Production holds the batches 
     expect(board.map((r) => r.id)).not.toContain(s.b2.id);
     expect((await s.heldList())!.batches.find((b) => b.id === s.b2.id)).toMatchObject({ held: true, canHold: false });
 
-    // A batch that is already READY (in production) cannot be held, and QA cannot open production of a held product
+    // A batch that is already READY (in production) cannot be held
     await prisma.productionBatch.update({ where: { id: s.b3.id }, data: { prepStageId: "READY" } });
     expect((await call(s.production, "patch", `/api/production-batches/${s.b3.id}/hold`, { held: true, reason: "late" })).status).toBe(409);
-    await prisma.productionBatch.update({ where: { id: s.b1.id }, data: { prepStageId: "LINE_CLEARANCE" } });
-    const allTicked = Object.fromEntries(BATCH_LINE_CLEARANCE_ITEMS.map((i) => [i.key, true]));
-    const clear = await call(s.qa, "post", `/api/production-batches/${s.b1.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceChecks: allTicked });
-    expect(clear.status).toBe(409);
-    expect(clear.body.error).toMatch(/on hold/i);
 
     // PPIC releases the product: Production is told, the batch hold stays until Production releases it
     expect((await s.hold(false)).status).toBe(200);

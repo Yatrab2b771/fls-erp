@@ -48,6 +48,7 @@ import { BdPlanningDetailPage } from "./pages/BdPlanningDetailPage";
 import { PoReviewPage } from "./pages/PoReviewPage";
 import { QcStagePage } from "./pages/QcStagePage";
 import { RndBomBoardPage } from "./pages/RndBomBoardPage";
+import { RndProductionBomPage } from "./pages/RndProductionBomPage";
 import { SampleRequestsPage } from "./pages/SampleRequestsPage";
 import { VisitingCardsPage } from "./pages/VisitingCardsPage";
 import { LeadsPage } from "./pages/LeadsPage";
@@ -90,8 +91,9 @@ import { AuditLogPage } from "./pages/AuditLogPage";
 import { RndPage } from "./pages/RndPage";
 import { RndStorePage } from "./pages/RndStorePage";
 import { RecycleStorePage } from "./pages/RecycleStorePage";
-import { StockAdjustmentsPage } from "./pages/StockAdjustmentsPage";
 import { RejectedStockPage } from "./pages/RejectedStockPage";
+import { ApprovedVendorsPage } from "./pages/ApprovedVendorsPage";
+import { CustomerReturnsPage } from "./pages/CustomerReturnsPage";
 import { LotsPage } from "./pages/LotsPage";
 
 export default function App() {
@@ -123,6 +125,7 @@ export default function App() {
           <Route path="/po-review/:id" element={<PoReviewPage />} />
           <Route path="/qc/:slug" element={<QcStagePage />} />
           <Route path="/bom-board" element={<RndBomBoardPage />} />
+          <Route path="/bom-production" element={<RndProductionBomPage />} />
           <Route path="/sample-requests" element={<SampleRequestsPage />} />
           <Route path="/sample-requests/new" element={<SampleRequestFormPage />} />
           <Route path="/sample-requests/:id" element={<SampleRequestDetailPage />} />
@@ -154,7 +157,8 @@ export default function App() {
           <Route path="/batch-indent" element={<BatchPrepPage stage="INDENT_ISSUE" />} />
           <Route path="/batch-no" element={<BatchPrepPage stage="BATCH_NO" />} />
           <Route path="/batch-dispensing" element={<BatchPrepPage stage="DISPENSING" />} />
-          <Route path="/batch-line-clearance" element={<BatchPrepPage stage="LINE_CLEARANCE" />} />
+          {/* Receiving a batch's material now happens on Material Received */}
+          <Route path="/batch-receive" element={<Navigate to="/material-received" replace />} />
           <Route path="/packaging" element={<PackagingPage />} />
           <Route path="/plant-stock" element={<PlantStockPage />} />
           <Route path="/material-received" element={<MaterialReceivedPage />} />
@@ -217,8 +221,15 @@ export default function App() {
           <Route path="/rnd" element={<RndPage />} />
           <Route path="/rnd-store" element={<RndStorePage />} />
           <Route path="/recycle-store" element={<RecycleStorePage />} />
-          <Route path="/stock-adjustments" element={<StockAdjustmentsPage />} />
+          <Route path="/stock-adjustments" element={<Navigate to="/" replace />} />
           <Route path="/rejected-stock" element={<RejectedStockPage />} />
+          <Route path="/approved-vendors" element={<ApprovedVendorsPage />} />
+          {/* A customer return, by department: Warehouse records it, QA decides, Production reworks, Dispatch places it, Accounts makes the credit note */}
+          <Route path="/customer-returns" element={<CustomerReturnsPage view="warehouse" />} />
+          <Route path="/returned-goods" element={<CustomerReturnsPage view="qa" />} />
+          <Route path="/rework" element={<CustomerReturnsPage view="rework" />} />
+          <Route path="/returned-goods-dispatch" element={<CustomerReturnsPage view="dispatch" />} />
+          <Route path="/credit-notes" element={<CustomerReturnsPage view="accounts" />} />
           <Route path="/lots" element={<LotsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

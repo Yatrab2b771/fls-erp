@@ -1,6 +1,7 @@
 import { prisma } from "../../common/lib/prisma";
 import type { RmMasterResult } from "../rm-costing/rm-costing-engine";
 import type { BomResult } from "../packaging-bom/bom-engine";
+import { resultsForSlot } from "../packaging-bom/bom-slots";
 
 // --- What does this batch actually need to fully Dispense? Pulled from
 // the PO item's own already-calculated RmPlan (RM ingredients) / BomPlan
@@ -26,23 +27,43 @@ interface SourceRow {
   requiredQty: number;
 }
 
-export async function getRequiredDispensingItems(purchaseOrderItemId: string): Promise<RequiredDispensingItem[]> {
+/** The version a batch's material follows: BASE (stamped when it was dispensed) = the plan PPIC sees; null = not dispensed yet, so the product's current one. */
+export function effectiveBomSlot(batchSlot: string | null | undefined, productSlot: string | null | undefined): string | null {
+  if (batchSlot === "BASE") return null;
+  return batchSlot ?? productSlot ?? null;
+}
+
+/**
+ * The plan's materials for the whole PO item. `slot` (DISPLAY / V1 / V2) makes them from that BOM version instead of the plan PPIC sees:
+ * how a batch follows R&D's change once the product is with Production. A version that is gone falls back to the plan.
+ */
+export async function getRequiredDispensingItems(purchaseOrderItemId: string, slot?: string | null): Promise<RequiredDispensingItem[]> {
   const [rmPlan, bomPlan] = await Promise.all([
     prisma.rmPlan.findFirst({ where: { purchaseOrderItemId, status: "CALCULATED" }, orderBy: { calculatedAt: "desc" } }),
     prisma.bomPlan.findFirst({ where: { purchaseOrderItemId, status: "CALCULATED" }, orderBy: { calculatedAt: "desc" } }),
   ]);
   if (!rmPlan && !bomPlan) return [];
 
+  let rmResult = rmPlan?.resultSnapshot as unknown as RmMasterResult | undefined;
+  let bomResult = bomPlan?.resultSnapshot as unknown as BomResult | undefined;
+  if (slot === "DISPLAY" || slot === "V1" || slot === "V2") {
+    const made = await resultsForSlot(purchaseOrderItemId, slot);
+    if (made.ok) {
+      rmResult = made.rm;
+      bomResult = made.pm;
+    }
+  }
+
   const rows: SourceRow[] = [];
 
-  if (rmPlan?.resultSnapshot) {
-    const result = rmPlan.resultSnapshot as unknown as RmMasterResult;
+  if (rmResult) {
+    const result = rmResult;
     for (const line of result.procurement) {
       if (line.totalKg > 0) rows.push({ category: "RM", itemName: line.name, unit: "Kg", requiredQty: line.totalKg });
     }
   }
-  if (bomPlan?.resultSnapshot) {
-    const result = bomPlan.resultSnapshot as unknown as BomResult;
+  if (bomResult) {
+    const result = bomResult;
     for (const line of result.lines) {
       if (line.totalQty > 0) rows.push({ category: "PM", itemName: line.itemName ?? `${line.component} — ${line.spec}`, unit: "Count", requiredQty: line.totalQty });
     }

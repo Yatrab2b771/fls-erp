@@ -10,6 +10,8 @@ import { RouteError } from "../../common/lib/route-error";
 import { assertUnitMatchesItem } from "../../common/lib/units";
 import { rejectTransferSchema, resolveShortReceipt, type RejectTransferInput } from "./transit";
 import { recordIssueLots } from "./lots";
+import { allowedKeysOf, approvedStoreStock, approvedWarehouseStock, rulesForPoItems } from "../product-vendors/vendor-rules";
+import { resyncRequestStatus } from "./request-status";
 import { lotsRouter } from "./lots.routes";
 import { rejectedStockRouter } from "./rejected-stock.routes";
 import { assertDayStoreAccess, getScopedDayStoreIds } from "./day-store-access";
@@ -1460,15 +1462,6 @@ inventoryRouter.patch("/transactions/:id", requireRole("STORE"), validateBody(up
   }
 });
 
-/** Puts a Material Request's status back in line with the issues that still count toward it (after one was deleted). */
-async function resyncRequestStatus(requestId: string): Promise<void> {
-  const request = await prisma.inventoryRequest.findUnique({ where: { id: requestId }, include: { fulfillments: { where: { deletedAt: null }, select: { quantity: true } } } });
-  if (!request || !["ISSUED", "PARTIALLY_ISSUED"].includes(request.status)) return;
-  const issued = request.fulfillments.reduce((sum, f) => sum + f.quantity, 0);
-  const status = issued >= request.requestedQty - 1e-9 ? "ISSUED" : issued > 1e-9 ? "PARTIALLY_ISSUED" : "APPROVED";
-  if (status !== request.status) await prisma.inventoryRequest.update({ where: { id: requestId }, data: { status } });
-}
-
 inventoryRouter.delete("/transactions/:id", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const txn = await prisma.inventoryTransaction.findUnique({ where: { id: req.params.id } });
@@ -2031,6 +2024,20 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         }
       }
 
+      // Approved vendors: when the request is for a product whose material is restricted to approved vendors, only their lots may be
+      // issued (the Warehouse to a Day Store, or a Day Store to its Plant), and what is there from them has to cover it.
+      let allowedVendors: Set<string> | undefined;
+      if (existing.purchaseOrderItemId) {
+        const rule = (await rulesForPoItems([existing.purchaseOrderItemId], tx)).get(existing.purchaseOrderItemId)?.get(existing.itemId);
+        allowedVendors = allowedKeysOf(rule);
+        if (allowedVendors && rule) {
+          const approved = toProduction ? await approvedStoreStock(tx, existing.itemId, allowedVendors, data.dayStoreId!) : await approvedWarehouseStock(tx, existing.itemId, allowedVendors);
+          if (data.quantity > approved + 1e-9) {
+            throw new RouteError(409, `This product may only use ${rule.vendorNames.join(" / ")} for this material. ${toProduction ? "The Day Store" : "The Warehouse"} holds only ${Math.round(approved * 1000) / 1000} ${data.unit} from ${rule.vendorNames.length === 1 ? "that vendor" : "those vendors"} - can't issue ${data.quantity}. Ask R&D to allow another vendor, or wait for the approved vendor's material.`);
+          }
+        }
+      }
+
       const newTotal = alreadyIssued + data.quantity;
       const newStatus = newTotal >= existing.requestedQty ? "ISSUED" : "PARTIALLY_ISSUED";
 
@@ -2056,7 +2063,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         },
         include: txnInclude,
       });
-      await recordIssueLots(tx, txn);
+      await recordIssueLots(tx, txn, allowedVendors);
       await tx.inventoryRequest.update({ where: { id: existing.id }, data: { status: newStatus } });
 
       return { existing, txn, newStatus, newTotal };

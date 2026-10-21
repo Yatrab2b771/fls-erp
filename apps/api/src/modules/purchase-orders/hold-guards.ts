@@ -18,10 +18,20 @@ import { prisma } from "../../common/lib/prisma";
  * (Hold and Cancel are allowed until the first batch exists; see purchase-orders.routes.ts.)
  */
 export async function productionBlockedByHoldOrCancel(purchaseOrderItemId: string): Promise<string | null> {
-  const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { materialHeldAt: true, cancelledAt: true } });
-  if (item?.cancelledAt) return "PPIC cancelled this product, so Production cannot work on it.";
+  const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { materialHeldAt: true, cancelledAt: true, productionHeldAt: true, closedShortAt: true } });
+  if (item?.closedShortAt) return "This product was closed short, so it needs no more batches. Reopen it first if more is to be made.";
+  if (item?.cancelledAt) return "This product is cancelled, so Production cannot work on it.";
   if (item?.materialHeldAt) return "PPIC has put this product on hold. Production can go on once PPIC releases it.";
+  if (item?.productionHeldAt) return PRODUCTION_HELD_MESSAGE;
   return null;
+}
+
+export const PRODUCTION_HELD_MESSAGE = "Production has put this product on hold. It goes on once Production releases it from Held Products.";
+
+/** Production's own hold on a product (separate from PPIC's): nothing of it moves - indent, batch number, dispensing, receive, line clearance. */
+export async function productionHoldMessage(purchaseOrderItemId: string): Promise<string | null> {
+  const item = await prisma.purchaseOrderItem.findUnique({ where: { id: purchaseOrderItemId }, select: { productionHeldAt: true } });
+  return item?.productionHeldAt ? PRODUCTION_HELD_MESSAGE : null;
 }
 
 export async function planningBlockedByHold(purchaseOrderItemId: string | null | undefined): Promise<string | null> {

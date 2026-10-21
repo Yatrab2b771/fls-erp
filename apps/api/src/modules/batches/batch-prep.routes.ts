@@ -11,19 +11,24 @@ import { requireAuth, requireRole, type AuthedRequest } from "../../common/middl
 import { validateBody } from "../../common/middleware/validate";
 import { assertPlantAccess, assertRunDayStoreAccess, getScopedDayStoreIds, getScopedPlantIds } from "../inventory/day-store-access";
 import { getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "../inventory/stock";
-import { productionBlockedByHoldOrCancel } from "../purchase-orders/hold-guards";
+import { productionBlockedByHoldOrCancel, productionHoldMessage } from "../purchase-orders/hold-guards";
+import { cancelPoItem } from "../purchase-orders/cancel-item";
+import { closeProductShort, reopenProductShort } from "../purchase-orders/close-short";
 import { productionBatchInclude, serializeProductionBatch } from "./batch-include";
-import { getRequiredDispensingItems } from "./dispensing-requirements";
-import { BATCH_LINE_CLEARANCE_ITEMS } from "./batch-checklists";
+import { effectiveBomSlot, getRequiredDispensingItems } from "./dispensing-requirements";
 import { utilizationGapMessage, utilizationOfBatches } from "./batch-utilization";
 import { withUtilization } from "./production-batches.routes";
 import { plantFreeQty } from "../plant-consumption/plant-position";
 import { recordDispensingLots, recordIssueLots } from "../inventory/lots";
+import { resolveShortReceipt } from "../inventory/transit";
+import { resyncRequestStatus } from "../inventory/request-status";
+import { notifyPlantDayStore } from "../inventory/plan-requests";
+import { allowedKeysOf, approvedPlantStock, approvedStoreStock, rulesForPoItems } from "../product-vendors/vendor-rules";
 
 /**
- * The per-batch flow (a run started with batchFlow = true). Every batch goes through four steps of its own before its production starts:
+ * The per-batch flow (a run started with batchFlow = true). Every batch goes through steps of its own before its production starts:
  *
- *   Indent Issue (Production) -> Batch No (R&D) -> Dispensing (Day Store) -> Line Clearance (QA) -> READY (Production runs it)
+ *   Indent Issue (Production) -> Batch No (R&D) -> Dispensing (Day Store) -> READY (Production runs it)
  *
  *   GET   /production-batches/prep-board?stage=   the batches waiting at one step (scoped to the caller's Plant / Day Store)
  *   GET   /production-batches/prep-summary        how many batches wait at each step (the dashboard tiles)
@@ -32,18 +37,19 @@ import { recordDispensingLots, recordIssueLots } from "../inventory/lots";
  *   POST  /production-batches/:id/indent          Production signs the batch's indent
  *   POST  /production-batches/:id/batch-no/allocate   R&D allocates the next serial number (or one it types; always unique)
  *   POST  /production-batches/:id/dispense        the Day Store dispenses THIS batch's material to the Plant
- *   POST  /production-batches/:id/line-clearance  QA clears the line (Approved opens production)
  *   GET   /production-batches/packaging-board     batches at Packaging, with their PM Utilization
  *   PATCH /production-batches/:id/packaging       Packaging's production sheet and status
  */
 export const batchPrepRouter = Router();
 batchPrepRouter.use(requireAuth);
 
-const STAGES = ["INDENT_ISSUE", "BATCH_NO", "DISPENSING", "LINE_CLEARANCE", "READY"] as const;
+const STAGES = ["INDENT_ISSUE", "BATCH_NO", "DISPENSING", "RECEIVE", "LINE_CLEARANCE", "READY"] as const;
 type PrepStage = (typeof STAGES)[number];
-const STAGE_LABEL: Record<PrepStage, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No", DISPENSING: "Dispensing", LINE_CLEARANCE: "Line Clearance", READY: "Ready for production" };
+const STAGE_LABEL: Record<PrepStage, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No", DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", LINE_CLEARANCE: "Line Clearance", READY: "Ready for production" };
 const q3 = (n: number) => Math.round(n * 1000) / 1000;
 const HELD_MESSAGE = "Production has put this batch on hold. It goes on once Production releases it.";
+/** A batch of a product Production has put on hold is listed only on Held Products, not at its step. */
+const notProductionHeld: Prisma.ProductionBatchWhereInput = { preProduction: { purchaseOrderItem: { productionHeldAt: null } } };
 
 const boardInclude = {
   preProduction: {
@@ -52,7 +58,7 @@ const boardInclude = {
       batchFlow: true,
       plantId: true,
       plant: { select: { id: true, name: true, dayStoreId: true } },
-      purchaseOrderItem: { select: { id: true, productName: true, quantity: true, unit: true, purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } } } },
+      purchaseOrderItem: { select: { id: true, productName: true, productCategory: true, materialHeldAt: true, cancelledAt: true, quantity: true, unit: true, purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } } } },
     },
   },
 } satisfies Prisma.ProductionBatchInclude;
@@ -72,26 +78,40 @@ async function scopeWhere(req: AuthedRequest): Promise<Prisma.ProductionBatchWhe
 }
 
 /** The plan's materials for ONE batch: the plan's total scaled to the batch's share of the order. */
-async function requirementsOf(batch: { plannedQty: number; preProduction: { purchaseOrderItem: { id: string; quantity: number } } }) {
+export async function requirementsOf(batch: { id?: string; bomSlot?: string | null; plannedQty: number; preProduction: { purchaseOrderItem: { id: string; quantity: number } } }) {
   const item = batch.preProduction.purchaseOrderItem;
-  const required = await getRequiredDispensingItems(item.id);
+  // The batch follows the BOM version R&D chose for it (or, if it is not dispensed yet, the product's current one); see effectiveBomSlot.
+  const productSlot = (await prisma.purchaseOrderItem.findUnique({ where: { id: item.id }, select: { productionBomSlot: true } }))?.productionBomSlot;
+  const batchSlot = batch.bomSlot !== undefined ? batch.bomSlot : batch.id ? (await prisma.productionBatch.findUnique({ where: { id: batch.id }, select: { bomSlot: true } }))?.bomSlot : null;
+  const required = await getRequiredDispensingItems(item.id, effectiveBomSlot(batchSlot, productSlot));
   const scale = item.quantity > 0 ? batch.plannedQty / item.quantity : 1;
   return required.map((r) => ({ ...r, requiredQty: q3(r.requiredQty * scale) })).filter((r) => r.requiredQty > 0);
 }
 
-async function boardRow(b: BoardBatch, withRequirements: boolean) {
+async function boardRow(b: BoardBatch, withRequirements: boolean, withReceive = false) {
   const item = b.preProduction.purchaseOrderItem;
   const plant = b.preProduction.plant;
-  let requirements: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean }[] | undefined;
+  let requirements: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean; dispensed: boolean; refusedNote: string | null }[] | undefined;
+  let receiveLines: { lineId: string; itemId: string; itemName: string; category: string; unit: string; plannedQty: number | null; givenQty: number; sentQty: number }[] | undefined;
+  if (withReceive) {
+    const pending = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: b.id, deliveryStatus: "PENDING" }, orderBy: { createdAt: "asc" } });
+    const info = new Map((await prisma.inventoryItem.findMany({ where: { id: { in: pending.map((l) => l.itemId) } }, select: { id: true, name: true, category: true } })).map((i) => [i.id, i]));
+    receiveLines = pending.map((l) => ({ lineId: l.id, itemId: l.itemId, itemName: info.get(l.itemId)?.name ?? "Material", category: info.get(l.itemId)?.category ?? "RM", unit: l.unit, plannedQty: l.plannedQty, givenQty: l.quantity, sentQty: l.sentQty ?? 0 }));
+  }
   if (withRequirements) {
     const req = await requirementsOf(b);
     const ids = req.map((r) => r.itemId);
+    // Materials that already have a line (received, or on their way) are done; one Production refused shows why, so it is dispensed again.
+    const lineRows = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: b.id }, select: { itemId: true, deliveryStatus: true, receiveNote: true, createdAt: true }, orderBy: { createdAt: "asc" } });
+    const have = new Set(lineRows.filter((l) => l.deliveryStatus !== "REFUSED").map((l) => l.itemId));
+    const refusedNote = new Map(lineRows.filter((l) => l.deliveryStatus === "REFUSED").map((l) => [l.itemId, l.receiveNote]));
     const shelf = plant?.dayStoreId && ids.length ? await getOnHandByDayStoreAndItem(plant.dayStoreId, ids) : new Map<string, { onHand: number }>();
     const free = plant && ids.length ? await plantFreeQty(plant.id, ids, undefined) : new Map<string, number>();
     requirements = req.map((r) => {
       const dayStoreQty = q3(Math.max(0, shelf.get(r.itemId)?.onHand ?? 0));
       const plantFree = q3(Math.max(0, free.get(r.itemId) ?? 0));
-      return { itemId: r.itemId, itemName: r.itemName, category: r.category, unit: r.unit, requiredQty: r.requiredQty, dayStoreQty, plantFreeQty: plantFree, enough: plantFree + dayStoreQty >= r.requiredQty - 1e-9 };
+      const dispensed = have.has(r.itemId);
+      return { itemId: r.itemId, itemName: r.itemName, category: r.category, unit: r.unit, requiredQty: r.requiredQty, dayStoreQty, plantFreeQty: plantFree, enough: dispensed || plantFree + dayStoreQty >= r.requiredQty - 1e-9, dispensed, refusedNote: dispensed ? null : (refusedNote.get(r.itemId) ?? null) };
     });
   }
   return {
@@ -120,11 +140,8 @@ async function boardRow(b: BoardBatch, withRequirements: boolean) {
     dispensingRemarks: b.dispensingRemarks,
     dispensedAt: b.dispensedAt,
     grnNo: b.grnNo,
-    lineClearanceStatus: b.lineClearanceStatus,
-    lineClearanceRemarks: b.lineClearanceRemarks,
-    lineClearanceAt: b.lineClearanceAt,
-    lineClearanceChecklist: BATCH_LINE_CLEARANCE_ITEMS.map((i) => ({ key: i.key, label: i.label, ok: ((b.lineClearanceChecks ?? {}) as Record<string, boolean>)[i.key] === true })),
     ...(requirements ? { requirements } : {}),
+    ...(receiveLines ? { receiveLines } : {}),
   };
 }
 
@@ -140,11 +157,121 @@ batchPrepRouter.get("/production-batches/prep-board", async (req: AuthedRequest,
     if (!STAGES.includes(stage)) return res.status(400).json({ error: "Unknown stage" });
     // R&D's Batch No list (?all=1) also shows the batches that already have their number, so R&D can see (and, until Dispensing, correct) what it allocated.
     const withAllocated = stage === "BATCH_NO" && req.query.all === "1";
+    // Production's Indent Issue list (?all=1) also keeps the batches whose indent is already signed, with where they are now.
+    const withSigned = stage === "INDENT_ISSUE" && req.query.all === "1";
     // A batch Production has put on hold is listed only on Held Products, not at its step
-    const where: Prisma.ProductionBatchWhereInput = withAllocated ? { OR: [{ prepStageId: "BATCH_NO", status: "IN_PROGRESS" }, { batchNo: { not: null } }], ...(await scopeWhere(req)) } : { status: "IN_PROGRESS", prepStageId: stage, heldAt: null, ...(await scopeWhere(req)) };
-    const batches = await prisma.productionBatch.findMany({ where, include: boardInclude, orderBy: withAllocated ? { createdAt: "desc" } : { createdAt: "asc" } });
-    // Indent Issue and Dispensing show the batch's materials (the plan scaled to the batch's quantity) and whether they are available.
-    res.json(await Promise.all(batches.map((b) => boardRow(b, stage === "DISPENSING" || stage === "INDENT_ISSUE"))));
+    const where: Prisma.ProductionBatchWhereInput = withSigned
+      ? { ...(await scopeWhere(req)) }
+      : withAllocated
+        ? { OR: [{ prepStageId: "BATCH_NO", status: "IN_PROGRESS" }, { batchNo: { not: null } }], ...(await scopeWhere(req)) }
+        : { status: "IN_PROGRESS", prepStageId: stage, heldAt: null, ...(await scopeWhere(req)) };
+    const batches = await prisma.productionBatch.findMany({ where: { AND: [where, notProductionHeld] }, include: boardInclude, orderBy: withAllocated || withSigned ? { createdAt: "desc" } : { createdAt: "asc" } });
+    // Indent Issue and Dispensing show the batch's materials (the plan scaled to the batch's quantity) and whether they are available;
+    // a batch already past its indent has no use for that check.
+    res.json(await Promise.all(batches.map((b) => boardRow(b, stage === "DISPENSING" || (stage === "INDENT_ISSUE" && b.prepStageId === "INDENT_ISSUE"), stage === "RECEIVE"))));
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Production's "Material Received" page, batch by batch: one line per batch and material of its plan (the plan scaled to the batch's quantity).
+ *   Received   what the Day Store dispensed for THIS batch (the weighed quantity); nothing until its Dispensing is done
+ *   Used       everything logged against the batch: production + wastage + rejected + sample
+ *   Left       Received - Used (still with Production for this batch)
+ *   Available  the whole Plant's stock of the material (shared by every batch there)
+ * Batches of runs from before the per-batch flow are not here: the page gets those, product by product, from /pre-productions/material-board.
+ * A Plant-limited Production login sees only its own Plant's batches.
+ */
+batchPrepRouter.get("/production-batches/material-board", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
+  try {
+    const batches = await prisma.productionBatch.findMany({
+      where: { AND: [await scopeWhere(req), { preProduction: { purchaseOrderItem: { cancelledAt: null, deletedAt: null, materialHeldAt: null, productionHeldAt: null } } }] },
+      include: boardInclude,
+      orderBy: { createdAt: "desc" },
+    });
+    if (batches.length === 0) return res.json([]);
+
+    const ids = batches.map((b) => b.id);
+    const [lines, consumed] = await Promise.all([
+      prisma.batchDispensingLine.findMany({ where: { productionBatchId: { in: ids }, deliveryStatus: { not: "REFUSED" } }, select: { productionBatchId: true, itemId: true, quantity: true, sentQty: true, deliveryStatus: true } }),
+      prisma.batchMaterialConsumption.groupBy({ by: ["productionBatchId", "itemId", "purpose"], where: { productionBatchId: { in: ids } }, _sum: { quantity: true } }),
+    ]);
+    const key = (a: string | null, b: string) => `${a}::${b}`;
+    // received = in the Plant's stock (what it already held for the batch + what Production has confirmed); transit = sent, not yet confirmed
+    const given = new Map<string, { received: number; transit: number }>();
+    for (const l of lines) {
+      const cur = given.get(key(l.productionBatchId, l.itemId)) ?? { received: 0, transit: 0 };
+      if (l.deliveryStatus === "PENDING") {
+        cur.transit += l.sentQty ?? 0;
+        cur.received += Math.max(0, l.quantity - (l.sentQty ?? 0));
+      } else cur.received += l.quantity;
+      given.set(key(l.productionBatchId, l.itemId), cur);
+    }
+    const usedBy = new Map<string, { used: number; wasted: number; rejected: number; sample: number }>();
+    for (const c of consumed) {
+      const cur = usedBy.get(key(c.productionBatchId, c.itemId)) ?? { used: 0, wasted: 0, rejected: 0, sample: 0 };
+      const q = c._sum.quantity ?? 0;
+      if (c.purpose === "WASTE") cur.wasted += q;
+      else if (c.purpose === "REJECTED") cur.rejected += q;
+      else if (c.purpose === "SAMPLE") cur.sample += q;
+      cur.used += q; // production + wastage + rejected + sample
+      usedBy.set(key(c.productionBatchId, c.itemId), cur);
+    }
+
+    const plantIds = [...new Set(batches.flatMap((b) => (b.preProduction.plant ? [b.preProduction.plant.id] : [])))];
+    const onHand = new Map<string, Map<string, number>>();
+    const reqByBatch = new Map(await Promise.all(batches.map(async (b) => [b.id, await requirementsOf(b)] as const)));
+    const itemIds = [...new Set([...reqByBatch.values()].flatMap((r) => r.map((m) => m.itemId)))];
+    for (const plantId of plantIds) onHand.set(plantId, await getOnHandByPlantAndItem(plantId, itemIds));
+
+    const r3 = (n: number) => Math.round(n * 1000) / 1000;
+    res.json(
+      batches.flatMap((b) => {
+        const po = b.preProduction.purchaseOrderItem;
+        const plant = b.preProduction.plant;
+        const early = ["INDENT_ISSUE", "BATCH_NO", "DISPENSING"].includes(b.prepStageId);
+        return (reqByBatch.get(b.id) ?? []).map((m) => {
+          const g = given.get(key(b.id, m.itemId));
+          const dispensed = !!g; // the material has a line: it was dispensed (received, or still on its way)
+          const receivedQty = g ? r3(g.received) : 0;
+          const inTransitQty = g ? r3(g.transit) : 0;
+          const u = usedBy.get(key(b.id, m.itemId)) ?? { used: 0, wasted: 0, rejected: 0, sample: 0 };
+          return {
+            batchId: b.id,
+            batchNo: b.batchNo,
+            batchQty: b.plannedQty,
+            prepStageId: b.prepStageId,
+            batchStatus: b.status,
+            itemId: po.id,
+            poId: po.purchaseOrder.id,
+            poNumber: po.purchaseOrder.poNumber,
+            customerName: po.purchaseOrder.customer.companyName,
+            productName: po.productName,
+            productCategory: po.productCategory,
+            plant: plant ? { id: plant.id, name: plant.name } : null,
+            releasedQty: b.plannedQty,
+            orderQty: po.quantity,
+            productUnit: po.unit,
+            material: m.itemName,
+            category: m.category,
+            unit: m.unit,
+            requiredQty: m.requiredQty,
+            receivedQty,
+            inTransitQty,
+            balanceQty: dispensed ? Math.max(0, r3(m.requiredQty - receivedQty - inTransitQty)) : m.requiredQty,
+            usedQty: r3(u.used),
+            wastedQty: r3(u.wasted),
+            rejectedQty: r3(u.rejected),
+            sampleQty: r3(u.sample),
+            leftQty: r3(receivedQty - u.used),
+            availableQty: dispensed && plant ? r3(onHand.get(plant.id)?.get(m.itemId) ?? 0) : null,
+            status: !dispensed ? (early ? "NOT_DISPENSED" : "NOT_RECEIVED") : inTransitQty > 0 ? "IN_TRANSIT" : receivedQty >= m.requiredQty - 1e-6 ? "FULL" : "PARTIAL",
+            sentAt: b.createdAt,
+          };
+        });
+      }),
+    );
   } catch (err) {
     next(err);
   }
@@ -152,7 +279,7 @@ batchPrepRouter.get("/production-batches/prep-board", async (req: AuthedRequest,
 
 batchPrepRouter.get("/production-batches/prep-summary", async (req: AuthedRequest, res, next) => {
   try {
-    const where = { status: "IN_PROGRESS" as const, heldAt: null, ...(await scopeWhere(req)) };
+    const where = { AND: [{ status: "IN_PROGRESS" as const, heldAt: null }, await scopeWhere(req), notProductionHeld] };
     const groups = await prisma.productionBatch.groupBy({ by: ["prepStageId"], where, _count: { _all: true } });
     const counts = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<PrepStage, number>;
     for (const g of groups) counts[g.prepStageId] = g._count._all;
@@ -170,7 +297,7 @@ const holdSchema = z
 
 /**
  * PPIC put a product on Hold and told Production: here Production sees that product with every batch of it, and holds (or later releases)
- * the batches one by one. A batch can be held only while it is still in preparation (Indent Issue to Line Clearance): once it is READY
+ * the batches one by one. A batch can be held only while it is still in preparation (Indent Issue to Dispensing / Receive): once it is READY
  * (in manufacturing) it follows the whole pipeline. A product also stays listed while one of its batches is still held, even after PPIC released it.
  */
 batchPrepRouter.get("/production-batches/held-products", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
@@ -181,16 +308,21 @@ batchPrepRouter.get("/production-batches/held-products", requireRole("PRODUCTION
         deletedAt: null,
         cancelledAt: null,
         planSentToProductionAt: { not: null },
-        preProduction: { is: { batchFlow: true, ...(plantScope ? { plantId: { in: plantScope } } : {}) } },
-        OR: [{ materialHeldAt: { not: null } }, { preProduction: { is: { productionBatches: { some: { heldAt: { not: null } } } } } }],
+        // a product Production held before its run was started has no run yet
+        ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}),
+        AND: [{ OR: [{ preProduction: { is: null } }, { preProduction: { is: { batchFlow: true } } }] }],
+        OR: [{ materialHeldAt: { not: null } }, { productionHeldAt: { not: null } }, { preProduction: { is: { productionBatches: { some: { heldAt: { not: null } } } } } }],
       },
-      orderBy: [{ materialHeldAt: { sort: "desc", nulls: "last" } }, { productName: "asc" }],
+      orderBy: [{ materialHeldAt: { sort: "desc", nulls: "last" } }, { productionHeldAt: { sort: "desc", nulls: "last" } }, { productName: "asc" }],
       select: {
         id: true,
         productName: true,
         quantity: true,
         unit: true,
         materialHeldAt: true,
+        productionHeldAt: true,
+        productionHeldById: true,
+        productionHoldReason: true,
         purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
         preProduction: {
           select: {
@@ -204,6 +336,7 @@ batchPrepRouter.get("/production-batches/held-products", requireRole("PRODUCTION
         },
       },
     });
+    const heldByNames = new Map((await prisma.user.findMany({ where: { id: { in: items.flatMap((i) => (i.productionHeldById ? [i.productionHeldById] : [])) } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
     res.json(
       items.map((item) => {
         const batches = item.preProduction?.productionBatches ?? [];
@@ -219,6 +352,10 @@ batchPrepRouter.get("/production-batches/held-products", requireRole("PRODUCTION
           runId: item.preProduction?.id ?? null,
           productHeld: !!item.materialHeldAt,
           productHeldAt: item.materialHeldAt?.toISOString() ?? null,
+          productionHeld: !!item.productionHeldAt,
+          productionHeldAt: item.productionHeldAt?.toISOString() ?? null,
+          productionHoldReason: item.productionHoldReason,
+          productionHeldByName: item.productionHeldById ? (heldByNames.get(item.productionHeldById) ?? null) : null,
           batches: batches.map((b) => ({
             id: b.id,
             batchNo: b.batchNo,
@@ -265,6 +402,112 @@ batchPrepRouter.patch("/production-batches/:id/hold", requireRole("PRODUCTION"),
     const label = `${batch.batchNo ?? "A batch"} of ${item.productName} (${item.purchaseOrder.poNumber ?? "PO"})`;
     await notifyRoles(["PPIC"], held ? { title: `Production held ${label}`, body: reason ?? "", link: "/held-products" } : { title: `Production released ${label}`, body: "The batch goes on.", link: "/held-products" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.hold"));
     res.json(await boardRow(updated, false));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------------------- Production's own Hold / Cancel of a product
+
+const productHoldSchema = z
+  .object({ held: z.boolean(), reason: z.string().trim().max(500).optional() })
+  .refine((d) => !d.held || !!d.reason, { message: "Write why you are holding this product.", path: ["reason"] });
+
+const productSelect = {
+  id: true,
+  productName: true,
+  unit: true,
+  cancelledAt: true,
+  deletedAt: true,
+  materialHeldAt: true,
+  productionHeldAt: true,
+  planSentToProductionAt: true,
+  plannedPlantId: true,
+  purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
+  preProduction: { select: { id: true, plantId: true, _count: { select: { productionBatches: true } } } },
+} satisfies Prisma.PurchaseOrderItemSelect;
+
+/** A product PPIC has sent to Production, that this Production login may act on. */
+async function loadSentProduct(req: AuthedRequest<{ itemId: string }>) {
+  const item = await prisma.purchaseOrderItem.findUnique({ where: { id: req.params.itemId }, select: productSelect });
+  if (!item || item.deletedAt || !item.planSentToProductionAt) throw new RouteError(404, "This product is not with Production.");
+  if (item.cancelledAt) throw new RouteError(409, "This product is cancelled.");
+  await assertPlantAccess(req.user!.id, req.user!.roles, item.preProduction?.plantId ?? item.plannedPlantId);
+  return item;
+}
+
+/** A batch in manufacturing (or finished) means the product can no longer be held or returned: it follows the whole pipeline. */
+async function hasStartedManufacturing(runId: string | undefined): Promise<boolean> {
+  if (!runId) return false;
+  return (await prisma.productionBatch.count({ where: { preProductionId: runId, OR: [{ prepStageId: "READY" }, { status: "COMPLETED" }] } })) > 0;
+}
+
+/**
+ * Production holds / releases a whole product (its own hold, separate from PPIC's). While held: no new batch, no step moves, and the product
+ * leaves New Plan for Held Products, where Production releases it. Allowed until a batch is in manufacturing.
+ */
+batchPrepRouter.patch("/production-batches/products/:itemId/hold", requireRole("PRODUCTION"), validateBody(productHoldSchema), async (req: AuthedRequest<{ itemId: string }>, res, next) => {
+  try {
+    const { held, reason } = req.body as z.infer<typeof productHoldSchema>;
+    const item = await loadSentProduct(req);
+    if (held) {
+      if (item.productionHeldAt) return res.status(409).json({ error: "You have already put this product on hold." });
+      if (await hasStartedManufacturing(item.preProduction?.id)) return res.status(409).json({ error: "A batch of this product is already in production, so it can't be held. It follows the whole pipeline." });
+    } else if (!item.productionHeldAt) {
+      return res.status(409).json({ error: "This product is not on hold by Production." });
+    }
+    await prisma.purchaseOrderItem.update({
+      where: { id: item.id },
+      data: held ? { productionHeldAt: new Date(), productionHeldById: req.user!.id, productionHoldReason: reason } : { productionHeldAt: null, productionHeldById: null, productionHoldReason: null },
+    });
+    await recordAudit({ actorId: req.user!.id, action: held ? "purchase_order.item_held_by_production" : "purchase_order.item_hold_released_by_production", entityType: "PurchaseOrder", entityId: item.purchaseOrder.id, metadata: { itemId: item.id, ...(held ? { reason } : {}) } });
+    const label = `${item.productName} (${item.purchaseOrder.poNumber ?? "PO"})`;
+    await notifyRoles(["PPIC"], held ? { title: `Production put ${label} on hold`, body: reason ?? "", link: "/held-products" } : { title: `Production released ${label}`, body: "It goes on.", link: "/held-products" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: product.production_hold"));
+    res.json({ itemId: item.id, productionHeld: held });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const productCancelSchema = z.object({ reason: z.string().trim().min(3, "Write why you are cancelling this product.").max(500) });
+
+/**
+ * Production's Cancel: the product is dead for good, exactly as when PPIC cancels it (it drops out of every list; no undo). Only while no batch
+ * has been made. PPIC and BD are told.
+ */
+batchPrepRouter.post("/production-batches/products/:itemId/cancel", requireRole("PRODUCTION"), validateBody(productCancelSchema), async (req: AuthedRequest<{ itemId: string }>, res, next) => {
+  try {
+    const { reason } = req.body as z.infer<typeof productCancelSchema>;
+    const item = await loadSentProduct(req);
+    const updated = await cancelPoItem({ itemId: item.id, actorId: req.user!.id, reason, by: "Production", log: req.log });
+    res.json({ itemId: updated.id, cancelled: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const closeShortSchema = z.object({ reason: z.string().trim().min(3, "Write why this product is being closed short.").max(500) });
+
+/**
+ * Production closes a product short: the batches made less than was ordered and no more will be made, so it ends at what it made (the order then
+ * completes once that has been dispatched). Only when every batch is done. BD is told; PPIC is not.
+ */
+batchPrepRouter.post("/production-batches/products/:itemId/close-short", requireRole("PRODUCTION"), validateBody(closeShortSchema), async (req: AuthedRequest<{ itemId: string }>, res, next) => {
+  try {
+    const item = await loadSentProduct(req);
+    const done = await closeProductShort({ itemId: item.id, actorId: req.user!.id, reason: (req.body as z.infer<typeof closeShortSchema>).reason, log: req.log });
+    res.json({ itemId: item.id, closedShort: true, ...done });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/** Takes it back: the product is ordered for its full quantity again, and Production can make the rest. */
+batchPrepRouter.post("/production-batches/products/:itemId/reopen-short", requireRole("PRODUCTION"), async (req: AuthedRequest<{ itemId: string }>, res, next) => {
+  try {
+    const item = await loadSentProduct(req);
+    await reopenProductShort({ itemId: item.id, actorId: req.user!.id });
+    res.json({ itemId: item.id, closedShort: false });
   } catch (err) {
     next(err);
   }
@@ -317,6 +560,8 @@ batchPrepRouter.post("/production-batches/:id/batch-no/allocate", requireRole("R
     if (!batch || !batch.preProduction.batchFlow) return res.status(404).json({ error: "Batch not found" });
     if (batch.prepStageId !== "BATCH_NO") return res.status(409).json({ error: batch.batchNo ? `This batch already has its number (${batch.batchNo}).` : `This batch is at ${STAGE_LABEL[batch.prepStageId]}: Production has to sign its indent first.` });
     if (batch.heldAt) return res.status(409).json({ error: HELD_MESSAGE });
+    const productHeld = await productionHoldMessage(batch.preProduction.purchaseOrderItem.id);
+    if (productHeld) return res.status(409).json({ error: productHeld });
     const typed = (req.body as z.infer<typeof allocateSchema>).batchNo?.trim();
     const updated = await runSerializable(async (tx) => {
       let batchNo = typed;
@@ -369,9 +614,14 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
     await assertRunDayStoreAccess(req.user!.id, req.user!.roles, batch.preProduction.plantId);
     if (batch.prepStageId !== "DISPENSING") return res.status(409).json({ error: batch.prepStageId === "BATCH_NO" || batch.prepStageId === "INDENT_ISSUE" ? "This batch has no batch number yet: R&D allocates it first." : "This batch has already been dispensed." });
     if (batch.heldAt) return res.status(409).json({ error: HELD_MESSAGE });
+    const productHeld = await productionHoldMessage(batch.preProduction.purchaseOrderItem.id);
+    if (productHeld) return res.status(409).json({ error: productHeld });
     const plant = batch.preProduction.plant;
     const input = req.body as z.infer<typeof dispenseSchema>;
     const planned = await requirementsOf(batch);
+    // Once dispensed the batch keeps the BOM version it was dispensed under (R&D's later changes are for the batches after it).
+    const productSlot = (await prisma.purchaseOrderItem.findUnique({ where: { id: batch.preProduction.purchaseOrderItem.id }, select: { productionBomSlot: true } }))?.productionBomSlot;
+    const dispensedSlot = effectiveBomSlot(batch.bomSlot, productSlot) ?? "BASE";
     if (planned.length > 0 && !plant) return res.status(400).json({ error: "Assign a Plant to this run before dispensing." });
 
     // What is actually given: the weighed quantity where one was entered, else the plan quantity. `requiredQty` below is what is GIVEN
@@ -391,17 +641,50 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
       return res.status(400).json({ error: `Weighed more than ${Math.round(DISPENSE_TOLERANCE * 100)}% away from the plan - write why: ${unexplained.map((r) => `${r.itemName} (plan ${r.plannedQty}, weighed ${r.requiredQty} ${r.unit})`).join("; ")}.` });
     }
 
+    // A re-dispense after Production refused some material gives only what is still missing: the materials that already have a line
+    // (received, or still on their way) are left alone.
+    const existingLines = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: batch.id, deliveryStatus: { not: "REFUSED" } }, select: { itemId: true } });
+    const haveLine = new Set(existingLines.map((l) => l.itemId));
+    const toGive = required.filter((r) => !haveLine.has(r.itemId));
+    if (required.length > 0 && toGive.length === 0) return res.status(409).json({ error: "Every material of this batch has already been dispensed." });
+    // Approved vendors: a material this product may only take from certain vendors (unless R&D allowed another).
+    const poItemId = batch.preProduction.purchaseOrderItem.id;
+    const vendorRules = (await rulesForPoItems([poItemId])).get(poItemId);
+    const allowedOf = (itemId: string) => allowedKeysOf(vendorRules?.get(itemId));
+
     const updated = await runSerializable(async (tx) => {
-      if (required.length > 0) {
-        const ids = required.map((r) => r.itemId);
+      let anySent = false;
+      if (toGive.length > 0) {
+        const ids = toGive.map((r) => r.itemId);
         // The Plant may already hold some of the material (issued to it earlier for the plan); the Day Store gives what is missing.
         const free = await plantFreeQty(plant!.id, ids, tx);
         const shelf = plant!.dayStoreId ? await getOnHandByDayStoreAndItem(plant!.dayStoreId, ids, tx) : new Map<string, { onHand: number }>();
-        const shortfalls = required.map((r) => ({ ...r, short: q3(Math.max(0, r.requiredQty - (free.get(r.itemId) ?? 0))) })).filter((s) => s.short > 1e-9);
+        // For a restricted material only the approved vendors' stock counts: what the Plant already holds from them, and what the Day Store
+        // holds from them. Stock of another vendor sitting there does not cover the batch.
+        const wrongVendor: string[] = [];
+        const approvedFree = new Map<string, number>();
+        const approvedShelf = new Map<string, number>();
+        for (const r of toGive) {
+          const keys = allowedOf(r.itemId);
+          if (!keys) continue;
+          approvedFree.set(r.itemId, Math.min(free.get(r.itemId) ?? 0, await approvedPlantStock(tx, r.itemId, keys, plant!.id)));
+          approvedShelf.set(r.itemId, Math.min(shelf.get(r.itemId)?.onHand ?? 0, plant!.dayStoreId ? await approvedStoreStock(tx, r.itemId, keys, plant!.dayStoreId) : 0));
+          if (r.requiredQty - approvedFree.get(r.itemId)! > approvedShelf.get(r.itemId)! + 1e-9) {
+            const rule = vendorRules!.get(r.itemId)!;
+            wrongVendor.push(`${r.itemName} (needs ${r.requiredQty} ${r.unit}; ${rule.vendorNames.join(" / ")} hold only ${q3(approvedFree.get(r.itemId)! + approvedShelf.get(r.itemId)!)} here)`);
+          }
+        }
+        if (wrongVendor.length > 0) {
+          throw new RouteError(409, `Approved vendor only - this product may not use another vendor's material for: ${wrongVendor.join("; ")}. Get the approved vendor's material to the Day Store, or ask R&D to allow another vendor for this product.`);
+        }
+        const shortfalls = toGive.map((r) => ({ ...r, short: q3(Math.max(0, r.requiredQty - (approvedFree.get(r.itemId) ?? free.get(r.itemId) ?? 0))) })).filter((s) => s.short > 1e-9);
         const stillShort = shortfalls.filter((s) => s.short > (shelf.get(s.itemId)?.onHand ?? 0) + 1e-9);
         if (stillShort.length > 0) {
           throw new RouteError(409, `The Day Store does not hold enough material for this batch: ${stillShort.map((s) => `${s.itemName} (needs ${s.short} more, Day Store has ${q3(Math.max(0, shelf.get(s.itemId)?.onHand ?? 0))} ${s.unit})`).join("; ")}.`);
         }
+        // What the Day Store sends to the Plant is ON ITS WAY until Production confirms it (the Receive step): it has left the Day Store's
+        // stock, and does not count in the Plant's until it is received.
+        const issueOf = new Map<string, { id: string; qty: number }>();
         for (const s of shortfalls) {
           const open = await tx.inventoryRequest.findFirst({
             where: { purchaseOrderItemId: batch.preProduction.purchaseOrderItem.id, itemId: s.itemId, purpose: "ISSUED_PRODUCTION", preProductionId: null, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } },
@@ -409,17 +692,34 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
             orderBy: { createdAt: "asc" },
           });
           const issue = await tx.inventoryTransaction.create({
-            data: { itemId: s.itemId, type: "ISSUED_PRODUCTION", date: new Date(), unit: s.unit, quantity: s.short, createdById: req.user!.id, dayStoreId: plant!.dayStoreId, plantId: plant!.id, fulfillsRequestId: open?.id ?? null, deliveredAt: new Date(), deliveredById: req.user!.id, remark: `Issued to the Plant at Dispensing (${batch.batchNo ?? "batch"})` },
+            data: {
+              itemId: s.itemId,
+              type: "ISSUED_PRODUCTION",
+              date: new Date(),
+              unit: s.unit,
+              quantity: s.short,
+              createdById: req.user!.id,
+              dayStoreId: plant!.dayStoreId,
+              plantId: plant!.id,
+              fulfillsRequestId: open?.id ?? null,
+              isTransitTracked: true,
+              deliveredAt: null,
+              deliveredById: null,
+              remark: `Sent to the Plant at Dispensing (${batch.batchNo ?? "batch"}) - waiting for Production to receive it`,
+            },
           });
-          // Which lots that came out of the Day Store, oldest expiry first.
-          await recordIssueLots(tx, issue);
+          // Which lots that came out of the Day Store, oldest expiry first (only the approved vendors' lots for a restricted material).
+          await recordIssueLots(tx, issue, allowedOf(s.itemId));
+          issueOf.set(s.itemId, { id: issue.id, qty: s.short });
+          anySent = true;
           if (open) {
             const issued = open.fulfillments.reduce((x, f) => x + f.quantity, 0) + s.short;
             await tx.inventoryRequest.update({ where: { id: open.id }, data: { status: issued >= open.requestedQty - 1e-9 ? "ISSUED" : "PARTIALLY_ISSUED" } });
           }
         }
-        // One line per material: what was weighed and given, what the plan asked for, and which lots (deliveries) it was drawn from.
-        for (const r of required) {
+        // One line per material: what was weighed and given, what the plan asked for, what is on its way, and (once the Plant holds it) which lots.
+        for (const r of toGive) {
+          const sent = issueOf.get(r.itemId);
           const line = await tx.batchDispensingLine.create({
             data: {
               productionBatchId: batch.id,
@@ -431,63 +731,139 @@ batchPrepRouter.post("/production-batches/:id/dispense", requireRole("STORE"), v
               tareWeight: r.weighing?.tareWeight,
               arNo: r.weighing?.arNo,
               note: r.weighing?.note,
+              // Nothing had to be sent (the Plant already held it all): there is nothing to receive.
+              deliveryStatus: sent ? "PENDING" : "RECEIVED",
+              sentQty: sent?.qty,
+              issueTxnId: sent?.id,
+              receivedAt: sent ? null : new Date(),
+              receivedById: sent ? null : req.user!.id,
               createdById: req.user!.id,
             },
           });
-          await recordDispensingLots(tx, line, plant!.id);
+          if (!sent) await recordDispensingLots(tx, line, plant!.id, allowedOf(r.itemId));
         }
+      }
+      // Nothing to send to the Plant: the batch goes straight to READY, which is not allowed while PPIC has the product on hold (or cancelled).
+      if (!anySent) {
+        const blocked = await productionBlockedByHoldOrCancel(batch.preProduction.purchaseOrderItem.id);
+        if (blocked) throw new RouteError(409, blocked);
       }
       return tx.productionBatch.update({
         where: { id: batch.id },
-        data: { rmDispensingDate: input.rmDispensingDate, pmIssuedDate: input.pmIssuedDate, dispensingRemarks: input.dispensingRemarks, grnNo: input.grnNo, dispensedAt: new Date(), prepStageId: "LINE_CLEARANCE" },
+        data: { rmDispensingDate: input.rmDispensingDate, pmIssuedDate: input.pmIssuedDate, dispensingRemarks: input.dispensingRemarks, grnNo: input.grnNo, dispensedAt: new Date(), bomSlot: dispensedSlot, prepStageId: anySent ? "RECEIVE" : "READY" },
         include: boardInclude,
       });
     });
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.dispensed", entityType: "ProductionBatch", entityId: batch.id, metadata: { materials: required.length } });
-    await notifyRoles(["QA_QC"], { title: `${updated.batchNo}: ${batch.preProduction.purchaseOrderItem.productName} needs Line Clearance`, body: `${batch.plannedQty} ${batch.preProduction.purchaseOrderItem.unit}: approve the line.`, link: "/batch-line-clearance" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.dispense"));
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.dispensed", entityType: "ProductionBatch", entityId: batch.id, metadata: { materials: toGive.length, toReceive: updated.prepStageId === "RECEIVE" } });
+    const product = batch.preProduction.purchaseOrderItem;
+    if (updated.prepStageId === "RECEIVE") {
+      await notifyRoles(["PRODUCTION"], { title: `${updated.batchNo}: ${product.productName} - material is on its way`, body: "The Day Store has sent this batch's material to the Plant. Confirm what arrived, material by material.", link: "/material-received" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.dispense.production"));
+    } else {
+      await notifyRoles(["PRODUCTION"], { title: `${updated.batchNo}: ${product.productName} is ready for production`, body: `${batch.plannedQty} ${product.unit}: the material is dispensed. Start the batch.`, link: "/batches" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.dispense"));
+    }
     res.json(await boardRow(updated, false));
   } catch (err) {
     next(err);
   }
 });
 
-// ---------------------------------------------------------------------------------------------------------------- Line Clearance (QA)
+// ---------------------------------------------------------------------------------------------------------------- Receive (Production)
 
-const CHECK_KEYS = new Set(BATCH_LINE_CLEARANCE_ITEMS.map((i) => i.key));
-const lineClearanceSchema = z
-  .object({
-    lineClearanceStatus: z.enum(["Approved", "Not Approved", "Hold"]),
-    lineClearanceRemarks: z.string().trim().max(1000).optional(),
-    // QA's BMR 4.0 checklist: { itemKey: true | false }
-    lineClearanceChecks: z.record(z.string(), z.boolean()).optional(),
-  })
-  .refine((d) => d.lineClearanceStatus === "Approved" || !!d.lineClearanceRemarks, { message: "Write the remark for Not Approved / Hold.", path: ["lineClearanceRemarks"] })
-  .refine((d) => Object.keys(d.lineClearanceChecks ?? {}).every((k) => CHECK_KEYS.has(k)), { message: "Unknown checklist item.", path: ["lineClearanceChecks"] })
-  .refine((d) => d.lineClearanceStatus !== "Approved" || BATCH_LINE_CLEARANCE_ITEMS.every((i) => d.lineClearanceChecks?.[i.key] === true), { message: "Tick every Line Clearance checklist item before approving the line.", path: ["lineClearanceChecks"] });
+/**
+ * Production confirms what the Day Store sent to the Plant for this batch, MATERIAL BY MATERIAL. Until it does, the material is on its way:
+ * it has left the Day Store's stock and is not in the Plant's.
+ *   RECEIVE  all of it, or less (then say what happened to the rest: it is kept as a recorded transit loss) - it joins the Plant's stock
+ *   REFUSE   with a reason: it goes back to the Day Store, and the batch returns to Dispensing for those materials only
+ * The batch is READY for production once every material is received (some perhaps after a second dispensing).
+ */
+const receiveSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        lineId: z.string().uuid(),
+        action: z.enum(["RECEIVE", "REFUSE"]),
+        receivedQty: z.coerce.number().positive().optional(),
+        note: z.string().trim().max(300).optional(),
+      }),
+    )
+    .min(1)
+    .max(200),
+});
 
-batchPrepRouter.post("/production-batches/:id/line-clearance", requireRole("QA_QC"), validateBody(lineClearanceSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+batchPrepRouter.post("/production-batches/:id/receive", requireRole("PRODUCTION"), validateBody(receiveSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const batch = await loadBatch(req.params.id);
     if (!batch || !batch.preProduction.batchFlow) return res.status(404).json({ error: "Batch not found" });
-    if (batch.prepStageId !== "LINE_CLEARANCE") return res.status(409).json({ error: batch.prepStageId === "READY" ? "This batch's line is already cleared." : `This batch is at ${STAGE_LABEL[batch.prepStageId]}: Line Clearance comes after Dispensing.` });
+    await assertPlantAccess(req.user!.id, req.user!.roles, batch.preProduction.plantId);
+    if (batch.prepStageId !== "RECEIVE") return res.status(409).json({ error: "No material of this batch is waiting to be received." });
     if (batch.heldAt) return res.status(409).json({ error: HELD_MESSAGE });
-    const input = req.body as z.infer<typeof lineClearanceSchema>;
-    const approved = input.lineClearanceStatus === "Approved";
-    // Approving the line opens production: not while PPIC has the product on hold (the batches in preparation are held one by one by Production)
-    if (approved) {
-      const blocked = await productionBlockedByHoldOrCancel(batch.preProduction.purchaseOrderItem.id);
-      if (blocked) return res.status(409).json({ error: blocked });
-    }
-    const updated = await prisma.productionBatch.update({
-      where: { id: batch.id },
-      data: { lineClearanceStatus: input.lineClearanceStatus, lineClearanceRemarks: input.lineClearanceRemarks ?? null, lineClearanceChecks: input.lineClearanceChecks ?? undefined, lineClearanceAt: new Date(), ...(approved ? { prepStageId: "READY" as const } : {}) },
-      include: boardInclude,
+    const productHeld = await productionHoldMessage(batch.preProduction.purchaseOrderItem.id);
+    if (productHeld) return res.status(409).json({ error: productHeld });
+    const plant = batch.preProduction.plant;
+    if (!plant) return res.status(400).json({ error: "This batch's run has no Plant." });
+    const input = req.body as z.infer<typeof receiveSchema>;
+    const planned = await requirementsOf(batch);
+    const receiveRules = (await rulesForPoItems([batch.preProduction.purchaseOrderItem.id])).get(batch.preProduction.purchaseOrderItem.id);
+
+    const result = await runSerializable(async (tx) => {
+      const pending = await tx.batchDispensingLine.findMany({ where: { productionBatchId: batch.id, deliveryStatus: "PENDING" } });
+      const byId = new Map(pending.map((l) => [l.id, l]));
+      const names = new Map((await tx.inventoryItem.findMany({ where: { id: { in: pending.map((l) => l.itemId) } }, select: { id: true, name: true } })).map((i) => [i.id, i.name]));
+      const seen = new Set<string>();
+      const refused: string[] = [];
+      const now = new Date();
+      for (const l of input.lines) {
+        const line = byId.get(l.lineId);
+        if (!line || seen.has(l.lineId)) throw new RouteError(409, "One of these materials is not waiting to be received (it may already be done).");
+        seen.add(l.lineId);
+        const name = names.get(line.itemId) ?? "material";
+        const issue = line.issueTxnId ? await tx.inventoryTransaction.findUnique({ where: { id: line.issueTxnId } }) : null;
+        if (l.action === "REFUSE") {
+          if (!l.note || l.note.length < 3) throw new RouteError(400, `Write why ${name} is refused.`);
+          if (issue && !issue.deletedAt) {
+            // Back to the Day Store: a cancelled issue gives its quantity back to the sender's stock.
+            await tx.inventoryTransaction.update({ where: { id: issue.id }, data: { deletedAt: now, deletedById: req.user!.id, shortNote: `Refused by Production: ${l.note}` } });
+            if (issue.fulfillsRequestId) await resyncRequestStatus(issue.fulfillsRequestId, tx);
+          }
+          await tx.batchDispensingLine.update({ where: { id: line.id }, data: { deliveryStatus: "REFUSED", receivedAt: now, receivedById: req.user!.id, receiveNote: l.note } });
+          refused.push(name);
+        } else {
+          // Less than was sent is allowed, with a reason; the difference is a recorded transit loss.
+          const got = resolveShortReceipt(line.sentQty ?? 0, { receivedQty: l.receivedQty, note: l.note });
+          if (issue && !issue.deletedAt) {
+            await tx.inventoryTransaction.update({ where: { id: issue.id }, data: { deliveredAt: now, deliveredById: req.user!.id, shortQty: got.shortQty, shortNote: got.shortNote } });
+          }
+          const received = await tx.batchDispensingLine.update({
+            where: { id: line.id },
+            data: { deliveryStatus: "RECEIVED", quantity: q3(line.quantity - (got.shortQty ?? 0)), receivedAt: now, receivedById: req.user!.id, receiveNote: got.shortNote },
+          });
+          // Now the Plant holds it: which lots it was drawn from.
+          await recordDispensingLots(tx, received, plant.id, allowedKeysOf(receiveRules?.get(line.itemId)));
+        }
+      }
+      const stillPending = await tx.batchDispensingLine.count({ where: { productionBatchId: batch.id, deliveryStatus: "PENDING" } });
+      let stage: "RECEIVE" | "DISPENSING" | "READY" = "RECEIVE";
+      if (stillPending === 0) {
+        const active = await tx.batchDispensingLine.findMany({ where: { productionBatchId: batch.id, deliveryStatus: { not: "REFUSED" } }, select: { itemId: true } });
+        const have = new Set(active.map((a) => a.itemId));
+        stage = planned.some((p) => !have.has(p.itemId)) ? "DISPENSING" : "READY";
+      }
+      if (stage === "READY") {
+        const blocked = await productionBlockedByHoldOrCancel(batch.preProduction.purchaseOrderItem.id);
+        if (blocked) throw new RouteError(409, blocked);
+      }
+      const row = await tx.productionBatch.update({ where: { id: batch.id }, data: { prepStageId: stage }, include: boardInclude });
+      return { row, stage, refused };
     });
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.line_clearance", entityType: "ProductionBatch", entityId: batch.id, metadata: { status: input.lineClearanceStatus } });
-    if (approved) {
-      await notifyRoles(["PRODUCTION"], { title: `${updated.batchNo}: ${batch.preProduction.purchaseOrderItem.productName} is ready for production`, body: "Line Clearance approved. Start the batch.", link: "/batches" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.line_clearance"));
+
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.material_received", entityType: "ProductionBatch", entityId: batch.id, metadata: { lines: input.lines.length, refused: result.refused, stage: result.stage } });
+    const product = batch.preProduction.purchaseOrderItem;
+    if (result.stage === "READY") {
+      await notifyRoles(["PRODUCTION"], { title: `${batch.batchNo}: ${product.productName} is ready for production`, body: `${batch.plannedQty} ${product.unit}: the material is received. Start the batch.`, link: "/batches" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.receive.qa"));
+    } else if (result.stage === "DISPENSING") {
+      await notifyPlantDayStore(plant.dayStoreId, { title: `${batch.batchNo}: Production refused material`, body: `${result.refused.join(", ")} came back. Dispense ${result.refused.length === 1 ? "it" : "them"} again.`, link: "/batch-dispensing" }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: batch.receive.daystore"));
     }
-    res.json(await boardRow(updated, false));
+    res.json(await boardRow(result.row, false, true));
   } catch (err) {
     next(err);
   }
@@ -527,6 +903,10 @@ batchPrepRouter.patch("/production-batches/:id/packaging", requireRole("PRODUCTI
     await assertPlantAccess(req.user!.id, req.user!.roles, batch.preProduction?.plantId);
     if (batch.status !== "COMPLETED" || batch.currentStageId !== "PACKAGING") return res.status(409).json({ error: "This batch is not at Packaging." });
     const data = req.body as z.infer<typeof packagingSchema>;
+
+    // Packaging opens once the RM Utilization is filled (after Bulk QC, before Packaging).
+    const rmStatus = (await utilizationOfBatches(batch.preProduction.purchaseOrderItem.id, [{ id: batch.id, plannedQty: batch.plannedQty }])).get(batch.id)!;
+    if (!rmStatus.complete) return res.status(409).json({ error: utilizationGapMessage(rmStatus, "start Packaging") });
 
     // The end of Packaging (status Completed, end time, remarks) opens only once the PM Utilization is complete and the start fields are in.
     const finishing = data.packagingEndAt !== undefined || data.packagingRemarks !== undefined || String(data.packagingStatus ?? "").trim().toLowerCase() === "completed";

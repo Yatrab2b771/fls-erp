@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
-import { ArrowLeft, Download, PackagePlus, Send, Trash2 } from "lucide-react";
+import { ArrowLeft, Download, PackagePlus, Plus, Send, Trash2, X } from "lucide-react";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useInventoryItems, usePurchaseOrders } from "../lib/hooks";
@@ -18,6 +18,13 @@ import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport
 
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 const distinct = (xs: (string | null | undefined)[]) => [...new Set(xs.filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+interface MaterialLine {
+  key: number;
+  category: "RM" | "PM";
+  itemId: string;
+  qty: string;
+}
 
 // Where an extra request stands, in words: with the Day Store, asked of the Warehouse, with PPIC, with Purchase, on order (ETA), then issued.
 function trailOf(r: ExtraRequestRow): { label: string; tone: string } {
@@ -45,11 +52,13 @@ export function ExtraMaterialPage() {
   const filters = useTileFilters();
   const picked = (key: string) => filters.applied.picks[key] ?? [];
 
-  const [category, setCategory] = useState<"RM" | "PM">("RM");
-  const { data: items } = useInventoryItems(category);
+  const { data: rmItems } = useInventoryItems("RM");
+  const { data: pmItems } = useInventoryItems("PM");
   const { data: orders } = usePurchaseOrders({ enabled: canAsk });
-  const [itemId, setItemId] = useState("");
-  const [qty, setQty] = useState("");
+  // One request can carry several materials; each line becomes its own request that the Day Store, Warehouse and Purchase follow separately.
+  const [lines, setLines] = useState<MaterialLine[]>([{ key: 1, category: "RM", itemId: "", qty: "" }]);
+  const nextKey = useRef(2);
+  const setLine = (key: number, patch: Partial<MaterialLine>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const [neededBy, setNeededBy] = useState("");
   const [reason, setReason] = useState("");
   const [plantId, setPlantId] = useState("");
@@ -73,20 +82,30 @@ export function ExtraMaterialPage() {
 
   async function submit() {
     setError(null);
-    if (!itemId) return setError("Choose the item.");
-    if (!(Number(qty) > 0)) return setError("Enter the quantity.");
+    const filled = lines.filter((l) => l.itemId || l.qty);
+    if (filled.length === 0) return setError("Choose the item.");
+    for (const [i, l] of filled.entries()) {
+      if (!l.itemId) return setError(`Material ${i + 1}: choose the item.`);
+      if (!(Number(l.qty) > 0)) return setError(`Material ${i + 1}: enter the quantity.`);
+    }
+    if (new Set(filled.map((l) => l.itemId)).size !== filled.length) return setError("The same item is added twice. Add it once with the total quantity.");
     if (reason.trim().length < 3) return setError("Say why it is needed.");
     if (plants.length > 1 && !plantId) return setError("Choose the Plant.");
+    const sent = new Set<number>();
     try {
-      await create.mutateAsync({ itemId, requestedQty: Number(qty), reason: reason.trim(), neededBy: neededBy || undefined, plantId: plantId || (plants.length === 1 ? plants[0]!.id : undefined), purchaseOrderItemId: refId || undefined });
-      toast.success("Asked the Day Store. You can follow it in the list below.");
-      setItemId("");
-      setQty("");
+      for (const l of filled) {
+        await create.mutateAsync({ itemId: l.itemId, requestedQty: Number(l.qty), reason: reason.trim(), neededBy: neededBy || undefined, plantId: plantId || (plants.length === 1 ? plants[0]!.id : undefined), purchaseOrderItemId: refId || undefined });
+        sent.add(l.key);
+      }
+      toast.success(filled.length > 1 ? `Asked the Day Store for ${filled.length} materials. You can follow each in the list below.` : "Asked the Day Store. You can follow it in the list below.");
+      setLines([{ key: nextKey.current++, category: "RM", itemId: "", qty: "" }]);
       setReason("");
       setNeededBy("");
       setRefId("");
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not send the request");
+      // Keep only what was not sent, so a retry does not ask twice for the same material
+      if (sent.size) setLines((ls) => ls.filter((l) => !sent.has(l.key)));
+      setError((sent.size ? `${sent.size} sent, the rest did not go: ` : "") + (err instanceof ApiError ? err.message : "Could not send the request"));
     }
   }
 
@@ -115,8 +134,8 @@ export function ExtraMaterialPage() {
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-violet-500/10 text-violet-600">
             <PackagePlus className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -125,7 +144,7 @@ export function ExtraMaterialPage() {
             <p className="text-sm text-slate-500">Material you need that is not in any plan. It goes to your Plant's Day Store; if the Warehouse is short, PPIC and Purchase get it by themselves.</p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -134,21 +153,34 @@ export function ExtraMaterialPage() {
         <div className="card space-y-3 p-4">
           <p className="label">Ask for material</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
-            <div className="sm:col-span-2">
-              <label className="mb-0.5 block text-micro text-slate-400">Item</label>
-              <div className="flex gap-1.5">
-                <select className="field !py-1.5 w-20 shrink-0 text-xs" value={category} onChange={(e) => { setCategory(e.target.value as "RM" | "PM"); setItemId(""); }}>
-                  <option value="RM">RM</option>
-                  <option value="PM">PM</option>
-                </select>
-                <div className="min-w-0 flex-1">
-                  <ItemPicker items={(items ?? []).map((i) => ({ id: i.id, name: i.name, code: i.code }))} value={itemId} onChange={setItemId} placeholder="— Select an item —" />
+            <div className="space-y-2 sm:col-span-4">
+              {lines.map((l, i) => (
+                <div key={l.key} className="grid grid-cols-1 items-end gap-3 sm:grid-cols-4">
+                  <div className="sm:col-span-3">
+                    {i === 0 && <label className="mb-0.5 block text-micro text-slate-400">Item and quantity</label>}
+                    <div className="flex gap-1.5">
+                      <select className="field !py-1.5 w-20 shrink-0 text-xs" value={l.category} onChange={(e) => setLine(l.key, { category: e.target.value as "RM" | "PM", itemId: "" })}>
+                        <option value="RM">RM</option>
+                        <option value="PM">PM</option>
+                      </select>
+                      <div className="min-w-0 flex-1">
+                        <ItemPicker items={((l.category === "RM" ? rmItems : pmItems) ?? []).map((it) => ({ id: it.id, name: it.name, code: it.code }))} value={l.itemId} onChange={(v) => setLine(l.key, { itemId: v })} placeholder="— Select an item —" />
+                      </div>
+                      <input type="number" min="0" step="any" placeholder="Quantity" className="field !py-1.5 w-32 shrink-0 text-xs" value={l.qty} onChange={(e) => setLine(l.key, { qty: e.target.value })} />
+                    </div>
+                  </div>
+                  <div className="flex items-center">
+                    {lines.length > 1 && (
+                      <button type="button" className="btn-ghost btn-sm" title="Remove this material" onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}>
+                        <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </div>
-            <div>
-              <label className="mb-0.5 block text-micro text-slate-400">Quantity</label>
-              <input type="number" min="0" step="any" className="field !py-1.5 text-xs" value={qty} onChange={(e) => setQty(e.target.value)} />
+              ))}
+              <button type="button" className="btn-ghost btn-sm" onClick={() => setLines((ls) => [...ls, { key: nextKey.current++, category: ls[ls.length - 1]?.category ?? "RM", itemId: "", qty: "" }])}>
+                <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add another material
+              </button>
             </div>
             <div>
               <label className="mb-0.5 block text-micro text-slate-400">Needed by</label>
@@ -172,7 +204,7 @@ export function ExtraMaterialPage() {
           {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
           <div className="flex justify-end">
             <button type="button" className="btn-primary btn-sm" disabled={create.isPending} onClick={submit}>
-              <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {create.isPending ? "Sending…" : "Ask the Day Store"}
+              <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {create.isPending ? "Sending…" : lines.filter((l) => l.itemId).length > 1 ? "Ask the Day Store for all" : "Ask the Day Store"}
             </button>
           </div>
         </div>

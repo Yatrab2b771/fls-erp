@@ -9,6 +9,9 @@ import type { RecipeDetail, RecipeKind } from "../lib/types";
 import type { RmSnapshotShape } from "../lib/bomSnapshots";
 import { BomUploadBox } from "./BomUploadBox";
 import { BomVersionBar } from "./BomVersionBar";
+import { useBomSlotDetail, useSaveBomSlot, type RmSlotSnapshot, type SlotName } from "../lib/bomSlotHooks";
+import { SlotBanner, SlotExcelLoad, SlotStart, SlotSwitcher, type SlotChoice } from "./BomSlotSwitcher";
+import type { ParsedPmProduct, ParsedRmRecipe } from "../lib/bomTemplateImport";
 import { BomDownloadButtons, CustomerBomDownload } from "./BomDownloadButtons";
 import { ItemPicker } from "./ItemPicker";
 import { useToast } from "./Toast";
@@ -210,6 +213,9 @@ export function RmBomCatalog({ canEdit }: { canEdit: boolean }) {
 
 function RecipeShell(props: { productName: string; customerId: string; customerLabel: string; canEdit: boolean; recipeId: string | null; commonRecipeId: string | null; exactName: string }) {
   const [viewing, setViewing] = useState<number | null>(null);
+  const [slot, setSlot] = useState<SlotChoice>("DISPLAY");
+  const [startedEmpty, setStartedEmpty] = useState<SlotName | null>(null);
+  const { data: slots } = useBomSlotDetail(props.customerId, props.exactName);
   const { data: versions } = useBomVersions("RM", props.recipeId ?? undefined);
   const activeVersion = versions?.[0]?.version ?? 0;
   const { data: snap } = useQuery({
@@ -217,8 +223,29 @@ function RecipeShell(props: { productName: string; customerId: string; customerL
     queryFn: () => fetchBomVersion<RmSnapshotShape>("RM", props.recipeId!, viewing!),
     enabled: viewing != null && !!props.recipeId,
   });
+  const switcher = <SlotSwitcher value={slot} onChange={(v) => { setSlot(v); setStartedEmpty(null); }} detail={slots} half="rm" />;
+
+  if (slot !== "DISPLAY") {
+    const v = slots?.slots[slot];
+    return (
+      <div className="space-y-3">
+        {switcher}
+        {!slots ? (
+          <p className="text-xs text-slate-400">Loading...</p>
+        ) : v?.rm || startedEmpty === slot ? (
+          <>
+            <SlotBanner slot={slot} half="rm" />
+            <RecipeEditor key={`${props.recipeId}:${slot}:${v?.updatedAt ?? "new"}`} {...props} slot={slot} slotInit={v?.rm ?? null} />
+          </>
+        ) : (
+          <SlotStart detail={slots} slot={slot} half="rm" canEdit={props.canEdit} onStartEmpty={() => setStartedEmpty(slot)} />
+        )}
+      </div>
+    );
+  }
   return (
     <div className="space-y-3">
+      {switcher}
       {props.recipeId && (
         <div className="flex flex-wrap items-center justify-between gap-2">
           <BomVersionBar kind="RM" entityId={props.recipeId} viewing={viewing} onView={setViewing} canRestore={props.canEdit} />
@@ -234,13 +261,14 @@ function RecipeShell(props: { productName: string; customerId: string; customerL
   );
 }
 
-function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEditProp, recipeId, commonRecipeId, exactName, snapshot }: { productName: string; customerId: string; customerLabel: string; canEdit: boolean; recipeId: string | null; commonRecipeId: string | null; exactName: string; snapshot?: RmSnapshotShape }) {
+function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEditProp, recipeId, commonRecipeId, exactName, snapshot, slot, slotInit }: { productName: string; customerId: string; customerLabel: string; canEdit: boolean; recipeId: string | null; commonRecipeId: string | null; exactName: string; snapshot?: RmSnapshotShape; slot?: SlotName; slotInit?: RmSlotSnapshot | null }) {
   const toast = useToast();
   const canEdit = canEditProp && !snapshot;
   const { data: detail, isLoading } = useRecipe(recipeId ?? undefined);
   const { data: rmItems } = useInventoryItems("RM");
   const { data: allRecipes } = useRecipes();
   const importRecipes = useImportRecipes();
+  const saveSlot = useSaveBomSlot();
 
   const [kind, setKind] = useState<RecipeKind>("PER_KG");
   const [header, setHeader] = useState({ productCode: "", versionLabel: "", batchSize: "", avgUnitWeightMg: "" });
@@ -269,9 +297,13 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
 
   // Load the Active recipe (or the old version being looked at) into the editor.
   useEffect(() => {
-    if (!rmItems && (recipeId || snapshot)) return;
-    const src = snapshot
-      ? { kind: snapshot.kind ?? "PER_KG", productCode: snapshot.productCode, versionLabel: snapshot.versionLabel, batchSize: snapshot.batchSize, avgUnitWeightMg: snapshot.avgUnitWeightMg, ingredients: snapshot.ingredients.map((i) => ({ ...i, itemCode: i.itemCode ?? null })) }
+    if (!rmItems && (recipeId || snapshot || slot)) return;
+    // A V1 / V2 shows its own ingredients under the catalog recipe's header (batch size etc.).
+    const slotSnap: RmSnapshotShape | undefined = slot
+      ? { kind: slotInit?.kind ?? detail?.kind ?? "PER_KG", productCode: slotInit?.productCode ?? detail?.productCode ?? null, versionLabel: slotInit?.versionLabel ?? detail?.versionLabel ?? null, batchSize: slotInit?.batchSize ?? detail?.batchSize ?? null, avgUnitWeightMg: slotInit?.avgUnitWeightMg ?? detail?.avgUnitWeightMg ?? null, ingredients: (slotInit?.ingredients ?? []).map((i) => ({ name: i.name, brand: i.brand, itemCode: i.itemCode ?? undefined, gPerServing: i.gPerServing, proteinPct: i.proteinPct, uom: i.uom })) }
+      : undefined;
+    const src = (snapshot ?? slotSnap)
+      ? { kind: (snapshot ?? slotSnap)!.kind ?? "PER_KG", productCode: (snapshot ?? slotSnap)!.productCode, versionLabel: (snapshot ?? slotSnap)!.versionLabel, batchSize: (snapshot ?? slotSnap)!.batchSize, avgUnitWeightMg: (snapshot ?? slotSnap)!.avgUnitWeightMg, ingredients: (snapshot ?? slotSnap)!.ingredients.map((i) => ({ ...i, itemCode: i.itemCode ?? null })) }
       : detail
         ? { kind: detail.kind ?? "PER_KG", productCode: detail.productCode, versionLabel: detail.versionLabel, batchSize: detail.batchSize, avgUnitWeightMg: detail.avgUnitWeightMg, ingredients: detail.ingredients.map((i) => ({ name: i.name, brand: i.brand, itemCode: i.itemCode, gPerServing: i.gPerServing, proteinPct: i.proteinPct, uom: i.uom })) }
         : null;
@@ -318,10 +350,45 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
     toast.success(`Copied ${copyDetail.ingredients.length} row(s) from "${copyDetail.name}" - check the quantities, then Save.`);
   }
 
+  // A sheet loaded into a V1 / V2: its ingredients and header go into the editor (matched to the Store's RM items); nothing is saved yet.
+  function loadSheet(sheet: ParsedPmProduct | ParsedRmRecipe) {
+    const p = sheet as ParsedRmRecipe;
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const byName = new Map((rmItems ?? []).map((i) => [norm(i.name), i]));
+    if (rows.some((r) => r.name.trim() && Number(r.qty) > 0) && !window.confirm(`Replace the rows below with the ${p.rows.length} ingredient(s) of the sheet?`)) return;
+    const k: RecipeKind = p.kind === "RM_UNIT" ? "PER_UNIT" : "PER_KG";
+    setKind(k);
+    setRows(
+      p.rows.map((r) => {
+        const item = (r.code && itemByCode.get(r.code.trim().toLowerCase())) || byName.get(norm(r.name)) || null;
+        return { key: `r${rowSeq++}`, itemId: item?.id ?? "", itemCode: (item?.code ?? r.code) || "", name: item?.name ?? r.name, brand: r.make || "Approved Vendor", uom: r.uom || (k === "PER_UNIT" ? "mg" : "Kg"), qty: String(r.qty), protein: "" };
+      }),
+    );
+    setHeader({ productCode: p.productCode, versionLabel: p.versionLabel, batchSize: p.batchSize != null ? String(p.batchSize) : header.batchSize, avgUnitWeightMg: p.avgUnitWeightMg != null ? String(p.avgUnitWeightMg) : header.avgUnitWeightMg });
+    setDirty(true);
+  }
+
   async function handleSave() {
-    if (!(Number(header.batchSize) > 0)) return toast.error(`Batch size is required - enter the batch ${kind === "PER_UNIT" ? "in gummies" : "in Kg"}.`);
+    if (!slot && !(Number(header.batchSize) > 0)) return toast.error(`Batch size is required - enter the batch ${kind === "PER_UNIT" ? "in gummies" : "in Kg"}.`);
     const usable = rows.filter((r) => r.name.trim() && Number(r.qty) > 0);
     if (usable.length === 0) return toast.error("Add at least one ingredient with a name and a quantity greater than 0.");
+    if (slot) {
+      try {
+        await saveSlot.mutateAsync({
+          slot,
+          customerId,
+          productName: exactName,
+          rm: { kind, productCode: header.productCode.trim() || null, versionLabel: header.versionLabel.trim() || null, batchSize: Number(header.batchSize) > 0 ? Number(header.batchSize) : null, avgUnitWeightMg: kind === "PER_UNIT" && Number(header.avgUnitWeightMg) > 0 ? Number(header.avgUnitWeightMg) : null, ingredients: usable.map((r) => ({ name: r.name.trim(), brand: r.brand.trim() || "Approved Vendor", itemCode: r.itemCode.trim() || undefined, gPerServing: Number(r.qty), proteinPct: Math.min(1, (Number(r.protein) || 0) > 1 ? (Number(r.protein) || 0) / 100 : Number(r.protein) || 0), uom: r.uom || undefined })) },
+          note: note.trim() || undefined,
+        });
+        setDirty(false);
+        setNote("");
+        toast.success(`${slot} saved for "${productName}". The Display BOM is unchanged.`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : `Could not save ${slot}`);
+      }
+      return;
+    }
     try {
       await importRecipes.mutateAsync([
         {
@@ -394,7 +461,7 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
         )}
       </div>
 
-      {canEdit && !recipeId && commonRecipeId && !snapshot && (
+      {canEdit && !recipeId && commonRecipeId && !snapshot && !slot && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300 bg-amber-50/60 px-3 py-2 text-xs text-amber-800">
           <span>
             There is no recipe of "{productName}" for {customerLabel} yet. An older <b>common</b> recipe with this name exists. It is not used for any customer unless you choose to.
@@ -410,6 +477,7 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
           <button type="button" className="btn-ghost btn-sm" onClick={() => setCopying((v) => !v)}>
             <Copy className="h-3 w-3" strokeWidth={2.5} /> Copy recipe from another product
           </button>
+          {slot && <SlotExcelLoad mode="rm" productName={productName} onLoaded={loadSheet} />}
         </div>
       )}
       {copying && canEdit && (
@@ -501,8 +569,8 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
             <div className="flex flex-wrap items-center gap-2">
               {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Store item</span>}
               <input className="field !h-7 !w-48 !py-0 text-xs" placeholder="What changed? (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-              <button type="button" className="btn-primary btn-sm" disabled={importRecipes.isPending || !dirty} onClick={handleSave}>
-                {importRecipes.isPending ? "Saving..." : "Save recipe"}
+              <button type="button" className="btn-primary btn-sm" disabled={importRecipes.isPending || saveSlot.isPending || !dirty} onClick={handleSave}>
+                {importRecipes.isPending || saveSlot.isPending ? "Saving..." : slot ? `Save ${slot}` : "Save recipe"}
               </button>
             </div>
           </div>

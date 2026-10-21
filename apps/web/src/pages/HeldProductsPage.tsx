@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { ArrowLeft, PauseCircle, Play } from "lucide-react";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useHeldProducts, useSetBatchHold, type HeldBatch, type HeldProduct } from "../lib/heldProductHooks";
+import { useHeldProducts, useSetBatchHold, useSetProductHold, type HeldBatch, type HeldProduct } from "../lib/heldProductHooks";
 import { useTileFilters } from "../lib/tileFilters";
 import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -29,6 +29,8 @@ export function HeldProductsPage() {
   const toast = useToast();
   const { data, isLoading } = useHeldProducts();
   const setHold = useSetBatchHold();
+  const setProductHold = useSetProductHold();
+  const [releasing, setReleasing] = useState<HeldProduct | null>(null);
   const filters = useTileFilters();
   const [asking, setAsking] = useState<{ product: HeldProduct; batch: HeldBatch; held: boolean } | null>(null);
   const every = data ?? [];
@@ -47,11 +49,22 @@ export function HeldProductsPage() {
         (!picked("po").length || picked("po").includes(p.poNumber ?? "")) &&
         (!picked("customer").length || picked("customer").includes(p.customerName)) &&
         (!picked("product").length || picked("product").includes(p.productName)) &&
-        (!dateFrom || (p.productHeldAt ?? "").slice(0, 10) >= dateFrom) &&
-        (!dateTo || (p.productHeldAt ?? "").slice(0, 10) <= dateTo),
+        (!dateFrom || (p.productHeldAt ?? p.productionHeldAt ?? "").slice(0, 10) >= dateFrom) &&
+        (!dateTo || (p.productHeldAt ?? p.productionHeldAt ?? "").slice(0, 10) <= dateTo),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [every, filters.applied]);
+
+  async function releaseProduct() {
+    if (!releasing) return;
+    try {
+      await setProductHold.mutateAsync({ itemId: releasing.itemId, held: false });
+      toast.success(`${releasing.productName} is released: it is back in New Plan.`);
+      setReleasing(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save");
+    }
+  }
 
   async function run(reason?: string) {
     if (!asking) return;
@@ -76,7 +89,7 @@ export function HeldProductsPage() {
         <div>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">Held Products</h1>
           <p className="text-sm text-slate-500">
-            Products PPIC has put on hold, with their batches. {canAct ? "Hold the batches that should not go on" : "Production holds the batches that should not go on"} while they are still in preparation (Indent Issue to Line Clearance). A batch already in production follows the whole pipeline.
+            Products on hold: PPIC's holds, and the ones Production put on hold from New Plan (release those here). {canAct ? "Hold the batches that should not go on" : "Production holds the batches that should not go on"} while they are still in preparation (Indent Issue to Line Clearance). A batch already in production follows the whole pipeline.
           </p>
         </div>
       </div>
@@ -96,7 +109,7 @@ export function HeldProductsPage() {
                   <th className="px-3 py-2.5">PO Number</th>
                   <th className="px-3 py-2.5">Customer</th>
                   <th className="px-3 py-2.5">Product</th>
-                  <th className="px-3 py-2.5">PPIC hold</th>
+                  <th className="px-3 py-2.5">Hold</th>
                   <th className="px-3 py-2.5">Batch</th>
                   <th className="px-3 py-2.5">Qty</th>
                   <th className="px-3 py-2.5">Stage</th>
@@ -110,9 +123,9 @@ export function HeldProductsPage() {
                   <Fragment key={p.itemId}>
                     {p.batches.length === 0 ? (
                       <tr className="border-b border-slate-50">
-                        <ProductCells p={p} />
+                        <ProductCells p={p} canAct={canAct} onRelease={setReleasing} />
                         <td className="px-3 py-2.5 text-slate-400" colSpan={canAct ? 6 : 5}>
-                          No batch made yet. No new batch can be made until PPIC releases it.
+                          No batch made yet. No new batch can be made until {p.productionHeld && !p.productHeld ? "Production releases it" : "it is released"}.
                         </td>
                       </tr>
                     ) : (
@@ -120,7 +133,7 @@ export function HeldProductsPage() {
                         const st = batchStatus(b);
                         return (
                           <tr key={b.id} className="border-b border-slate-50">
-                            {i === 0 ? <ProductCells p={p} rowSpan={p.batches.length} /> : null}
+                            {i === 0 ? <ProductCells p={p} rowSpan={p.batches.length} canAct={canAct} onRelease={setReleasing} /> : null}
                             <td className="px-3 py-2.5 font-bold text-slate-700">{b.batchNo ?? "Not numbered yet"}</td>
                             <td className="px-3 py-2.5 text-slate-600">
                               {b.plannedQty} {p.unit}
@@ -162,6 +175,16 @@ export function HeldProductsPage() {
       )}
 
       <ConfirmDialog
+        open={!!releasing}
+        tone="brand"
+        title="Release this product?"
+        message={releasing && <>{releasing.productName} ({releasing.poNumber ?? "PO"}) goes back to New Plan and Production can carry on with it.</>}
+        confirmLabel="Release product"
+        busy={setProductHold.isPending}
+        onConfirm={() => void releaseProduct()}
+        onCancel={() => setReleasing(null)}
+      />
+      <ConfirmDialog
         open={asking?.held === true}
         tone="brand"
         title="Hold this batch?"
@@ -197,7 +220,7 @@ export function HeldProductsPage() {
 }
 
 /** The product's own cells (PO, customer, product, PPIC's hold), shared by all its batch rows. */
-function ProductCells({ p, rowSpan }: { p: HeldProduct; rowSpan?: number }) {
+function ProductCells({ p, rowSpan, canAct, onRelease }: { p: HeldProduct; rowSpan?: number; canAct: boolean; onRelease: (p: HeldProduct) => void }) {
   return (
     <>
       <td className="px-3 py-2.5 align-top font-bold text-slate-700" rowSpan={rowSpan}>
@@ -216,7 +239,24 @@ function ProductCells({ p, rowSpan }: { p: HeldProduct; rowSpan?: number }) {
         </p>
       </td>
       <td className="px-3 py-2.5 align-top" rowSpan={rowSpan}>
-        {p.productHeld ? <span className="pill border-amber-200 bg-amber-50 text-amber-700">On hold since {day(p.productHeldAt)}</span> : <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Released by PPIC</span>}
+        <div className="flex flex-col items-start gap-1">
+          {p.productHeld && <span className="pill border-amber-200 bg-amber-50 text-amber-700">PPIC hold since {day(p.productHeldAt)}</span>}
+          {p.productionHeld && (
+            <>
+              <span className="pill border-rose-200 bg-rose-50 text-rose-700">Production hold since {day(p.productionHeldAt)}</span>
+              <span className="max-w-[14rem] truncate font-normal text-slate-500" title={p.productionHoldReason ?? ""}>
+                {p.productionHoldReason ?? ""}
+                {p.productionHeldByName ? ` (${p.productionHeldByName})` : ""}
+              </span>
+              {canAct && (
+                <button type="button" className="btn-primary btn-sm" onClick={() => onRelease(p)}>
+                  <Play className="h-3.5 w-3.5" strokeWidth={2.5} /> Release product
+                </button>
+              )}
+            </>
+          )}
+          {!p.productHeld && !p.productionHeld && <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Released by PPIC</span>}
+        </div>
       </td>
     </>
   );

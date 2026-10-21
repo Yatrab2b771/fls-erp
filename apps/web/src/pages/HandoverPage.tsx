@@ -168,8 +168,8 @@ export function HandoverPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-emerald-500/10 text-emerald-600">
             <Truck className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -182,7 +182,7 @@ export function HandoverPage() {
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={groups.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={groups.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>

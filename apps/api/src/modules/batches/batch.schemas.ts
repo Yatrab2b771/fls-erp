@@ -175,6 +175,8 @@ export const createProductionBatchSchema = z.object({
   manpowerCount: z.coerce.number().int().positive().optional(),
   shiftStartAt: z.coerce.date().optional(),
   inputQty: z.coerce.number().positive().optional(),
+  // Why an extra batch is needed when the earlier batches made less than planned (required for such a batch, see the create route).
+  reason: z.string().trim().max(500).optional(),
 });
 
 // Every field this run collects, all optional — a run can be created and

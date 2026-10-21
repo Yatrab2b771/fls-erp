@@ -1,5 +1,4 @@
 import request from "supertest";
-import { BATCH_LINE_CLEARANCE_ITEMS } from "../src/modules/batches/batch-checklists";
 import type { RoleName } from "@prisma/client";
 import { createApp } from "../src/app";
 import { prisma } from "../src/common/lib/prisma";
@@ -43,33 +42,27 @@ async function main() {
     await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/indent`, { prodIndentSlipSign: "DEMO Production Head", productionPlanDate: day(-4) });
     const allocated = await call<{ batchNo: string }>("RND", "post", `/api/production-batches/${batch.id}/batch-no/allocate`, {});
     await call("ADMIN", "post", `/api/production-batches/${batch.id}/dispense`, { rmDispensingDate: day(-3), pmIssuedDate: day(-3), dispensingRemarks: "DEMO: batch material dispensed" });
+    await receiveAll(batch.id); // Production confirms what the Day Store sent
     if (last) {
-      console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · waits at Line Clearance`);
+      console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · is READY, production not started`);
       continue;
     }
-    await call("QA_QC", "post", `/api/production-batches/${batch.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceRemarks: "DEMO: line clear", lineClearanceChecks: Object.fromEntries(BATCH_LINE_CLEARANCE_ITEMS.map((i) => [i.key, true])) });
 
-    // Production: start fields, then its Utilization (what it was given: mostly used, a little waste, reject and sample), then the end
+    // Production: start fields, then the end and the bulk made (the Utilization is filled later, at Packaging)
     const start = new Date(Date.now() - (parts.length - b) * 86_400_000);
     await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shift: b % 2 === 0 ? "Day" : "Night", manpowerCount: 8, shiftStartAt: start.toISOString() });
-    const items = (await call<{ id: string; utilization: { items: { itemId: string; category: string; unit: string; givenQty: number }[] } }[]>("PRODUCTION", "get", `/api/pre-productions/${run.id}/production-batches`)).find((x) => x.id === batch.id)!.utilization.items;
-    for (const n of items.filter((x) => x.category === "RM")) {
-      const given = n.givenQty;
-      await call("PRODUCTION", "post", `/api/plant-consumption/${run.id}/entries`, {
-        itemId: n.itemId,
-        unit: n.unit,
-        productionBatchId: batch.id,
-        consumedQty: round3(given * 0.97),
-        wastedQty: round3(given * 0.01),
-        rejectedQty: round3(given * 0.01),
-        sampleQty: round3(given * 0.01),
-        note: "DEMO: batch usage",
-      });
-    }
-    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed" });
+    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed", outputQty: qty });
     const done = await call<{ productionBatch: { inputQty: number; outputQty: number } }>("PRODUCTION", "post", `/api/production-batches/${batch.id}/complete`, {});
-    console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · completed (input ${done.productionBatch.inputQty}, output ${done.productionBatch.outputQty})`);
+    console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · completed (bulk output ${done.productionBatch.outputQty}; its Utilization is filled later, at Packaging)`);
   }
 }
 
 main().finally(() => prisma.$disconnect());
+
+
+/** Production's Receive step: confirms everything the Day Store sent for the batch (Admin acts as Production). */
+async function receiveAll(batchId: string) {
+  const board = await call<{ id: string; receiveLines?: { lineId: string }[] }[]>("ADMIN", "get", "/api/production-batches/prep-board?stage=RECEIVE");
+  const row = board.find((r) => r.id === batchId);
+  if (row?.receiveLines?.length) await call("ADMIN", "post", `/api/production-batches/${batchId}/receive`, { lines: row.receiveLines.map((l) => ({ lineId: l.lineId, action: "RECEIVE" })) });
+}

@@ -22,7 +22,6 @@ import { customerTypeLabel } from "../lib/customerTags";
 // quantities, shift, dates, what was filled at this stage, how long it has waited) and the actions (Approve / Hold / Reject / Open).
 
 const STAGES: Record<string, { view: QcBoardView; title: string; blurb: string }> = {
-  "line-clearance": { view: "LINE_CLEARANCE", title: "Line Clearance", blurb: "Runs waiting for QA's line clearance before production starts. Approve and the batches can be made." },
   ipqc: { view: "IPQC", title: "IPQC (In-Process QA)", blurb: "Batches whose in-process check is waiting for QA." },
   "qa-gate-mfg": { view: "QA_GATE_MFG", title: "QA Gate: Manufacturing", blurb: "Batches that finished manufacturing and wait at QA's gate." },
   "qa-gate-packaging": { view: "QA_GATE_PACKAGING", title: "QA Gate: Packaging", blurb: "Batches that finished packaging and wait at QA's gate." },
@@ -51,7 +50,6 @@ function QcStageList({ stage, slug }: { stage: { view: QcBoardView; title: strin
   const [openId, setOpenId] = useState<string | null>(null);
   const [mode, setMode] = useState<QcDecision>("APPROVE");
   const everyRow = data ?? [];
-  const isBatchStage = stage.view !== "LINE_CLEARANCE";
   const isHoldView = stage.view === "ON_HOLD";
   const picked = (key: string) => filters.applied.picks[key] ?? [];
 
@@ -60,11 +58,11 @@ function QcStageList({ stage, slug }: { stage: { view: QcBoardView; title: strin
     { key: "customer", label: "Customer", options: distinct(everyRow.map((r) => r.customerName)) },
     { key: "category", label: "Product Category", options: distinct(everyRow.map((r) => r.productCategory)) },
     { key: "product", label: "Product", options: distinct(everyRow.map((r) => r.productName)) },
-    ...(isBatchStage ? [{ key: "batch", label: "Batch No.", options: distinct(everyRow.map((r) => r.batchNo)) }] : []),
+    { key: "batch", label: "Batch No.", options: distinct(everyRow.map((r) => r.batchNo)) },
     { key: "plant", label: "Plant", options: distinct(everyRow.map((r) => r.plantName)) },
     ...(isHoldView ? [{ key: "stage", label: "Stage", options: distinct(everyRow.map((r) => r.stageLabel)) }] : []),
     { key: "status", label: "QA Status", options: ["Awaiting review", "Approved", "Hold", "Not Approved"] },
-    ...(isBatchStage ? [{ key: "shift", label: "Shift", options: distinct(everyRow.map((r) => r.shift)) }] : []),
+    { key: "shift", label: "Shift", options: distinct(everyRow.map((r) => r.shift)) },
     AGING_FIELD,
   ];
 
@@ -128,28 +126,28 @@ function QcStageList({ stage, slug }: { stage: { view: QcBoardView; title: strin
 
   // Gate and finished-goods stages carry quantities (approved / rejected / wastage); the mixed On Hold list shows them too.
   const showQty = stage.view === "QA_GATE_MFG" || stage.view === "QA_GATE_PACKAGING" || stage.view === "FG_QC_RELEASE" || stage.view === "ON_HOLD";
-  const colCount = 12 + (isBatchStage ? 6 : 0) + (isHoldView ? 1 : 0) + (showQty ? 3 : 0);
+  const colCount = 18 + (isHoldView ? 1 : 0) + (showQty ? 3 : 0);
 
   return (
     <div className="space-y-5">
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-sky-500/10 text-sky-600">
             <ShieldCheck className="h-5 w-5" strokeWidth={2} />
           </div>
           <div>
             <h1 className="text-2xl font-black tracking-tight text-slate-900">{stage.title}</h1>
             <p className="text-sm text-slate-500">
-              {rows.length.toLocaleString()} {isBatchStage ? "batch" : "run"}
-              {rows.length === 1 ? "" : isBatchStage ? "es" : "s"} in {poCount} PO{poCount === 1 ? "" : "s"}
+              {rows.length.toLocaleString()} batch
+              {rows.length === 1 ? "" : "es"} in {poCount} PO{poCount === 1 ? "" : "s"}
               {isFiltered ? ` (of ${everyRow.length})` : ""}. {stage.blurb}
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -173,14 +171,14 @@ function QcStageList({ stage, slug }: { stage: { view: QcBoardView; title: strin
                   <th className="px-3 py-2.5">Category</th>
                   <th className="px-3 py-2.5">Product</th>
                   {isHoldView && <th className="px-3 py-2.5">Stage</th>}
-                  {isBatchStage && <th className="px-3 py-2.5">Batch</th>}
+                  <th className="px-3 py-2.5">Batch</th>
                   <th className="px-3 py-2.5">Plant</th>
                   <th className="px-3 py-2.5 text-right">Planned</th>
-                  {isBatchStage && <th className="px-3 py-2.5 text-right">Output</th>}
-                  {isBatchStage && <th className="px-3 py-2.5">Shift</th>}
-                  {isBatchStage && <th className="px-3 py-2.5 text-right">Manpower</th>}
-                  {isBatchStage && <th className="px-3 py-2.5">Mfg start</th>}
-                  {isBatchStage && <th className="px-3 py-2.5">Mfg end</th>}
+                  <th className="px-3 py-2.5 text-right">Output</th>
+                  <th className="px-3 py-2.5">Shift</th>
+                  <th className="px-3 py-2.5 text-right">Manpower</th>
+                  <th className="px-3 py-2.5">Mfg start</th>
+                  <th className="px-3 py-2.5">Mfg end</th>
                   <th className="px-3 py-2.5">Delivery</th>
                   {showQty && <th className="px-3 py-2.5 text-right">Approved</th>}
                   {showQty && <th className="px-3 py-2.5 text-right">Rejected</th>}
@@ -206,14 +204,14 @@ function QcStageList({ stage, slug }: { stage: { view: QcBoardView; title: strin
                         <td className="px-3 py-2.5 text-slate-600">{r.productCategory ?? "-"}</td>
                         <td className="px-3 py-2.5 font-bold text-slate-800">{r.productName}</td>
                         {isHoldView && <td className="px-3 py-2.5 text-slate-600">{r.stageLabel}</td>}
-                        {isBatchStage && <td className="px-3 py-2.5 font-mono text-slate-600">{r.batchNo ?? "-"}</td>}
+                        <td className="px-3 py-2.5 font-mono text-slate-600">{r.batchNo ?? "-"}</td>
                         <td className="px-3 py-2.5 text-slate-600">{r.plantName ?? "-"}</td>
                         <td className="px-3 py-2.5 text-right font-mono text-slate-700">{fmtQty(r.plannedQty)} {r.unit}</td>
-                        {isBatchStage && <td className="px-3 py-2.5 text-right font-mono text-slate-700">{r.outputQty != null ? `${fmtQty(r.outputQty)} ${r.unit}` : "-"}</td>}
-                        {isBatchStage && <td className="px-3 py-2.5 text-slate-600">{r.shift ?? "-"}</td>}
-                        {isBatchStage && <td className="px-3 py-2.5 text-right font-mono text-slate-600">{r.manpowerCount ?? "-"}</td>}
-                        {isBatchStage && <td className="px-3 py-2.5 text-slate-600">{dayTime(r.manufacturingStart)}</td>}
-                        {isBatchStage && <td className="px-3 py-2.5 text-slate-600">{dayTime(r.manufacturingEnd)}</td>}
+                        <td className="px-3 py-2.5 text-right font-mono text-slate-700">{r.outputQty != null ? `${fmtQty(r.outputQty)} ${r.unit}` : "-"}</td>
+                        <td className="px-3 py-2.5 text-slate-600">{r.shift ?? "-"}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-slate-600">{r.manpowerCount ?? "-"}</td>
+                        <td className="px-3 py-2.5 text-slate-600">{dayTime(r.manufacturingStart)}</td>
+                        <td className="px-3 py-2.5 text-slate-600">{dayTime(r.manufacturingEnd)}</td>
                         <td className="px-3 py-2.5 text-slate-600">{day(r.expectedDeliveryDate)}</td>
                         {showQty && <td className="px-3 py-2.5 text-right font-mono text-emerald-700">{r.approvedQty != null ? fmtQty(r.approvedQty) : "-"}</td>}
                         {showQty && <td className="px-3 py-2.5 text-right font-mono text-rose-700">{r.rejectedQty != null ? fmtQty(r.rejectedQty) : "-"}</td>}

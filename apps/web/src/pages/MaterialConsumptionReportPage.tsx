@@ -100,8 +100,8 @@ export function MaterialConsumptionReportPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-brand-500/10 text-brand-600">
             <FlaskConical className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -112,7 +112,7 @@ export function MaterialConsumptionReportPage() {
             </p>
           </div>
         </div>
-        <button className="btn-primary btn-sm" onClick={() => exportMaterialConsumptionReport(filteredRows)} disabled={filteredRows.length === 0}>
+        <button className="btn-primary btn-sm shrink-0" onClick={() => exportMaterialConsumptionReport(filteredRows)} disabled={filteredRows.length === 0}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Report{isFiltered ? " (Filtered)" : ""}
         </button>
       </div>

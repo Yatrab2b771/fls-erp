@@ -21,13 +21,13 @@ export const PRODUCTION_STAGE_LABEL: Record<ProductionStage, string> = {
   COMPLETED: "Completed",
 };
 
-export function productionStageOf(item: { planSentToProductionAt: Date | null; quantity: number; batches: { currentStageId: string; handedOverToDispatchAt: Date | null; customerShippedQty: number; prepStageId?: string }[] }): ProductionStage | null {
+export function productionStageOf(item: { planSentToProductionAt: Date | null; quantity: number; /** The quantity the product ends at when it was closed short. */ requiredQty?: number | null; batches: { currentStageId: string; handedOverToDispatchAt: Date | null; customerShippedQty: number; prepStageId?: string }[] }): ProductionStage | null {
   if (!item.planSentToProductionAt) return null;
   const { batches } = item;
   // No batch yet, or (per-batch flow) every batch is still being prepared (indent, batch number, Dispensing, Line Clearance): its production has not started.
   if (batches.every((b) => b.prepStageId !== undefined && b.prepStageId !== "READY")) return "PRE_PRODUCTION";
   const shipped = batches.reduce((a, b) => a + b.customerShippedQty, 0);
-  if (shipped >= item.quantity - 1e-6) return "COMPLETED";
+  if (shipped >= (item.requiredQty ?? item.quantity) - 1e-6) return "COMPLETED";
   if (batches.some((b) => b.handedOverToDispatchAt)) return "DISPATCH";
   if (batches.some((b) => batchPast(b.currentStageId, "QA_GATE_PACKAGING"))) return "FINISHED_GOODS";
   return "IN_PRODUCTION";

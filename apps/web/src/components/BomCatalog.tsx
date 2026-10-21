@@ -8,6 +8,9 @@ import { fetchBomVersion, useBomVersions, useCreateCustomer, useCreateSku, useCu
 import type { PmSnapshotShape } from "../lib/bomSnapshots";
 import { CATALOG_SKU_SPEC_FIELDS, KNOWN_PACKAGING_TYPES, type CatalogSku } from "../lib/types";
 import { ItemPicker } from "./ItemPicker";
+import { useBomSlotDetail, useSaveBomSlot, type PmSlotComponent, type PmSlotHeader, type SlotName } from "../lib/bomSlotHooks";
+import { SlotBanner, SlotExcelLoad, SlotStart, SlotSwitcher, type SlotChoice } from "./BomSlotSwitcher";
+import type { ParsedPmProduct, ParsedRmRecipe } from "../lib/bomTemplateImport";
 import { useToast } from "./Toast";
 import { BomUploadBox } from "./BomUploadBox";
 import { BomVersionBar } from "./BomVersionBar";
@@ -379,10 +382,13 @@ export function BomCatalog({ canEdit }: { canEdit: boolean }) {
   );
 }
 
-// Holds the version bar and decides what the editor below shows: the Active BOM, or an older version read-only.
+// Holds the version bar and decides what the editor below shows: the Active BOM, an older version read-only, or (V1 / V2) one of R&D's other versions.
 function BomEditorShell(props: { sku: CatalogSku; customerId: string; canEdit: boolean; siblingNames: string[] }) {
   const { sku } = props;
   const [viewing, setViewing] = useState<number | null>(null);
+  const [slot, setSlot] = useState<SlotChoice>("DISPLAY");
+  const [startedEmpty, setStartedEmpty] = useState<SlotName | null>(null);
+  const { data: slots } = useBomSlotDetail(props.customerId, sku.productName);
   const { data: versions } = useBomVersions("PM", sku.id);
   const activeVersion = versions?.[0]?.version ?? 0;
   const { data: snap } = useQuery({
@@ -390,8 +396,29 @@ function BomEditorShell(props: { sku: CatalogSku; customerId: string; canEdit: b
     queryFn: () => fetchBomVersion<PmSnapshotShape>("PM", sku.id, viewing!),
     enabled: viewing != null,
   });
+  const switcher = <SlotSwitcher value={slot} onChange={(v) => { setSlot(v); setStartedEmpty(null); }} detail={slots} half="pm" />;
+
+  if (slot !== "DISPLAY") {
+    const v = slots?.slots[slot];
+    return (
+      <div className="space-y-3">
+        {switcher}
+        {!slots ? (
+          <p className="text-xs text-slate-400">Loading...</p>
+        ) : v?.pm || startedEmpty === slot ? (
+          <>
+            <SlotBanner slot={slot} half="pm" />
+            <BomEditor key={`${sku.id}:${slot}:${v?.updatedAt ?? "new"}`} {...props} slot={slot} slotComponents={v?.pm?.components ?? []} slotHeader={v?.pm?.header} />
+          </>
+        ) : (
+          <SlotStart detail={slots} slot={slot} half="pm" canEdit={props.canEdit} onStartEmpty={() => setStartedEmpty(slot)} />
+        )}
+      </div>
+    );
+  }
   return (
     <div className="space-y-3">
+      {switcher}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <BomVersionBar kind="PM" entityId={sku.id} viewing={viewing} onView={setViewing} canRestore={props.canEdit} />
         <BomDownloadButtons kind="pm" id={sku.id} version={viewing} fileLabel={`FLS_PM_BOM_${sku.productName.replace(/[^A-Za-z0-9]+/g, "_")}${viewing ? `_v${viewing}` : ""}`} />
@@ -405,15 +432,16 @@ function BomEditorShell(props: { sku: CatalogSku; customerId: string; canEdit: b
   );
 }
 
-function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapshot }: { sku: CatalogSku; customerId: string; canEdit: boolean; siblingNames: string[]; snapshot?: PmSnapshotShape }) {
+function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapshot, slot, slotComponents, slotHeader }: { sku: CatalogSku; customerId: string; canEdit: boolean; siblingNames: string[]; snapshot?: PmSnapshotShape; slot?: SlotName; slotComponents?: PmSlotComponent[]; slotHeader?: PmSlotHeader }) {
   const toast = useToast();
   const canEdit = canEditProp && !snapshot; // an old version is only ever looked at
   const { data: customers } = useCustomers();
   const { data: pmItems } = useInventoryItems("PM");
   const updatePackaging = useUpdateSkuPackagingComponents(customerId);
   const updateSku = useUpdateSku(customerId);
-  const [rows, setRows] = useState<BomRow[]>(() => (snapshot ? rowsFromSnapshot(snapshot) : rowsFromSku(sku)));
-  const src = snapshot?.header ?? sku;
+  const saveSlot = useSaveBomSlot();
+  const [rows, setRows] = useState<BomRow[]>(() => (slot ? rowsFromSnapshot({ header: {}, components: (slotComponents ?? []).map((c) => ({ ...c, unit: c.unit ?? "Nos" })) }) : snapshot ? rowsFromSnapshot(snapshot) : rowsFromSku(sku)));
+  const src = slot ? slotHeader ?? sku : snapshot?.header ?? sku;
   const [header, setHeader] = useState({
     productCode: src.productCode ?? "",
     packSize: src.packSize ?? "",
@@ -463,6 +491,26 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
     setDirty(true);
   }
 
+  // A sheet loaded into a V1 / V2: its rows and pack details go into the editor (matched to the Store's PM items); nothing is saved yet.
+  function loadSheet(sheet: ParsedPmProduct | ParsedRmRecipe) {
+    const p = sheet as ParsedPmProduct;
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const byCode = new Map((pmItems ?? []).filter((i) => i.code).map((i) => [i.code!.trim().toLowerCase(), i]));
+    const byName = new Map((pmItems ?? []).map((i) => [norm(i.name), i]));
+    const used = new Map<string, number>();
+    const incoming: BomRow[] = p.rows.map((r) => {
+      const item = (r.code && byCode.get(r.code.trim().toLowerCase())) || byName.get(norm(r.name)) || null;
+      const count = (used.get(r.name.toLowerCase()) ?? 0) + 1;
+      used.set(r.name.toLowerCase(), count);
+      return { type: count > 1 ? `${r.name} (${count})` : r.name, itemId: item?.id ?? "", quantity: String(r.qty), unit: r.uom || "Nos", pmCode: (item?.code ?? r.code) || "", overage: r.overage == null ? "0" : pctText(r.overage), spec: r.spec, make: r.make, level: r.level };
+    });
+    if (rows.length > 0 && !window.confirm(`Replace the ${rows.length} row(s) below with the ${incoming.length} row(s) of the sheet?`)) return;
+    setRows(incoming);
+    if (incoming.some((r) => r.level)) setUseLevels(true);
+    setHeader({ productCode: p.productCode, packSize: p.packSize, packingConfig: p.packingConfig, batchPacks: p.batchPacks ? String(p.batchPacks) : header.batchPacks });
+    setDirty(true);
+  }
+
   function convertOldSpec() {
     const have = new Set(rows.map((r) => r.type.toLowerCase()));
     const fresh = rowsFromOldSpec(sku).filter((r) => !have.has(r.type.toLowerCase()));
@@ -486,7 +534,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
   }
 
   async function handleSave() {
-    if (!(Number(header.batchPacks) > 0)) return toast.error("Batch quantity (packs) is required - enter how many packs the batch makes.");
+    if (!slot && !(Number(header.batchPacks) > 0)) return toast.error("Batch quantity (packs) is required - enter how many packs the batch makes.");
     const cleaned = rows.filter((r) => r.type.trim() || r.itemId);
     const seen = new Set<string>();
     for (const r of cleaned) {
@@ -496,6 +544,37 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
       seen.add(t.toLowerCase());
       if (r.quantity.trim() && !(Number(r.quantity) >= 0)) return toast.error(`Quantity for "${t}" is not a valid number.`);
       if (r.overage.trim() && !(Number(r.overage) >= 0 && Number(r.overage) <= 100)) return toast.error(`OV % for "${t}" must be between 0 and 100.`);
+    }
+    if (slot) {
+      if (cleaned.length === 0) return toast.error("Add at least one component.");
+      try {
+        await saveSlot.mutateAsync({
+          slot,
+          customerId,
+          productName: sku.productName,
+          pm: {
+            header: { productCode: header.productCode.trim() || null, packSize: header.packSize.trim() || null, packingConfig: header.packingConfig.trim() || null, batchPacks: header.batchPacks.trim() ? Math.max(1, Math.round(Number(header.batchPacks))) : null },
+            components: cleaned.map((r) => ({
+              type: r.type.trim(),
+              quantity: r.quantity.trim() ? Number(r.quantity) : null,
+              unit: r.unit.trim() || "Nos",
+              pmCode: r.pmCode.trim() || null,
+              pmItemId: r.itemId || null,
+              overagePct: r.overage.trim() ? Number(r.overage) / 100 : null,
+              spec: r.spec.trim() || null,
+              make: r.make.trim() || null,
+              packingLevel: useLevels && r.level ? r.level : null,
+            })),
+          },
+          note: note.trim() || undefined,
+        });
+        setDirty(false);
+        setNote("");
+        toast.success(`${slot} saved for "${sku.productName}". The Display BOM is unchanged.`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not save");
+      }
+      return;
     }
     try {
       await updatePackaging.mutateAsync({
@@ -551,7 +630,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-black text-slate-900">{sku.productName}</h3>
             <span className={`rounded-full px-1.5 py-0.5 text-micro font-bold ${STATUS_BADGE[status].cls}`}>{STATUS_BADGE[status].label}</span>
-            {canEdit && (
+            {canEdit && !slot && (
               <button type="button" className="btn-icon h-6 w-6" title="Fix product spelling" onClick={() => { setRenaming(true); setNameValue(sku.productName); }}>
                 <Pencil className="h-3 w-3" strokeWidth={2.5} />
               </button>
@@ -598,6 +677,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
           <button type="button" className="btn-ghost btn-sm" onClick={() => setCopying((v) => !v)}>
             <Copy className="h-3 w-3" strokeWidth={2.5} /> Copy BOM from another product
           </button>
+          {slot && <SlotExcelLoad mode="pm" productName={sku.productName} onLoaded={loadSheet} />}
           {hasOldSpec(sku) && (
             <button type="button" className="btn-ghost btn-sm" onClick={convertOldSpec}>
               <Wand2 className="h-3 w-3" strokeWidth={2.5} /> Fill from old spec
@@ -732,15 +812,15 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
             <div className="flex flex-wrap items-center gap-2">
               {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Store item</span>}
               <input className="field !h-7 !w-48 !py-0 text-xs" placeholder="What changed? (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-              <button type="button" className="btn-primary btn-sm" disabled={updatePackaging.isPending || !dirty} onClick={handleSave}>
-                {updatePackaging.isPending ? "Saving..." : "Save BOM"}
+              <button type="button" className="btn-primary btn-sm" disabled={updatePackaging.isPending || saveSlot.isPending || !dirty} onClick={handleSave}>
+                {updatePackaging.isPending || saveSlot.isPending ? "Saving..." : slot ? `Save ${slot}` : "Save BOM"}
               </button>
             </div>
           </div>
         )}
       </div>
 
-      {!snapshot && <OldSpec sku={sku} customerId={customerId} canEdit={canEdit} />}
+      {!snapshot && !slot && <OldSpec sku={sku} customerId={customerId} canEdit={canEdit} />}
     </div>
   );
 }

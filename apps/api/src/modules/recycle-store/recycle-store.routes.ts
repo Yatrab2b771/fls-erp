@@ -1,6 +1,11 @@
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "../../common/lib/prisma";
-import { requireAuth, requireRole } from "../../common/middleware/auth";
+import { recordAudit } from "../../common/lib/audit";
+import { notifyRoles } from "../../common/lib/notify";
+import { RouteError } from "../../common/lib/route-error";
+import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
+import { validateBody } from "../../common/middleware/validate";
 
 // --- Recycle Store — a read-only report over the two, structurally
 // different waste ledgers this app already writes to, per the schema.prisma
@@ -16,13 +21,9 @@ import { requireAuth, requireRole } from "../../common/middleware/auth";
 //      a real stock transaction off — a BatchRecycleLog row instead.
 //      Traced back to the CombinedLot it was cleared against (Tier 3).
 //
-// Unlike R&D Store (its own real, actionable lifecycle — send, confirm,
-// consume, return), Recycle Store is a one-way sink: nothing ever comes
-// back out, so there's nothing to act on here, only to see. No
-// create/consume/return endpoints — everything in this module writes
-// itself automatically from Dispensing and the QA gates (see
-// pre-production-transition.ts / combined-lot-transition.ts); this is
-// purely the combined view over both.
+// Entries write themselves from Dispensing, the Plant and the QA gates. Wastage is gone for good. Raw / packaging material REJECTED at the
+// Plant waits for QA's decision: put it back into the Plant's stock (REUSE) or destroy it (DESTROY); see POST /entries/:id/decision.
+// What a QA gate rejected of a batch's own output (BatchRecycleLog) has no decision yet - it is reported only.
 // ---------------------------------------------------------------------------
 
 export const recycleStoreRouter = Router();
@@ -46,6 +47,79 @@ function traceLabel(t: { productName: string; purchaseOrder: { poNumber: string 
   };
 }
 
+const EPS = 1e-6;
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+/** What QA still has to decide about an entry: all of a REJECTED one, less what has been decided; wastage needs no decision. */
+const toDecideOf = (t: { recycleKind: string | null; quantity: number; recycleDecisions: { quantity: number }[] }) =>
+  t.recycleKind === "REJECTED" ? Math.max(0, round3(t.quantity - t.recycleDecisions.reduce((s, d) => s + d.quantity, 0))) : 0;
+
+/** How many rejected entries wait for QA (the dashboard tile). */
+recycleStoreRouter.get("/summary", requireRole(...VISIBLE_TO), async (_req, res, next) => {
+  try {
+    const rows = await prisma.inventoryTransaction.findMany({ where: { type: "ISSUED_RECYCLE", recycleKind: "REJECTED", deletedAt: null }, select: { recycleKind: true, quantity: true, recycleDecisions: { select: { quantity: true } } } });
+    res.json({ toDecide: rows.filter((r) => toDecideOf(r) > EPS).length });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const decisionSchema = z.object({
+  decision: z.enum(["REUSE", "DESTROY"]),
+  quantity: z.coerce.number().positive(),
+  note: z.string().trim().max(500).optional(),
+  /** For DESTROY: the destruction certificate no. */
+  certificateNo: z.string().trim().max(120).optional(),
+});
+
+/** QA decides what happens to rejected raw / packaging material: back into the Plant's stock, or destroyed. */
+recycleStoreRouter.post("/entries/:id/decision", requireRole("QA_QC"), validateBody(decisionSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const input = req.body as z.infer<typeof decisionSchema>;
+    const entry = await prisma.inventoryTransaction.findUnique({
+      where: { id: req.params.id },
+      include: { item: { select: { name: true } }, recycleDecisions: { select: { quantity: true } } },
+    });
+    if (!entry || entry.type !== "ISSUED_RECYCLE" || entry.deletedAt) throw new RouteError(404, "Recycle Store entry not found");
+    if (entry.recycleKind !== "REJECTED") throw new RouteError(409, "Wastage is gone for good: it needs no decision.");
+    const left = toDecideOf(entry);
+    if (left <= EPS) throw new RouteError(409, "Everything of this entry has been decided.");
+    if (input.quantity > left + EPS) throw new RouteError(409, `Only ${left} ${entry.unit} of this entry is still waiting for a decision.`);
+    if (input.decision === "REUSE" && !entry.plantId) throw new RouteError(409, "This entry has no Plant to put the material back into.");
+
+    const decision = await prisma.$transaction(async (tx) => {
+      let adjustmentId: string | null = null;
+      if (input.decision === "REUSE") {
+        // The quantity goes back into the Plant's stock as a stock correction QA itself approves (it is QA's own decision)
+        const adj = await tx.stockAdjustment.create({
+          data: {
+            itemId: entry.itemId,
+            locationType: "PLANT",
+            plantId: entry.plantId,
+            quantityDelta: input.quantity,
+            unit: entry.unit,
+            reason: "OTHER",
+            note: `Reused from the Recycle Store: ${entry.remark ?? "rejected material"}`.slice(0, 480),
+            status: "APPROVED",
+            requestedById: req.user!.id,
+            reviewedById: req.user!.id,
+            reviewedAt: new Date(),
+            reviewNote: "QA decided to reuse it",
+          },
+        });
+        adjustmentId = adj.id;
+      }
+      return tx.recycleDecision.create({
+        data: { transactionId: entry.id, decision: input.decision, quantity: input.quantity, unit: entry.unit, note: input.note || null, certificateNo: input.certificateNo || null, stockAdjustmentId: adjustmentId, decidedById: req.user!.id },
+      });
+    });
+    await recordAudit({ actorId: req.user!.id, action: input.decision === "REUSE" ? "recycle.reused" : "recycle.destroyed", entityType: "InventoryTransaction", entityId: entry.id, metadata: { decisionId: decision.id, quantity: input.quantity, item: entry.item.name, certificateNo: input.certificateNo } });
+    if (input.decision === "REUSE") await notifyRoles(["PRODUCTION"], { title: `${input.quantity} ${entry.unit} of ${entry.item.name} is back in the Plant's stock`, body: "QA decided the rejected material can be reused.", link: "/plant-stock" }, req.user!.id).catch(() => undefined);
+    res.status(201).json({ id: decision.id, left: round3(left - input.quantity) });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // The combined activity feed — every real RM/PM spill and every QA
 // gate's Wastage entry, newest first, normalized into one shape so the
 // page can render one list instead of two disconnected ones.
@@ -59,6 +133,7 @@ recycleStoreRouter.get("/transactions", requireRole(...VISIBLE_TO), async (_req,
           plant: { select: { id: true, name: true } },
           preProduction: { select: { purchaseOrderItem: poItemTrace } },
           createdBy: { select: { fullName: true, email: true } },
+          recycleDecisions: { orderBy: { decidedAt: "asc" } },
         },
         orderBy: { date: "desc" },
         take: 200,
@@ -87,6 +162,9 @@ recycleStoreRouter.get("/transactions", requireRole(...VISIBLE_TO), async (_req,
       note: r.remark,
       date: r.date,
       createdByName: r.createdBy.fullName || r.createdBy.email,
+      recycleKind: (r.recycleKind ?? "WASTAGE") as "WASTAGE" | "REJECTED",
+      toDecide: toDecideOf(r),
+      decisions: r.recycleDecisions.map((d) => ({ id: d.id, decision: d.decision, quantity: d.quantity, note: d.note, certificateNo: d.certificateNo, at: d.decidedAt })),
     }));
 
     // A QA gate's own output: waste (gone for good) or a rejection (failed quality, held for a decision). It belongs to a production

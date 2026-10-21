@@ -35,7 +35,7 @@ export async function plantPosition(plantId: string, itemIds: string[] | undefin
   const itemFilter = itemIds ? { itemId: { in: itemIds } } : {};
   const onHand = await getOnHandByPlantAndItem(plantId, itemIds, db);
   const [lines, leftovers] = await Promise.all([
-    client.batchDispensingLine.findMany({ where: { ...itemFilter, productionBatch: { preProduction: { plantId } } }, select: { productionBatchId: true, itemId: true, quantity: true } }),
+    client.batchDispensingLine.findMany({ where: { ...itemFilter, deliveryStatus: { not: "REFUSED" }, productionBatch: { preProduction: { plantId } } }, select: { productionBatchId: true, itemId: true, quantity: true, sentQty: true, deliveryStatus: true } }),
     client.batchLeftover.findMany({ where: { ...itemFilter, productionBatch: { preProduction: { plantId } } }, select: { productionBatchId: true, itemId: true, quantity: true, returnedQty: true } }),
   ]);
   const batchIds = [...new Set([...lines, ...leftovers].map((l) => l.productionBatchId))];
@@ -53,7 +53,8 @@ export async function plantPosition(plantId: string, itemIds: string[] | undefin
     }
     return p;
   };
-  for (const l of lines) slot(l.productionBatchId, l.itemId).given += l.quantity;
+  // A line whose sent part Production has not confirmed yet is only partly in the Plant: what the Plant already held counts, what is on its way does not.
+  for (const l of lines) slot(l.productionBatchId, l.itemId).given += l.deliveryStatus === "PENDING" ? Math.max(0, l.quantity - (l.sentQty ?? 0)) : l.quantity;
   for (const u of used) slot(u.productionBatchId!, u.itemId).used += u._sum.quantity ?? 0;
   const pending = new Map<string, number>();
   for (const l of leftovers) {

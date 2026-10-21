@@ -252,6 +252,7 @@ export async function transitionPreProductionStage(params: {
           data: wasteLines.map((c) => ({
             itemId: c.itemId,
             type: "ISSUED_RECYCLE" as const,
+            recycleKind: "WASTAGE",
             date: new Date(),
             unit: c.unit,
             quantity: c.quantity,

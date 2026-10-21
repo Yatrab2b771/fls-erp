@@ -1,4 +1,5 @@
 import { logger } from "../../common/lib/logger";
+import { goodQtyOf } from "./good-qty";
 import { recordAudit } from "../../common/lib/audit";
 import { notifyRoles } from "../../common/lib/notify";
 import { prisma } from "../../common/lib/prisma";
@@ -147,6 +148,14 @@ export async function transitionProductionBatchStage(params: {
       if (rows.length > 0) {
         await tx.batchRecycleLog.createMany({ data: rows.map((r) => ({ productionBatchId: batch.id, stageId: currentStage, kind: r.kind, quantity: r.quantity, unit: orderUnit || "Kg", note, createdById: actorId })) });
       }
+    }
+    // A QA gate that takes quantity out (rejected, wasted) lowers what the batch counts for in the run's "made so far": the run's
+    // shortfall, and Close short, then see what QA actually passed. Worked out from the batch before and after, so a gate that is cleared
+    // again, or a batch sent back, never counts twice.
+    const delta = goodQtyOf(row) - goodQtyOf(batch);
+    if (Math.abs(delta) > 1e-9) {
+      const run = await tx.preProduction.findUnique({ where: { id: row.preProductionId }, select: { combinedQty: true, batchFlow: true } });
+      if (run?.batchFlow) await tx.preProduction.update({ where: { id: row.preProductionId }, data: { combinedQty: Math.max(0, Math.round((run.combinedQty + delta) * 1000) / 1000) } });
     }
     return row;
   });

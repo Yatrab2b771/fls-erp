@@ -283,8 +283,9 @@ model Vendor {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  createdBy      User                  @relation(fields: [createdById], references: [id])
+  createdBy      User                    @relation(fields: [createdById], references: [id])
   purchaseOrders VendorPurchaseOrder[]
+  approvedFor    ProductMaterialVendor[]
 
   @@map("vendors")
 }
@@ -614,6 +615,19 @@ model PurchaseOrderItem {
   cancelledById String?
   cancelReason  String?
 
+  // Production's own Hold on a product (separate from PPIC's materialHeldAt: each side releases only its own). While set, no run, batch or
+  // step moves for it, and it is listed on Held Products instead of New Plan. Allowed until a batch is READY.
+  productionHeldAt     DateTime?
+  productionHeldById   String?
+  productionHoldReason String?
+
+  // "Close short": Production ends the product at what it actually made (the earlier batches made less than ordered and no more will be
+  // made). From then on the ordered quantity for completion is closedShortQty, not quantity. Reopened by clearing these.
+  closedShortAt     DateTime?
+  closedShortById   String?
+  closedShortReason String?
+  closedShortQty    Float?
+
   // Regulatory's own sign-off, per product line — separate from BD's own
   // self-declared regulatoryBody/regulatoryStatus on the PurchaseOrder
   // header (what BD says was filed with FSSAI/AYUSH, unverified). This is
@@ -646,6 +660,14 @@ model PurchaseOrderItem {
 
   @@index([purchaseOrderId])
   @@index([cancelledAt])
+  // Which BOM version the product's plan is made from: DISPLAY (the catalog's own BOM, the default) or one of R&D's V1 / V2 (see ProductBomVersion).
+  activeBomSlot        String               @default("DISPLAY")
+  activeBomChangedAt   DateTime?
+  activeBomChangedById String?
+  bomSwitches          ItemBomSwitch[]
+  // Once the product is with Production: the BOM version R&D has switched its batches to (null = none, they follow the plan PPIC sees). PPIC never sees it.
+  productionBomSlot    String?
+
   @@map("purchase_order_items")
 }
 
@@ -829,6 +851,7 @@ enum BatchPrepStage {
   INDENT_ISSUE // Production
   BATCH_NO // R&D
   DISPENSING // Day Store
+  RECEIVE // Production confirms, material by material, what the Day Store sent to the Plant (skipped when nothing had to be sent)
   LINE_CLEARANCE // QA
   READY // Production may run the batch
 }
@@ -862,7 +885,7 @@ model BatchLeftover {
 
 // What the Day Store dispensed (issued to the Plant) for ONE batch: the "Given" of that batch's Utilization.
 model BatchDispensingLine {
-  id                String   @id @default(uuid())
+  id                String    @id @default(uuid())
   productionBatchId String
   itemId            String
   // What the Day Store actually weighed out and gave (the plan quantity when nothing different was entered).
@@ -875,8 +898,18 @@ model BatchDispensingLine {
   tareWeight        Float?
   arNo              String?
   note              String?
+  // Where this material stands with the Plant. RECEIVED: it is in the Plant's stock (every line made before the Receive step, and a
+  // line that needed nothing sent). PENDING: the Day Store has sent it (sentQty) and Production has not confirmed it yet - it is not
+  // in the Plant's stock. REFUSED: Production refused it; it went back to the Day Store and the line no longer counts.
+  deliveryStatus    String    @default("RECEIVED")
+  // What the Day Store issued to the Plant for this line (the part the Plant did not already hold) and the issue that carries it.
+  sentQty           Float?
+  issueTxnId        String?
+  receivedAt        DateTime?
+  receivedById      String?
+  receiveNote       String? // why it arrived short, or why it was refused
   createdById       String
-  createdAt         DateTime @default(now())
+  createdAt         DateTime  @default(now())
 
   productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
   lotsDrawn       LotAllocation[]
@@ -1047,15 +1080,17 @@ model ProductionBatch {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  preProduction          PreProduction @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
-  createdBy              User          @relation("ProductionBatchCreatedBy", fields: [createdById], references: [id])
-  completedBy            User?         @relation("ProductionBatchCompletedBy", fields: [completedById], references: [id])
-  heldBy                 User?         @relation("ProductionBatchHeldBy", fields: [heldById], references: [id])
+  preProduction          PreProduction    @relation(fields: [preProductionId], references: [id], onDelete: Cascade)
+  createdBy              User             @relation("ProductionBatchCreatedBy", fields: [createdById], references: [id])
+  completedBy            User?            @relation("ProductionBatchCompletedBy", fields: [completedById], references: [id])
+  heldBy                 User?            @relation("ProductionBatchHeldBy", fields: [heldById], references: [id])
   // Production's hand-over to Dispatch: set when Production finishes packaging and hands the batch on. Everything after that (QA gates,
   // FG Store, release, billing, dispatch) belongs to other departments; this only marks the batch as "from Production" for Dispatch.
   handedOverToDispatchAt DateTime?
   handedOverById         String?
   fgShipments            FgShipment[]
+  customerReturns        CustomerReturn[]
+  reworks                Rework[]
 
   materialConsumptions BatchMaterialConsumption[]
   stockTransfers       StockTransfer[]
@@ -1066,7 +1101,33 @@ model ProductionBatch {
   @@index([preProductionId])
   @@index([status])
   @@index([prepStageId])
+  // The BOM version this batch's material follows: null = not dispensed yet (it follows the product's current one), BASE = the plan PPIC sees,
+  // DISPLAY / V1 / V2 = R&D's choice. Fixed once the batch is dispensed.
+  bomSlot           String?
+  utilizationSheets BatchUtilizationSheet[]
+
   @@map("production_batches")
+}
+
+// The product-level Utilization of a batch: what Production entered for the whole batch (Produced, Waste, Reject, Sample) for one kind of
+// material. The material-by-material rows (BatchMaterialConsumption) are worked out from it and can be edited before saving; this keeps the four
+// numbers so the form opens with them again. One sheet per batch and category (RM before Packaging, PM after Packaging).
+model BatchUtilizationSheet {
+  id                String   @id @default(uuid())
+  productionBatchId String
+  category          String // RM | PM
+  producedQty       Float
+  wasteQty          Float    @default(0)
+  rejectQty         Float    @default(0)
+  sampleQty         Float    @default(0)
+  savedById         String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+
+  @@unique([productionBatchId, category])
+  @@map("batch_utilization_sheets")
 }
 
 enum CombinedLotStageId {
@@ -1262,6 +1323,9 @@ model BatchMaterialConsumption {
   item            InventoryItem    @relation(fields: [itemId], references: [id])
   createdBy       User             @relation(fields: [createdById], references: [id])
   qaVerifiedBy    User?            @relation("BatchMaterialConsumptionQaVerifiedBy", fields: [qaVerifiedById], references: [id])
+  // Material used by a rework (see Rework): booked against the Plant like any other consumption, but not against a batch's Utilization.
+  reworkId        String?
+  rework          Rework?          @relation(fields: [reworkId], references: [id], onDelete: Cascade)
 
   @@index([preProductionId])
   @@index([itemId])
@@ -2002,6 +2066,7 @@ model InventoryItem {
   stockTransfers           StockTransfer[]
   stockAdjustments         StockAdjustment[]
   lotAllocations           LotAllocation[]
+  approvedVendors          ProductMaterialVendor[]
 
   @@unique([category, name])
   @@map("inventory_items")
@@ -2464,6 +2529,8 @@ model InventoryRequest {
   // extraForPoItemId is an optional note of which product it is for - it does not make the request a plan request.
   isExtra          Boolean @default(false)
   extraForPoItemId String?
+  // The batch an extra request is for (R&D changed the BOM after the batch was dispensed: what the new version needs beyond what it was given).
+  productionBatchId String?
 
   // Soft delete — this is the "withdraw" action on a request Store hasn't
   // issued anything against yet.
@@ -2494,6 +2561,7 @@ model InventoryRequest {
   @@index([requestingDayStoreId])
   @@index([purchaseOrderItemId])
   @@index([forRequestId])
+  @@index([productionBatchId])
   @@map("inventory_requests")
 }
 
@@ -2602,6 +2670,8 @@ model InventoryTransaction {
   // (Dispensing's own WASTE-purpose leg), so a PO-level reconciliation
   // can trace waste back to the run that produced it.
   preProductionId           String?
+  // The batch whose Utilization wrote this Recycle Store row (waste / reject), so editing the Utilization can take it back.
+  productionBatchId         String?
   // RECEIVED only — set when Warehouse creates this row via "Mark
   // Received" against a VendorPurchaseOrderItem, null for every other
   // receipt (opening stock, a manual entry with no vendor PO behind it).
@@ -2610,6 +2680,9 @@ model InventoryTransaction {
   // vendor-purchase-orders.routes.ts's completion/aging computation,
   // which sums every linked row's accepted quantity per item.
   vendorPurchaseOrderItemId String?
+  // ISSUED_RECYCLE only: WASTAGE (gone for good) or REJECTED (waits for QA's decision on the Recycle Store: reuse or destroy)
+  recycleKind               String?
+  recycleDecisions          RecycleDecision[]
 
   // Traceability fields off Sanjay's physical stock sheets — batch/GRN
   // identify *which* delivery or lot this row is, mfg/expiry track shelf
@@ -2685,6 +2758,7 @@ model InventoryTransaction {
   @@index([dayStoreId])
   @@index([plantId])
   @@index([preProductionId])
+  @@index([productionBatchId])
   @@index([vendorPurchaseOrderItemId])
   // The open-transit list's own query — every tracked row still waiting
   // on a delivery confirmation, oldest first.
@@ -3235,6 +3309,47 @@ model LotAllocation {
   @@map("lot_allocations")
 }
 
+// ---------------------------------------------------------------------------
+// Approved vendors. Many products must use a material from a specific vendor only. R&D records, per PRODUCT (an RM recipe, or a packaging
+// SKU) and per MATERIAL, which vendors are approved; a material with no rows is unrestricted. scopeId is the recipe id (kind RM) or the
+// SKU id (kind PM). The rule is enforced where the material is counted and moved: Material Planning counts only approved vendors' stock
+// for such a product, Purchase can log a PI only against an approved vendor, a Warehouse issue for the product draws only approved lots,
+// and Dispensing is blocked when the approved vendors' stock at the Plant and its Day Store is not enough - unless R&D (which is also QA)
+// has allowed another vendor for that product and material (VendorDeviation, with a reason).
+// ---------------------------------------------------------------------------
+
+model ProductMaterialVendor {
+  id          String   @id @default(uuid())
+  kind        String // RM | PM
+  scopeId     String
+  itemId      String
+  vendorId    String
+  createdById String
+  createdAt   DateTime @default(now())
+
+  item   InventoryItem @relation(fields: [itemId], references: [id])
+  vendor Vendor        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([kind, scopeId, itemId, vendorId])
+  @@index([kind, scopeId])
+  @@index([itemId])
+  @@map("product_material_vendors")
+}
+
+// R&D allows a vendor other than the approved ones for ONE product (PO line) and material, with a reason. Everything that checks the
+// approved vendors lets that product's material through; the batches that used it show the deviation.
+model VendorDeviation {
+  id                  String   @id @default(uuid())
+  purchaseOrderItemId String
+  itemId              String
+  reason              String
+  approvedById        String
+  createdAt           DateTime @default(now())
+
+  @@unique([purchaseOrderItemId, itemId])
+  @@map("vendor_deviations")
+}
+
 // Every save of a Packaging BOM (kind PM, entityId = Sku id) or an RM recipe (kind RM, entityId =
 // Recipe id) writes one numbered snapshot, so an older BOM can be looked at and restored later.
 model BomVersion {
@@ -3250,6 +3365,47 @@ model BomVersion {
   @@unique([kind, entityId, version])
   @@index([kind, entityId])
   @@map("bom_versions")
+}
+
+// A product's alternative BOMs. The catalog's own Recipe (RM) and packaging BOM (PM) are the "Display BOM": the default, always the active one, and
+// what the customer is shown. R&D can keep two more, V1 and V2 (three in all, never more): each holds an RM recipe and/or a PM component list of
+// its own, for the day a plan has to be made with other material (urgent production, a change during or after manufacturing).
+// The product is identified like the catalog does: customer + product name.
+model ProductBomVersion {
+  id          String   @id @default(uuid())
+  customerId  String
+  productKey  String // the product name, lower-cased
+  productName String
+  slot        String // V1 | V2
+  // RM: { kind?, ingredients: [{ name, brand, itemCode?, gPerServing, uom?, proteinPct }] }; PM: { components: [...] } (the SKU's spec fields stay as in the catalog)
+  rmSnapshot  Json?
+  pmSnapshot  Json?
+  note        String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@unique([customerId, productKey, slot])
+  @@map("product_bom_versions")
+}
+
+// Every time R&D changed the BOM version a product's plan is made from, and why.
+model ItemBomSwitch {
+  id                  String   @id @default(uuid())
+  purchaseOrderItemId String
+  fromSlot            String
+  toSlot              String
+  reason              String
+  // PLANNING = while the product was still with PPIC (before it went to Production)
+  phase               String   @default("PLANNING")
+  actorId             String
+  createdAt           DateTime @default(now())
+
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderItemId])
+  @@map("item_bom_switches")
 }
 
 enum SampleRequestStatus {
@@ -3530,4 +3686,133 @@ model ItemChangeRequest {
   @@index([status])
   @@index([purchaseOrderItemId])
   @@map("item_change_requests")
+}
+
+// ---------------------------------------------------------------------------
+// Customer returns: finished goods a customer sent back, which reach the Warehouse. The Warehouse records the return (the goods wait on a
+// QA hold, they are not stock), QA decides (pass / rework / scrap), Production reworks what can be fixed and QA checks it again, and for
+// what QA passed Dispatch chooses: store it in the Warehouse's finished-goods stock, or send it to the customer again. Accounts raises a
+// Credit Note for the return. What the customer holds (for completion) is shipped - returned; Dispatch's own stock of the batch gets back
+// what QA passed (see fg.routes.ts shippedOf).
+// ---------------------------------------------------------------------------
+
+enum CustomerReturnStatus {
+  WITH_QA // received by the Warehouse; QA decides (or checks it again after rework)
+  IN_REWORK // Production is reprocessing it
+  AWAITING_DISPATCH // QA passed (some of) it: Dispatch chooses what to do with it
+  STORED // Dispatch put it into the Warehouse's finished-goods stock
+  TO_BE_RESENT // Dispatch will send it to the customer again (it is back in Dispatch's stock of the batch)
+  SCRAPPED // nothing of it was passed
+}
+
+model CustomerReturn {
+  id                String               @id @default(uuid())
+  productionBatchId String
+  quantity          Float
+  unit              String
+  returnedAt        DateTime
+  reason            String
+  condition         String?
+  status            CustomerReturnStatus @default(WITH_QA)
+  receivedById      String
+  createdAt         DateTime             @default(now())
+
+  // QA's decision (the last one): PASS | REWORK | SCRAP. passedQty is what was passed, the rest of the return is scrapQty.
+  qaDecision    String?
+  qaNote        String?
+  qaDecidedAt   DateTime?
+  qaDecidedById String?
+  passedQty     Float?
+  scrapQty      Float     @default(0)
+
+  // Production's rework: what came out of it (the rest was lost)
+  reworkNote     String?
+  reworkedQty    Float?
+  reworkDoneAt   DateTime?
+  reworkDoneById String?
+
+  // Dispatch's choice for what QA passed: STORE | REDISPATCH
+  dispatchChoice      String?
+  dispatchNote        String?
+  dispatchDecidedAt   DateTime?
+  dispatchDecidedById String?
+
+  productionBatch ProductionBatch @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+  creditNote      CreditNote?
+  reworks         Rework[]
+
+  @@index([productionBatchId])
+  @@index([status])
+  @@map("customer_returns")
+}
+
+// Accounts' credit note for a customer return (one per return).
+model CreditNote {
+  id               String   @id @default(uuid())
+  customerReturnId String   @unique
+  creditNoteNo     String
+  date             DateTime
+  amount           Float?
+  note             String?
+  createdById      String
+  createdAt        DateTime @default(now())
+
+  customerReturn CustomerReturn @relation(fields: [customerReturnId], references: [id], onDelete: Cascade)
+
+  @@map("credit_notes")
+}
+
+// QA's decision on what the Recycle Store holds (raw / packaging material that was REJECTED at the Plant): put it back into the Plant's stock
+// (REUSE) or destroy it (DESTROY, with a certificate no.). Several decisions can split one entry; what is left is still waiting. Wastage needs
+// no decision: it is gone for good.
+model RecycleDecision {
+  id                String   @id @default(uuid())
+  transactionId     String
+  decision          String // REUSE | DESTROY
+  quantity          Float
+  unit              String
+  note              String?
+  certificateNo     String?
+  // REUSE: the stock correction that put the quantity back into the Plant
+  stockAdjustmentId String?
+  decidedById       String
+  decidedAt         DateTime @default(now())
+
+  transaction InventoryTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([transactionId])
+  @@map("recycle_decisions")
+}
+
+// A rework of goods a customer returned (QA chose Rework): its own small job, shown in New Plan with a "Rework" tag and a sub-number of the
+// original batch (FLS-26-0006-R1). Production fills a sheet like a batch's (shift, manpower, start, material used, end, output). It is NOT part
+// of the product's order totals: the goods were already counted when they were first made. When the reworks of a return are done, the return
+// goes back to QA with what came out (see CustomerReturn).
+model Rework {
+  id                String    @id @default(uuid())
+  reworkNo          String    @unique
+  seq               Int
+  customerReturnId  String
+  productionBatchId String
+  quantity          Float
+  unit              String
+  status            String    @default("PLANNED") // PLANNED | IN_PROGRESS | COMPLETED
+  shift             String?
+  manpowerCount     Int?
+  startAt           DateTime?
+  endAt             DateTime?
+  outputQty         Float?
+  note              String?
+  createdById       String
+  createdAt         DateTime  @default(now())
+  completedAt       DateTime?
+  completedById     String?
+
+  customerReturn  CustomerReturn             @relation(fields: [customerReturnId], references: [id], onDelete: Cascade)
+  productionBatch ProductionBatch            @relation(fields: [productionBatchId], references: [id], onDelete: Cascade)
+  consumptions    BatchMaterialConsumption[]
+
+  @@index([customerReturnId])
+  @@index([productionBatchId])
+  @@map("reworks")
 }

@@ -85,6 +85,7 @@ async function main() {
       await run("recipe requests", tx.recipeRequest.deleteMany());
       await run("PO documents", tx.purchaseOrderDocument.deleteMany());
       await run("PO invoices", tx.purchaseOrderInvoice.deleteMany());
+      await run("approved-vendor deviations (the rules themselves are R&D master data and stay)", tx.vendorDeviation.deleteMany());
       await run("PO items", tx.purchaseOrderItem.deleteMany());
       await run("purchase orders", tx.purchaseOrder.deleteMany());
 

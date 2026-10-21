@@ -2,7 +2,9 @@ import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, ChevronDown, Download, PackageCheck, PackageOpen } from "lucide-react";
-import { useMaterialBoard, type MaterialBoardRow, type MaterialBoardStatus } from "../lib/hooks";
+import { useBatchMaterialBoard, useMaterialBoard, usePrepBoard, type MaterialBoardRow, type MaterialBoardStatus } from "../lib/hooks";
+import { useAuth } from "../lib/auth";
+import { ReceiveForm } from "./BatchPrepPage";
 import { useTileFilters } from "../lib/tileFilters";
 import { useClientPaging } from "../lib/useClientPaging";
 import { ClientPager } from "../components/Pagination";
@@ -31,6 +33,7 @@ const STATUS_PILL: Record<MaterialBoardStatus, string> = {
   NOT_IN_CATALOG: "border-slate-200 bg-slate-50 text-slate-500",
 };
 const CATEGORY_LABEL = { RM: "Raw Material", PM: "Packaging Material" } as const;
+const WAITING_LABEL = "Waiting for you to receive";
 const SHOWN_STATUSES: MaterialBoardStatus[] = ["NOT_DISPENSED", "NOT_RECEIVED", "IN_TRANSIT", "PARTIAL", "FULL"];
 
 // The "Material" filter, like Material Planning's: Received / Still to come, each with RM and PM underneath.
@@ -40,6 +43,11 @@ const MATERIAL_GROUPS = [
 ];
 
 interface ProductGroup {
+  /** One group per batch (batch-wise lines), or per product for a run from before the per-batch flow. */
+  key: string;
+  batchId: string | null;
+  batchNo: string | null;
+  batchQty: number | null;
   itemId: string;
   poNumber: string | null;
   customerName: string;
@@ -63,12 +71,16 @@ const progress = (lines: MaterialBoardRow[], category: "RM" | "PM") => {
 
 function groupByProduct(rows: MaterialBoardRow[]): ProductGroup[] {
   const map = new Map<string, MaterialBoardRow[]>();
-  for (const r of rows) map.set(r.itemId, [...(map.get(r.itemId) ?? []), r]);
+  for (const r of rows) map.set(r.batchId ?? r.itemId, [...(map.get(r.batchId ?? r.itemId) ?? []), r]);
   return [...map.values()].map((lines) => {
     const first = lines[0]!;
     const full = lines.filter((m) => m.status === "FULL").length;
     const status: MaterialBoardStatus = lines.every((m) => m.status === "NOT_DISPENSED") ? "NOT_DISPENSED" : full === lines.length ? "FULL" : lines.some((m) => m.receivedQty > 0) ? "PARTIAL" : lines.some((m) => m.inTransitQty > 0) ? "IN_TRANSIT" : "NOT_RECEIVED";
     return {
+      key: first.batchId ?? first.itemId,
+      batchId: first.batchId ?? null,
+      batchNo: first.batchNo ?? null,
+      batchQty: first.batchQty ?? null,
       itemId: first.itemId,
       poNumber: first.poNumber,
       customerName: first.customerName,
@@ -86,26 +98,36 @@ function groupByProduct(rows: MaterialBoardRow[]): ProductGroup[] {
   });
 }
 
-// Production's second tile. One row per product with how much of its material has arrived (RM and PM separately); Materials opens the
-// line-by-line detail: required, received, in transit, still to come, in production, left with Production and available at the Plant.
+// Production's Material Received tile. One row per BATCH with how much of its material the Day Store has dispensed for it (RM and PM separately);
+// a batch whose material the Day Store has just sent shows a Receive button: Production confirms what arrived, material by material
+// (all of it, less with a reason, or refuse). Materials opens the line-by-line detail: required, received, used, left with Production and available at the Plant. A run from before
+// the per-batch flow has no batches, so it is still listed once per product (no batch number).
 export function MaterialReceivedPage() {
-  const { data, isLoading } = useMaterialBoard();
+  const { data: batchLines, isLoading: batchLoading } = useBatchMaterialBoard();
+  const { data: legacyLines, isLoading: legacyLoading } = useMaterialBoard({ legacyOnly: true });
+  const isLoading = batchLoading || legacyLoading;
+  const { hasRole } = useAuth();
+  const canReceive = hasRole("PRODUCTION");
+  // The batches whose material is on its way to the Plant and waits for Production's confirmation
+  const { data: toConfirm } = usePrepBoard("RECEIVE", { enabled: canReceive });
+  const confirmOf = new Map((toConfirm ?? []).map((b) => [b.id, b]));
   const filters = useTileFilters();
   const [openId, setOpenId] = useState<string | null>(null);
+  const [receivingId, setReceivingId] = useState<string | null>(null);
   const picked = (key: string) => filters.applied.picks[key] ?? [];
-  const lines = data ?? [];
+  const lines = [...(batchLines ?? []), ...(legacyLines ?? [])];
   const everyProduct = groupByProduct(lines);
   const distinct = (xs: (string | null | undefined)[]) => [...new Set(xs.filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  // A Plant login sees only its own Plant, so the Plant column and filter only show when more than one Plant is in the list.
-  const showPlant = distinct(everyProduct.map((g) => g.plantName)).length > 1;
 
   const fields: FilterField[] = [
     { key: "po", label: "PO Number", options: distinct(everyProduct.map((g) => g.poNumber)) },
+    { key: "batchno", label: "Batch No", options: distinct(everyProduct.map((g) => g.batchNo)) },
     { key: "customer", label: "Customer", options: distinct(everyProduct.map((g) => g.customerName)) },
     { key: "product", label: "Product", options: distinct(everyProduct.map((g) => g.productName)) },
     { key: "type", label: "Product Type", options: distinct(everyProduct.map((g) => g.productCategory)) },
-    ...(showPlant ? [{ key: "plant", label: "Plant", options: distinct(everyProduct.map((g) => g.plantName)) }] : []),
-    { key: "status", label: "Product Status", options: SHOWN_STATUSES.map((s) => STATUS_LABEL[s]) },
+    { key: "plant", label: "Location", options: distinct(everyProduct.map((g) => g.plantName)) },
+    ...(canReceive ? [{ key: "action", label: "Action", options: [WAITING_LABEL] }] : []),
+    { key: "status", label: "Batch Status", options: SHOWN_STATUSES.map((s) => STATUS_LABEL[s]) },
     { key: "mat", label: "Material", kind: "material", groups: MATERIAL_GROUPS },
     { key: "matname", label: "Material Name", options: distinct(lines.map((l) => l.material)) },
     AGING_FIELD,
@@ -121,10 +143,12 @@ export function MaterialReceivedPage() {
     .filter(
       (g) =>
         (!picked("po").length || picked("po").includes(g.poNumber ?? "")) &&
+        (!picked("batchno").length || picked("batchno").includes(g.batchNo ?? "")) &&
         (!picked("customer").length || picked("customer").includes(g.customerName)) &&
         (!picked("product").length || picked("product").includes(g.productName)) &&
         (!picked("type").length || picked("type").includes(g.productCategory ?? "")) &&
         (!picked("plant").length || picked("plant").includes(g.plantName ?? "")) &&
+        (!picked("action").length || (!!g.batchId && confirmOf.has(g.batchId))) &&
         (!picked("status").length || picked("status").includes(STATUS_LABEL[g.status])) &&
         (!from || g.sentAt.slice(0, 10) >= from) &&
         (!to || g.sentAt.slice(0, 10) <= to) &&
@@ -140,13 +164,15 @@ export function MaterialReceivedPage() {
 
   function download() {
     const rows = groups.flatMap((g) => g.lines).map((r) => ({
+        "Batch No": r.batchNo ?? "",
+        "Batch Qty": r.batchQty ?? "",
         "PO Number": r.poNumber ?? "",
         Status: STATUS_LABEL[r.status],
         Customer: r.customerName,
         "Customer Type": customerTypeLabel(r.customerName),
         Product: r.productName,
         "Product Type": r.productCategory ?? "",
-        Plant: r.plant?.name ?? "",
+        Location: r.plant?.name ?? "",
         "Released Qty": r.releasedQty,
         "Order Qty": r.orderQty,
         Material: r.material,
@@ -182,25 +208,30 @@ export function MaterialReceivedPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-amber-500/10 text-amber-600">
             <PackageCheck className="h-5 w-5" strokeWidth={2} />
           </div>
           <div>
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Material Received</h1>
             <p className="text-sm text-slate-500">
-              {groups.length.toLocaleString()} product{groups.length === 1 ? "" : "s"}
-              {isFiltered ? ` of ${everyProduct.length}` : ""} — how much of each product's material the Day Store has dispensed to you. Open Materials on a row for the line-by-line detail.
+              {groups.length.toLocaleString()} batch{groups.length === 1 ? "" : "es"}
+              {isFiltered ? ` of ${everyProduct.length}` : ""} — how much of each batch's material the Day Store has dispensed to you. When material has been sent, press Receive and confirm what arrived. Open Materials on a row for the line-by-line detail.
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={groups.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={groups.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5">
+        {canReceive && (toConfirm?.length ?? 0) > 0 && (
+          <button type="button" onClick={() => filters.applyPick("action", picked("action").length ? [] : [WAITING_LABEL])} className={`pill cursor-pointer border-amber-300 bg-amber-100 text-amber-800 ${picked("action").length ? "ring-2 ring-brand-300" : ""}`}>
+            Waiting for you · {toConfirm!.length}
+          </button>
+        )}
         {SHOWN_STATUSES.map(chip)}
         <span className="ml-2 text-tiny font-semibold text-slate-500">
           {toCome} material line{toCome === 1 ? "" : "s"} still to come · {onTheWay} on the way
@@ -218,12 +249,13 @@ export function MaterialReceivedPage() {
           <table className="w-full whitespace-nowrap text-xs">
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50/80 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
+                <th className="px-4 py-3">Batch</th>
                 <th className="px-4 py-3">PO Number</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Customer</th>
                 <th className="px-4 py-3">Product</th>
                 <th className="px-4 py-3">Product Type</th>
-                {showPlant && <th className="px-4 py-3">Plant</th>}
+                <th className="px-4 py-3">Location</th>
                 <th className="px-4 py-3 text-right">Quantity</th>
                 <th className="px-4 py-3">Material arrived</th>
                 <th className="px-4 py-3">Aging</th>
@@ -232,15 +264,16 @@ export function MaterialReceivedPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {pg.rows.map((g) => {
-                const open = openId === g.itemId;
+                const open = openId === g.key;
                 const rm = progress(g.allLines, "RM");
                 const pm = progress(g.allLines, "PM");
                 const done = rm.done + pm.done;
                 const total = rm.total + pm.total;
                 const pct = total ? Math.round((done / total) * 100) : 0;
                 return (
-                  <Fragment key={g.itemId}>
+                  <Fragment key={g.key}>
                     <tr className={`transition hover:bg-slate-50 ${open ? "bg-slate-50/70" : ""}`}>
+                      <td className="px-4 py-3">{g.batchId ? g.batchNo ? <span className="font-mono font-black text-orange-800">{g.batchNo}</span> : <span className="text-slate-400">No number yet</span> : <span className="text-slate-300" title="A run from before the per-batch flow">—</span>}</td>
                       <td className="px-4 py-3 font-semibold text-slate-700">{g.poNumber ?? "—"}</td>
                       <td className="px-4 py-3">
                         <span className={`pill ${STATUS_PILL[g.status]}`}>{STATUS_LABEL[g.status]}</span>
@@ -248,10 +281,10 @@ export function MaterialReceivedPage() {
                       <td className="px-4 py-3 text-slate-600"><CustomerName name={g.customerName} /></td>
                       <td className="px-4 py-3 font-bold text-slate-800">{g.productName}</td>
                       <td className="px-4 py-3 text-slate-600">{g.productCategory ?? "—"}</td>
-                      {showPlant && <td className="px-4 py-3 text-slate-600">{g.plantName ?? "—"}</td>}
+                      <td className="px-4 py-3 text-slate-600">{g.plantName ?? "—"}</td>
                       <td className="px-4 py-3 text-right font-mono text-slate-800">
-                        {fmtQty(g.orderQty)} {g.unit}
-                        {g.releasedQty < g.orderQty - 1e-6 && <span className="block font-sans text-micro font-bold text-amber-600">Released {fmtQty(g.releasedQty)} of {fmtQty(g.orderQty)}</span>}
+                        {g.batchQty !== null ? fmtQty(g.batchQty) : fmtQty(g.orderQty)} {g.unit}
+                        {g.batchQty === null && g.releasedQty < g.orderQty - 1e-6 && <span className="block font-sans text-micro font-bold text-amber-600">Released {fmtQty(g.releasedQty)} of {fmtQty(g.orderQty)}</span>}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
@@ -270,18 +303,32 @@ export function MaterialReceivedPage() {
                         <AgingCell since={g.sentAt} />
                       </td>
                       <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                        {canReceive && g.batchId && confirmOf.has(g.batchId) && (
+                          <button type="button" className="btn-primary btn-sm" onClick={() => setReceivingId(receivingId === g.batchId ? null : g.batchId)}>
+                            Receive
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => setOpenId(open ? null : g.itemId)}
+                          onClick={() => setOpenId(open ? null : g.key)}
                           className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-tiny font-bold transition ${open ? "border-brand-300 bg-brand-50 text-brand-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}
                         >
                           Materials{materialFiltered ? ` (${g.lines.length})` : ""} <ChevronDown className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`} strokeWidth={2.5} />
                         </button>
+                        </div>
                       </td>
                     </tr>
+                    {canReceive && g.batchId && receivingId === g.batchId && confirmOf.get(g.batchId) && (
+                      <tr className="bg-sky-50/40">
+                        <td colSpan={11} className="whitespace-normal px-4 py-4">
+                          <ReceiveForm row={confirmOf.get(g.batchId)!} canAct onDone={() => setReceivingId(null)} />
+                        </td>
+                      </tr>
+                    )}
                     {open && (
                       <tr className="bg-slate-50/60">
-                        <td colSpan={showPlant ? 10 : 9} className="px-4 py-4">
+                        <td colSpan={11} className="px-4 py-4">
                           <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
                             <table className="w-full whitespace-nowrap text-xs">
                               <thead>
@@ -309,7 +356,10 @@ export function MaterialReceivedPage() {
                                     <td className="px-3 py-2 text-right font-mono text-emerald-700">{m.receivedQty ? `${fmtQty(m.receivedQty)} ${m.unit}` : "—"}</td>
                                     <td className="px-3 py-2 text-right font-mono text-sky-700">{m.inTransitQty ? `${fmtQty(m.inTransitQty)} ${m.unit}` : "—"}</td>
                                     <td className={`px-3 py-2 text-right font-mono ${m.balanceQty ? "font-bold text-rose-600" : "text-slate-300"}`}>{m.balanceQty ? `${fmtQty(m.balanceQty)} ${m.unit}` : "—"}</td>
-                                    <td className="px-3 py-2 text-right font-mono text-violet-700">{m.usedQty ? `${fmtQty(m.usedQty)} ${m.unit}` : "—"}</td>
+                                    <td className="px-3 py-2 text-right font-mono text-violet-700">
+                                      {m.usedQty ? `${fmtQty(m.usedQty)} ${m.unit}` : "—"}
+                                      {!!(m.wastedQty || m.rejectedQty) && <span className="block font-sans text-micro text-amber-600">{[m.wastedQty ? `waste ${fmtQty(m.wastedQty)}` : "", m.rejectedQty ? `rejected ${fmtQty(m.rejectedQty)}` : ""].filter(Boolean).join(" · ")}</span>}
+                                    </td>
                                     <td className="px-3 py-2 text-right font-mono text-slate-700">{m.receivedQty || m.usedQty ? `${fmtQty(m.leftQty)} ${m.unit}` : "—"}</td>
                                     <td className="px-3 py-2 text-right font-mono text-slate-700">{m.availableQty == null ? "—" : `${fmtQty(m.availableQty)} ${m.unit}`}</td>
                                     <td className="px-3 py-2">

@@ -15,6 +15,8 @@ import type { MaterialPlanningProduct, MaterialPlanningRow } from "../lib/types"
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 import { ProductActions } from "./PpicPlanningDetailPage";
+import { RndBomControl, SlotPill } from "../components/RndBomControl";
+import { useAuth } from "../lib/auth";
 import { CustomerName } from "../components/CustomerName";
 
 // The Material Planning tile's list — one row per raw/packaging material of
@@ -61,6 +63,7 @@ function StatusPill({ row, onOrder }: { row: MaterialPlanningRow; onOrder: OnOrd
 }
 
 export function PpicMaterialPlanningPage() {
+  const { hasRole } = useAuth();
   const setHold = useSetItemMaterialHold();
   const { data: plants } = usePlants();
   const plantName = new Map((plants ?? []).map((p) => [p.id, p.name]));
@@ -119,8 +122,8 @@ export function PpicMaterialPlanningPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-brand-500/10 text-brand-600">
             <Layers className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -134,7 +137,7 @@ export function PpicMaterialPlanningPage() {
             </p>
           </div>
         </div>
-        <button className="btn-primary btn-sm" disabled={paged.total === 0 || exporting} onClick={exportAll}>
+        <button className="btn-primary btn-sm shrink-0" disabled={paged.total === 0 || exporting} onClick={exportAll}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> {exporting ? "Preparing…" : `Download Report${isFiltered ? " (Filtered)" : ""}`}
         </button>
       </div>
@@ -206,7 +209,10 @@ export function PpicMaterialPlanningPage() {
                       <StatusPill row={row} onOrder={row.onOrder} />
                     </td>
                     <td className="px-4 py-2.5 text-slate-600"><CustomerName name={product.customerName} /></td>
-                    <td className="px-4 py-2.5 text-slate-700">{product.productName}</td>
+                    <td className="px-4 py-2.5 text-slate-700">
+                      {product.productName}
+                      {product.activeBomSlot !== "DISPLAY" && <span className="ml-1.5 align-middle"><SlotPill slot={product.activeBomSlot} /></span>}
+                    </td>
                     <td className="px-4 py-2.5 text-slate-500">{product.productCategory ?? "—"}</td>
                     <td className="px-4 py-2.5">
                       <AgingCell since={product.plannedAt} />
@@ -214,7 +220,14 @@ export function PpicMaterialPlanningPage() {
                     <td className="px-4 py-2.5">
                       <span className={`pill text-micro ${row.type === "RM" ? "border-violet-200 bg-violet-50 text-violet-700" : "border-sky-200 bg-sky-50 text-sky-700"}`}>{row.type === "RM" ? "RM" : "PM"}</span>
                     </td>
-                    <td className="px-4 py-2.5 font-semibold text-slate-700">{row.material}</td>
+                    <td className="px-4 py-2.5 font-semibold text-slate-700">
+                      {row.material}
+                      {row.approvedVendors.length > 0 && (
+                        <div className="mt-0.5 text-micro font-semibold text-violet-600" title="Only these vendors' stock counts for this product">
+                          Approved vendor: {row.approvedVendors.join(" / ")} · {fmt(row.approvedOnHand ?? 0, row.unit)} in stock
+                        </div>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 text-right font-mono text-slate-600">{fmt(row.requiredQty, row.unit)}</td>
                     <td className={`px-4 py-2.5 text-right font-mono ${row.coveredQty ? "text-emerald-700" : "text-slate-300"} ${row.isPreview ? "italic opacity-70" : ""}`} title={row.isPreview ? "If released now" : undefined}>
                       {fmt(row.coveredQty || null, row.unit)}
@@ -223,7 +236,8 @@ export function PpicMaterialPlanningPage() {
                       {product.plannedPlantId ? <span className="font-semibold text-slate-700">{plantName.get(product.plannedPlantId) ?? "—"}</span> : <span className="text-tiny font-bold text-amber-600">Not assigned</span>}
                     </td>
                     <td className="px-4 py-2.5 text-right">
-                      {product.state !== "SENT" && (
+                      {product.state !== "SENT" && hasRole("RND") && <RndBomControl product={product} />}
+                      {product.state !== "SENT" && hasRole("PPIC") && (
                         <ProductActions
                           stage="materialPlanning"
                           poId={product.purchaseOrderId}

@@ -104,8 +104,8 @@ export function FgDispatchPage() {
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-emerald-500/10 text-emerald-600">
             <PackageCheck className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -117,7 +117,7 @@ export function FgDispatchPage() {
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -610,8 +610,8 @@ export function FgWarehouseRequestsPage() {
       <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-emerald-500/10 text-emerald-600">
             <Warehouse className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -620,7 +620,7 @@ export function FgWarehouseRequestsPage() {
             <p className="text-sm text-slate-500">{rows.length.toLocaleString()} request{rows.length === 1 ? "" : "s"} from Dispatch. Accept what you can take, and confirm when it arrives.</p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>

@@ -3,6 +3,7 @@ import request from "supertest";
 import { createApp } from "../../src/app";
 import { authHeader, createUser } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
+import { getInTransitByItemId, getOnHandByDayStoreAndItem, getOnHandByPlantAndItem } from "../../src/modules/inventory/stock";
 
 const app = createApp();
 const DAY = 86_400_000;
@@ -60,11 +61,19 @@ async function setup() {
 
 const dispense = { rmDispensingDate: "2026-10-14", pmIssuedDate: "2026-10-14" };
 
+/** Production confirms everything the Day Store sent for the batch. */
+const receiveAll = async (s: Awaited<ReturnType<typeof setup>>) => {
+  const lines = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: s.batch.id, deliveryStatus: "PENDING" } });
+  return s.call(s.production.token, "post", `/api/production-batches/${s.batch.id}/receive`, { lines: lines.map((l) => ({ lineId: l.id, action: "RECEIVE" })) });
+};
+
 describe("Dispensing records what was weighed, and the lots it came from", () => {
   it("takes the plan quantity when nothing different is entered, and remembers the lots (oldest expiry first)", async () => {
     const s = await setup();
     const res = await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
     expect(res.status).toBe(200);
+    expect(res.body.prepStageId).toBe("RECEIVE"); // the material is on its way to the Plant
+    expect((await receiveAll(s)).status).toBe(200);
     const lines = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: s.batch.id } });
     const whey = lines.find((l) => l.itemId === s.whey.id)!;
     expect(whey).toMatchObject({ quantity: 40, plannedQty: 40 });
@@ -112,6 +121,7 @@ describe("Dispensing records what was weighed, and the lots it came from", () =>
   it("raw material wasted or rejected at the Plant goes on the Recycle Store's books", async () => {
     const s = await setup();
     expect((await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense)).status).toBe(200);
+    expect((await receiveAll(s)).status).toBe(200);
     const entry = await s.call(s.production.token, "post", `/api/plant-consumption/${s.run.id}/entries`, { itemId: s.whey.id, wastedQty: 2, rejectedQty: 1, unit: "Kg", note: "Spilled while opening the bag" });
     expect(entry.status).toBe(201);
     const rows = await prisma.inventoryTransaction.findMany({ where: { itemId: s.whey.id, type: "ISSUED_RECYCLE" }, orderBy: { quantity: "desc" } });
@@ -119,5 +129,136 @@ describe("Dispensing records what was weighed, and the lots it came from", () =>
     expect(rows[0]!.plantId).toBe(s.plant.id);
     const feed = await s.call(s.production.token, "get", "/api/recycle-store/transactions");
     expect(feed.body.filter((r: { kind: string; itemName: string }) => r.kind === "material" && r.itemName === s.whey.name)).toHaveLength(2);
+  });
+
+  it("Production's Material Received list is batch by batch: nothing before Dispensing, then what was weighed, and what the batch used", async () => {
+    const s = await setup();
+    const board = async () => (await s.call(s.production.token, "get", "/api/production-batches/material-board")).body as { batchId: string; batchNo: string; batchQty: number; material: string; requiredQty: number; receivedQty: number; inTransitQty: number; usedQty: number; wastedQty: number; status: string }[];
+
+    const before = (await board()).filter((r) => r.batchId === s.batch.id);
+    expect(before).toHaveLength(2); // whey and tubs
+    expect(before.every((r) => r.status === "NOT_DISPENSED" && r.receivedQty === 0)).toBe(true);
+    expect(before[0]).toMatchObject({ batchQty: 40 });
+
+    await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, { ...dispense, lines: [{ itemId: s.whey.id, actualQty: 41 }] });
+    // Sent, not yet confirmed by Production: on its way, nothing in the Plant yet
+    const onTheWay = (await board()).filter((r) => r.batchId === s.batch.id);
+    expect(onTheWay.map((r) => r.status)).toEqual(["IN_TRANSIT", "IN_TRANSIT"]);
+    expect(onTheWay.find((r) => r.material === s.whey.name)).toMatchObject({ receivedQty: 0, inTransitQty: 41 });
+    expect((await receiveAll(s)).status).toBe(200);
+    await s.call(s.production.token, "post", `/api/plant-consumption/${s.run.id}/entries`, { itemId: s.whey.id, productionBatchId: s.batch.id, consumedQty: 30, wastedQty: 2, unit: "Kg" });
+
+    const after = (await board()).filter((r) => r.batchId === s.batch.id);
+    const whey = after.find((r) => r.material === s.whey.name)!;
+    expect(whey).toMatchObject({ requiredQty: 40, receivedQty: 41, usedQty: 32, wastedQty: 2, status: "FULL" });
+    expect(after.find((r) => r.material === s.tub.name)).toMatchObject({ receivedQty: 40, status: "FULL" });
+
+    // A run from before the per-batch flow has no batches: it stays on the old product-wise board, and a batch-flow product is left off it
+    const legacy = await s.call(s.production.token, "get", "/api/pre-productions/material-board?legacyOnly=1");
+    expect(legacy.status).toBe(200);
+    expect(legacy.body.some((r: { itemId: string }) => r.itemId === s.batch.preProduction?.purchaseOrderItemId)).toBe(false);
+  });
+});
+
+describe("Production receives what the Day Store dispensed, material by material", () => {
+  const receive = (s: Awaited<ReturnType<typeof setup>>, token: string, lines: object[]) => s.call(token, "post", `/api/production-batches/${s.batch.id}/receive`, { lines });
+  const pendingOf = (s: Awaited<ReturnType<typeof setup>>) => prisma.batchDispensingLine.findMany({ where: { productionBatchId: s.batch.id, deliveryStatus: "PENDING" } });
+  const plantOnHand = async (s: Awaited<ReturnType<typeof setup>>, itemId: string) => (await getOnHandByPlantAndItem(s.plant.id, [itemId])).get(itemId) ?? 0;
+  const storeOnHand = async (s: Awaited<ReturnType<typeof setup>>, itemId: string) => (await getOnHandByDayStoreAndItem(s.dayStore.id, [itemId])).get(itemId)?.onHand ?? 0;
+
+  it("keeps the material on its way (out of the Day Store, not yet in the Plant) and tells Production", async () => {
+    const s = await setup();
+    const res = await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    expect(res.body.prepStageId).toBe("RECEIVE");
+    expect(await storeOnHand(s, s.whey.id)).toBe(20); // 60 - 40 sent
+    expect(await plantOnHand(s, s.whey.id)).toBe(0); // not received yet
+    expect((await getInTransitByItemId([s.whey.id])).get(s.whey.id)).toBe(40);
+    expect(await prisma.notification.count({ where: { title: { contains: "material is on its way" } } })).toBeGreaterThan(0);
+
+    // The Receive board lists it, with the lines to confirm
+    const board = (await s.call(s.production.token, "get", "/api/production-batches/prep-board?stage=RECEIVE")).body as { id: string; receiveLines: { itemName: string; sentQty: number }[] }[];
+    const row = board.find((r) => r.id === s.batch.id)!;
+    expect(row.receiveLines.map((l) => l.sentQty).sort()).toEqual([40, 40]);
+  });
+
+  it("a full receipt puts the material into the Plant and makes the batch READY; only Production receives", async () => {
+    const s = await setup();
+    await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    const lines = (await pendingOf(s)).map((l) => ({ lineId: l.id, action: "RECEIVE" }));
+    expect((await receive(s, s.dayStoreLogin.token, lines)).status).toBe(403);
+    expect((await receive(s, s.rnd.token, lines)).status).toBe(403);
+    const done = await receive(s, s.production.token, lines);
+    expect(done.status).toBe(200);
+    expect(done.body.prepStageId).toBe("READY");
+    expect(await plantOnHand(s, s.whey.id)).toBe(40);
+    expect((await getInTransitByItemId([s.whey.id])).get(s.whey.id)).toBeUndefined();
+    expect((await receive(s, s.production.token, lines)).status).toBe(409); // nothing left to receive
+  });
+
+  it("a short receipt needs a reason, books what arrived, and keeps the difference as a recorded loss", async () => {
+    const s = await setup();
+    await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    const whey = s.whey.id;
+    const tub = s.tub.id;
+    const lines = await pendingOf(s);
+    const wheyLine = lines.find((l) => l.itemId === whey)!;
+    const tubLine = lines.find((l) => l.itemId === tub)!;
+    const more = await receive(s, s.production.token, [{ lineId: wheyLine.id, action: "RECEIVE", receivedQty: 45 }]);
+    expect(more.status).toBe(400); // more than was sent
+    const noReason = await receive(s, s.production.token, [{ lineId: wheyLine.id, action: "RECEIVE", receivedQty: 38 }]);
+    expect(noReason.status).toBe(400);
+    expect((await pendingOf(s)).length).toBe(2); // nothing was booked
+
+    // Whey arrives short (38 of 40); the tubs have not been looked at yet: the batch waits at Receive
+    const partial = await receive(s, s.production.token, [{ lineId: wheyLine.id, action: "RECEIVE", receivedQty: 38, note: "Bag torn on the way" }]);
+    expect(partial.status).toBe(200);
+    expect(partial.body.prepStageId).toBe("RECEIVE");
+    expect(await plantOnHand(s, whey)).toBe(38);
+    const issue = await prisma.inventoryTransaction.findFirstOrThrow({ where: { itemId: whey, type: "ISSUED_PRODUCTION" } });
+    expect(issue).toMatchObject({ shortQty: 2, shortNote: "Bag torn on the way" });
+    expect((await prisma.batchDispensingLine.findUniqueOrThrow({ where: { id: wheyLine.id } })).quantity).toBe(38); // what the batch really holds
+
+    const rest = await receive(s, s.production.token, [{ lineId: tubLine.id, action: "RECEIVE" }]);
+    expect(rest.body.prepStageId).toBe("READY");
+  });
+
+  it("a refused material goes back to the Day Store; the batch returns to Dispensing for that material only, then goes on", async () => {
+    const s = await setup();
+    await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    const whey = s.whey.id;
+    const tub = s.tub.id;
+    const lines = await pendingOf(s);
+    const wheyLine = lines.find((l) => l.itemId === whey)!;
+    const tubLine = lines.find((l) => l.itemId === tub)!;
+
+    expect((await receive(s, s.production.token, [{ lineId: wheyLine.id, action: "REFUSE" }])).status).toBe(400); // a reason is needed
+    const out = await receive(s, s.production.token, [
+      { lineId: wheyLine.id, action: "REFUSE", note: "Wrong grade of whey" },
+      { lineId: tubLine.id, action: "RECEIVE" },
+    ]);
+    expect(out.status).toBe(200);
+    expect(out.body.prepStageId).toBe("DISPENSING");
+    expect(await storeOnHand(s, whey)).toBe(60); // the whey is back with the Day Store
+    expect(await plantOnHand(s, tub)).toBe(40);
+
+    // The Day Store sees why, and dispenses only what is missing (the tubs are already there)
+    const board = (await s.call(s.dayStoreLogin.token, "get", "/api/production-batches/prep-board?stage=DISPENSING")).body as { id: string; requirements: { itemId: string; dispensed: boolean; refusedNote: string | null }[] }[];
+    const reqs = board.find((r) => r.id === s.batch.id)!.requirements;
+    expect(reqs.find((r) => r.itemId === whey)).toMatchObject({ dispensed: false, refusedNote: "Wrong grade of whey" });
+    expect(reqs.find((r) => r.itemId === tub)).toMatchObject({ dispensed: true });
+
+    const again = await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    expect(again.status).toBe(200);
+    expect(again.body.prepStageId).toBe("RECEIVE");
+    expect(await prisma.inventoryTransaction.count({ where: { itemId: tub, type: "ISSUED_PRODUCTION", deletedAt: null } })).toBe(1); // the tubs were not sent twice
+    const second = await pendingOf(s);
+    expect(second.map((l) => l.itemId)).toEqual([whey]);
+    const finished = await receive(s, s.production.token, [{ lineId: second[0]!.id, action: "RECEIVE" }]);
+    expect(finished.body.prepStageId).toBe("READY");
+    expect(await plantOnHand(s, whey)).toBe(40);
+
+    // The refused line no longer counts as given
+    const trace = await s.call(s.warehouse.token, "get", `/api/inventory/lots/trace/batch/${s.batch.id}`);
+    expect(trace.body.materials.find((m: { itemId: string }) => m.itemId === whey).dispensedQty).toBe(40);
   });
 });

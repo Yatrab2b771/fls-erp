@@ -194,6 +194,7 @@ preProductionRouter.get("/new-plans", requireRole("PRODUCTION", "PPIC"), async (
       where: {
         cancelledAt: null,
         materialHeldAt: null, // a product on Hold is listed only under On Hold
+        productionHeldAt: null, // and one Production holds, only on Held Products
         planSentToProductionAt: { not: null },
         preProduction: running ? { isNot: null } : null,
         ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}),
@@ -252,7 +253,16 @@ preProductionRouter.get("/material-board", requireRole("PRODUCTION", "PPIC"), as
   try {
     const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const items = await prisma.purchaseOrderItem.findMany({
-      where: { cancelledAt: null, materialHeldAt: null, deletedAt: null, planSentToProductionAt: { not: null }, ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}) },
+      where: {
+        cancelledAt: null,
+        materialHeldAt: null,
+        productionHeldAt: null,
+        deletedAt: null,
+        planSentToProductionAt: { not: null },
+        // ?legacyOnly=1: leave out the products whose run works batch by batch - the Material Received page lists those batch-wise instead.
+        ...(req.query.legacyOnly === "1" ? { NOT: { preProduction: { is: { batchFlow: true } } } } : {}),
+        ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}),
+      },
       select: {
         id: true,
         productName: true,
@@ -369,7 +379,7 @@ preProductionRouter.get("/plans-board", requireRole("PRODUCTION", "PPIC"), async
   try {
     const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const items = await prisma.purchaseOrderItem.findMany({
-      where: { cancelledAt: null, materialHeldAt: null, deletedAt: null, planSentToProductionAt: { not: null }, ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}) },
+      where: { cancelledAt: null, materialHeldAt: null, productionHeldAt: null, deletedAt: null, planSentToProductionAt: { not: null }, ...(plantScope ? { plannedPlantId: { in: plantScope } } : {}) },
       select: {
         id: true,
         productName: true,
@@ -379,6 +389,9 @@ preProductionRouter.get("/plans-board", requireRole("PRODUCTION", "PPIC"), async
         releasedQty: true,
         unit: true,
         planSentToProductionAt: true,
+        closedShortAt: true,
+        closedShortQty: true,
+        closedShortReason: true,
         plannedPlant: { select: { id: true, name: true } },
         purchaseOrder: { select: { id: true, poNumber: true, customer: { select: { companyName: true } } } },
         preProduction: {
@@ -458,6 +471,7 @@ preProductionRouter.get("/plans-board", requireRole("PRODUCTION", "PPIC"), async
         unit: i.unit,
         plant: run?.plant ?? i.plannedPlant,
         sentAt: i.planSentToProductionAt,
+        closedShort: i.closedShortAt ? { at: i.closedShortAt, qty: i.closedShortQty, reason: i.closedShortReason } : null,
         run: run && { id: run.id, currentStageId: run.currentStageId, sampleQcStatus: run.sampleQcStatus, batchFlow: run.batchFlow, plannedQty: run.plannedQty, combinedQty: run.combinedQty },
         batches: (run?.productionBatches ?? []).map((b) => ({ ...b, materials: materialsOf(run!.id, b.id) })),
         unassigned: run ? materialsOf(run.id, "") : [],
@@ -477,7 +491,7 @@ preProductionRouter.get("/indent-board", requireRole("PRODUCTION", "PPIC"), asyn
   try {
     const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const runs = await prisma.preProduction.findMany({
-      where: { currentStageId: "INDENT_ISSUE", purchaseOrderItem: { cancelledAt: null, materialHeldAt: null }, ...(plantScope ? { plantId: { in: plantScope } } : {}) },
+      where: { currentStageId: "INDENT_ISSUE", purchaseOrderItem: { cancelledAt: null, materialHeldAt: null, productionHeldAt: null }, ...(plantScope ? { plantId: { in: plantScope } } : {}) },
       select: {
         id: true,
         purchaseOrderItemId: true,
@@ -537,7 +551,7 @@ preProductionRouter.get("/store-board", requireRole("STORE", "PPIC"), async (req
     const stage = req.query.stage === "DISPENSING" ? "DISPENSING" : "MATERIAL_RECEIVED";
     const scope = await getScopedDayStoreIds(req.user!.id, req.user!.roles);
     const runs = await prisma.preProduction.findMany({
-      where: { currentStageId: stage, purchaseOrderItem: { cancelledAt: null, materialHeldAt: null }, ...(scope ? { plant: { dayStoreId: { in: scope } } } : {}) },
+      where: { currentStageId: stage, purchaseOrderItem: { cancelledAt: null, materialHeldAt: null, productionHeldAt: null }, ...(scope ? { plant: { dayStoreId: { in: scope } } } : {}) },
       select: {
         id: true,
         purchaseOrderItemId: true,

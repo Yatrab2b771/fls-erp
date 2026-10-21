@@ -31,9 +31,14 @@ import {
   Truck,
   BellRing,
   Warehouse,
+  RotateCcw,
+  Recycle,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "../lib/auth";
+import { useCustomerReturnSummary } from "../lib/customerReturnHooks";
+import { useRecycleSummary } from "../lib/hooks";
 import {
   useAllProductionBatches,
   useCombinedLots,
@@ -72,6 +77,7 @@ import {
 } from "../lib/hooks";
 import { useQcStageCounts } from "../lib/qcBoardHooks";
 import { useBomBoard } from "../lib/bomBoardHooks";
+import { useBomPlanningSummary, useInProductionBom } from "../lib/bomSwitchHooks";
 import { useSampleRequests } from "../lib/sampleRequestHooks";
 import { useExtraRequests } from "../lib/extraHooks";
 import { useAccountsQueue, useFgDispatchBoard, useFgStockRequests, useFgStoreBoard, useFgWarehouseRequests } from "../lib/fgHooks";
@@ -222,6 +228,10 @@ export function DashboardPage() {
   // other department's planning tiles, not an inline download).
   const isStoreOnlyView = canReviewInventory;
   const { data: storeSummary } = useStoreDashboardSummary({ enabled: isStoreOnlyView || isAdminView });
+  // Rejected material waiting in the Recycle Store for QA's decision
+  const { data: recycleSummary } = useRecycleSummary({ enabled: isAdminView || (!orgWide && hasRole("QA_QC")) });
+  // Customer returns: each department's own count (Warehouse: in progress, QA: waiting, Production: rework, Dispatch: to decide, Accounts: no credit note)
+  const { data: crSummary } = useCustomerReturnSummary({ enabled: isAdminView || (!orgWide && hasRole("STORE", "QA_QC", "PRODUCTION", "DISPATCH", "ACCOUNTS")) });
   const canRnd = !orgWide && hasRole("RND");
   const canProduction = !orgWide && hasRole("PRODUCTION");
   const { data: plansBoard } = usePlansBoard({ enabled: canProduction });
@@ -363,6 +373,8 @@ export function DashboardPage() {
   const { data: bomBoard } = useBomBoard({ enabled: canRnd || hasRole("ADMIN") });
   const { data: sampleRequests } = useSampleRequests({ enabled: canRnd || isAdminView || hasRole("BD") });
   const sampleOpen = (sampleRequests ?? []).filter((r) => r.status !== "DISPATCHED").length;
+  const { data: rndPlanning } = useBomPlanningSummary(canRnd || hasRole("ADMIN"));
+  const { data: rndInProduction } = useInProductionBom(canRnd || hasRole("ADMIN"));
   const bomNeedWork = (bomBoard ?? []).filter((r) => r.needsWork).length;
   const bomReady = (bomBoard?.length ?? 0) - bomNeedWork;
   const rndAwaitingConfirmation = (rndPendingTransfers ?? []).filter((t) => t.direction === "TO_RND");
@@ -558,12 +570,13 @@ export function DashboardPage() {
                 {
                   title: "QA / QC",
                   tiles: [
-                    { to: "/batch-line-clearance", icon: Beaker, label: "Line Clearance", value: (prep?.LINE_CLEARANCE ?? 0) + (qcCounts?.LINE_CLEARANCE ?? 0), accent: (prep?.LINE_CLEARANCE ?? 0) + (qcCounts?.LINE_CLEARANCE ?? 0) ? "sky" : "slate", hint: "Batches whose material is dispensed: QA clears the line" },
                     { to: "/qc/ipqc", icon: Beaker, label: "IPQC", value: qcCounts?.IPQC ?? 0, accent: qcCounts?.IPQC ? "sky" : "slate" },
                     { to: "/qc/qa-gate-mfg", icon: ShieldAlert, label: "QA Gate: Manufacturing", value: qcCounts?.QA_GATE_MFG ?? 0, accent: qcCounts?.QA_GATE_MFG ? "sky" : "slate" },
                     { to: "/qc/qa-gate-packaging", icon: ShieldAlert, label: "QA Gate: Packaging", value: qcCounts?.QA_GATE_PACKAGING ?? 0, accent: qcCounts?.QA_GATE_PACKAGING ? "sky" : "slate" },
                     { to: "/qc/fg-release", icon: PackageCheck, label: "FG QC & Release", value: qcCounts?.FG_QC_RELEASE ?? 0, accent: qcCounts?.FG_QC_RELEASE ? "amber" : "slate" },
                     { to: "/qc/on-hold", icon: PauseCircle, label: "QA On Hold", value: qcCounts?.ON_HOLD ?? 0, accent: qcCounts?.ON_HOLD ? "amber" : "slate" },
+                    { to: "/returned-goods", icon: ShieldCheck, label: "Returned Goods (QA)", value: crSummary?.withQa ?? 0, accent: crSummary?.withQa ? "amber" : "slate", hint: "Goods a customer sent back, waiting for QA to pass, rework or scrap them" },
+                    { to: "/recycle-store", icon: Recycle, label: "Recycle Store (QA)", value: recycleSummary?.toDecide ?? 0, accent: recycleSummary?.toDecide ? "amber" : "slate", hint: "Rejected material waiting for QA to decide: reuse it or destroy it" },
                   ],
                 },
                 {
@@ -588,9 +601,10 @@ export function DashboardPage() {
                   tiles: [
                     { to: "/available-stock", icon: Boxes, label: "Available Stock (Items)", value: availableSummary?.itemsInStock ?? 0, accent: "emerald", hint: "Every RM / PM on hand, by location, with batches" },
                     { to: "/accounts-dispatch", icon: FileText, label: "Dispatch Invoices (Pending)", value: withAccountsCount, accent: withAccountsCount ? "amber" : "slate" },
-                    { to: "/finished-goods", icon: PackageCheck, label: "FG Stock (Products)", value: storeSummary?.fgProductCount ?? 0, accent: "emerald" },
+                    { to: "/finished-goods", icon: PackageCheck, label: "Finished Goods", value: storeSummary?.fgProductCount ?? 0, accent: fgStockRequestsOpen + (crSummary?.open ?? 0) ? "amber" : "emerald", hint: "Finished goods in stock (products), with the requests Dispatch has made and the goods customers sent back" },
                     { to: "/fg-warehouse-requests", icon: PackageCheck, label: "FG Requests (Open)", value: fgRequestsOpen, accent: fgRequestsOpen ? "amber" : "slate" },
-                    { to: "/finished-goods", icon: PackageCheck, label: "FG Stock Requests (Open)", value: fgStockRequestsOpen, accent: fgStockRequestsOpen ? "amber" : "slate" },
+                    { to: "/returned-goods-dispatch", icon: RotateCcw, label: "Returned Goods (Dispatch)", value: crSummary?.awaitingDispatch ?? 0, accent: crSummary?.awaitingDispatch ? "amber" : "slate", hint: "Returned goods QA has passed: Dispatch stores them or sends them again" },
+                    { to: "/credit-notes", icon: FileText, label: "Credit Notes", value: crSummary?.noCreditNote ?? 0, accent: crSummary?.noCreditNote ? "amber" : "slate", hint: "Customer returns that have no credit note yet" },
                     { to: "/material-requests-plan", icon: AlarmClock, label: "Material Request (Plan)", value: requestsSummary?.plan ?? 0, accent: requestsSummary?.planOverdue ? "rose" : requestsSummary?.plan ? "amber" : "slate" },
                     { to: "/material-requests", icon: HandHelping, label: "Material Requests (Open)", value: requestsSummary?.open ?? 0, accent: requestsSummary?.open ? "amber" : "slate" },
                   ],
@@ -602,6 +616,8 @@ export function DashboardPage() {
                     { to: "/held-products", icon: PauseCircle, label: "Held Products", value: heldProductCount, accent: heldToDecide ? "amber" : heldProductCount ? "violet" : "slate", hint: "Products PPIC has put on hold, with their batches: Production holds the batches still in preparation" },
                     { to: "/batch-no", icon: Hash, label: "Batch No", value: prep?.BATCH_NO ?? 0, accent: prep?.BATCH_NO ? "amber" : "slate", hint: "Batches waiting for R&D to allocate their batch number" },
                     { to: "/batch-dispensing", icon: Send, label: "Dispensing (Batch)", value: prep?.DISPENSING ?? 0, accent: prep?.DISPENSING ? "amber" : "slate", hint: "Batches with a batch number: the Day Store dispenses their material" },
+                    { to: "/material-received", icon: PackageCheck, label: "Material Received", value: prep?.RECEIVE ? prep.RECEIVE : materialsPending, accent: prep?.RECEIVE || materialsPending ? "amber" : "emerald", hint: "Batch-wise material status. Batches whose material the Day Store has sent are confirmed here" },
+                    { to: "/rework", icon: Wrench, label: "Rework", value: crSummary?.inRework ?? 0, accent: crSummary?.inRework ? "amber" : "slate", hint: "Returned goods QA wants reprocessed" },
                     { to: "/batches", icon: Layers, label: "Batch", value: batchPlans, accent: batchPlans ? "amber" : "slate", hint: "Plans with a batch cleared for production" },
                     { to: "/plant-stock", icon: Factory, label: "Plant Stock", value: plantStockItems, accent: plantLeftover ? "violet" : plantStockItems ? "emerald" : "slate", hint: "What each Plant holds: reserved, free, leftover to send back" },
                     { to: "/packaging", icon: PackageCheck, label: "Packaging", value: packagingOpen, accent: packagingOpen ? "amber" : "slate", hint: "Batches at Packaging: sheet and PM Utilization" },
@@ -609,6 +625,9 @@ export function DashboardPage() {
                     { to: "/material-consumption?purpose=REJECTED", icon: PackageMinus, label: "Material Rejected at Plant", value: materialRejectedCount, accent: materialRejectedCount ? "rose" : "slate" },
                     { to: "/sample-requests", icon: Beaker, label: "Sample Request", value: sampleOpen, accent: sampleOpen ? "violet" : "slate" },
                     { to: "/bom-board", icon: ClipboardList, label: "Generate BOM", value: `${(bomBoard?.length ?? 0) - (bomBoard ?? []).filter((r) => r.needsWork).length}/${bomBoard?.length ?? 0}`, accent: (bomBoard ?? []).some((r) => r.needsWork) ? "amber" : "emerald" },
+                    { to: "/ppic-planning/material-planning", icon: Layers, label: "Material Planning (urgent)", value: rndPlanning?.short ?? 0, accent: rndPlanning?.short ? "rose" : "slate", hint: "Products short of material: change the plan to V1 / V2 to make them ready" },
+                    { to: "/ppic-planning/po-readiness", icon: CheckCircle2, label: "PO Readiness", value: rndPlanning?.ready ?? 0, accent: rndPlanning?.ready ? "emerald" : "slate", hint: "Products whose material is all covered: R&D can send the ones it changed to Production" },
+                    { to: "/bom-production", icon: Layers, label: "In Production: BOM change", value: rndInProduction?.length ?? 0, accent: rndInProduction?.length ? "violet" : "slate", hint: "Products with Production: change the BOM version of the batches not dispensed yet (PPIC is not told)" },
                   ],
                 },
               ] as { title: string; tiles: { to: string; icon: LucideIcon; label: string; value: string | number; accent: StatAccent; hint?: string }[] }[]
@@ -627,9 +646,6 @@ export function DashboardPage() {
           </div>
         ) : isQcOnlyView ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Link to="/batch-line-clearance" className="block" title="Batches whose material is dispensed: clear the line so Production can start them">
-              <StatTile icon={Beaker} label="Line Clearance" value={(prep?.LINE_CLEARANCE ?? 0) + (qcCounts?.LINE_CLEARANCE ?? 0)} accent={(prep?.LINE_CLEARANCE ?? 0) + (qcCounts?.LINE_CLEARANCE ?? 0) ? "sky" : "slate"} />
-            </Link>
             <Link to="/qc/ipqc" className="block" title="Batches whose in-process check waits for QA">
               <StatTile icon={Beaker} label="IPQC" value={qcCounts?.IPQC ?? 0} accent={qcCounts?.IPQC ? "sky" : "slate"} />
             </Link>
@@ -644,6 +660,12 @@ export function DashboardPage() {
             </Link>
             <Link to="/qc/on-hold" className="block" title="Everything QA has put on hold, at any stage">
               <StatTile icon={PauseCircle} label="On Hold" value={qcCounts?.ON_HOLD ?? 0} accent={qcCounts?.ON_HOLD ? "amber" : "slate"} />
+            </Link>
+            <Link to="/returned-goods" className="block" title="Goods a customer sent back: pass them, send them for rework, or scrap them">
+              <StatTile icon={ShieldCheck} label="Returned Goods" value={crSummary?.withQa ?? 0} accent={crSummary?.withQa ? "amber" : "slate"} />
+            </Link>
+            <Link to="/recycle-store" className="block" title="Rejected material waiting in the Recycle Store: reuse it or destroy it">
+              <StatTile icon={Recycle} label="Recycle Store" value={recycleSummary?.toDecide ?? 0} accent={recycleSummary?.toDecide ? "amber" : "slate"} />
             </Link>
           </div>
         ) : isPurchaseOnlyView ? (
@@ -705,8 +727,12 @@ export function DashboardPage() {
             <Link to="/quarantine" className="block" title="Stock held for QC, on hold, or sent for a lab test - with filters">
               <StatTile icon={ShieldAlert} label="Quarantine Stock" value={storeSummary?.quarantineCount ?? 0} accent={storeSummary?.quarantineCount ? "amber" : "slate"} />
             </Link>
-            <Link to="/finished-goods" className="block" title="Finished goods at the FG Store and later stages, by PO / product / customer, with filters">
-              <StatTile icon={PackageCheck} label="FG Stock (Products)" value={storeSummary?.fgProductCount ?? 0} accent="emerald" />
+            <Link
+              to="/finished-goods"
+              className="block"
+              title={`Finished goods in stock (products). ${fgStockRequestsOpen} request${fgStockRequestsOpen === 1 ? "" : "s"} from Dispatch open, ${isWarehouseSeat ? (crSummary?.open ?? 0) : 0} customer return${(crSummary?.open ?? 0) === 1 ? "" : "s"} in progress: all on that page.`}
+            >
+              <StatTile icon={PackageCheck} label="Finished Goods" value={storeSummary?.fgProductCount ?? 0} accent={fgStockRequestsOpen + (isWarehouseSeat ? (crSummary?.open ?? 0) : 0) ? "amber" : "emerald"} />
             </Link>
             <Link to="/stock-issued" className="block" title="Everything the Warehouse has issued out - to Day Stores and the R&D Store - with filters">
               <StatTile icon={Send} label="Stock Issued (Entries)" value={issuedSummary?.total ?? 0} accent="violet" />
@@ -716,9 +742,6 @@ export function DashboardPage() {
             </Link>
             <Link to="/fg-warehouse-requests" className="block" title="Dispatch asking to send finished goods to the Warehouse: accept them, and confirm when they arrive">
               <StatTile icon={PackageCheck} label="FG Requests (Open)" value={fgRequestsOpen} accent={fgRequestsOpen ? "amber" : "slate"} />
-            </Link>
-            <Link to="/finished-goods" className="block" title="Dispatch asking you to send finished goods you hold back to it, to ship to a customer">
-              <StatTile icon={PackageCheck} label="FG Stock Requests (Open)" value={fgStockRequestsOpen} accent={fgStockRequestsOpen ? "amber" : "slate"} />
             </Link>
             <Link to="/material-requests-plan" className="block" title="Urgent: Day Stores asking for material a production plan needs - late ones first">
               <StatTile icon={AlarmClock} label="Material Request (Plan)" value={requestsSummary?.plan ?? 0} accent={requestsSummary?.planOverdue ? "rose" : requestsSummary?.plan ? "amber" : "slate"} />
@@ -745,8 +768,13 @@ export function DashboardPage() {
               </Link>
             )}
             {canProduction && (
-              <Link to="/material-received" className="block" title="For each product in your plan: material required, received, still to come, in production and available">
-                <StatTile icon={PackageCheck} label="Material Received" value={materialsPending} accent={materialsPending ? "amber" : "emerald"} />
+              <Link
+                to="/material-received"
+                className="block"
+                title={prep?.RECEIVE ? `${prep.RECEIVE} batch${prep.RECEIVE === 1 ? "" : "es"} whose material the Day Store has sent: confirm what arrived. Also each batch's material required, received, still to come, in production and available.` : "For each batch: material required, received, still to come, in production and available"}
+              >
+                {/* Waiting for Production's confirmation: the number of batches; otherwise the materials not yet fully received */}
+                <StatTile icon={PackageCheck} label="Material Received" value={prep?.RECEIVE ? prep.RECEIVE : materialsPending} accent={prep?.RECEIVE || materialsPending ? "amber" : "emerald"} />
               </Link>
             )}
             {canProduction && (
@@ -779,6 +807,11 @@ export function DashboardPage() {
                 <StatTile icon={ClipboardList} label="Production Report" value={reportProducts} accent="violet" />
               </Link>
             )}
+            {canProduction && (
+              <Link to="/rework" className="block" title="Goods a customer sent back that QA wants reprocessed">
+                <StatTile icon={Wrench} label="Rework" value={crSummary?.inRework ?? 0} accent={crSummary?.inRework ? "amber" : "slate"} />
+              </Link>
+            )}
             {canDispatchTile && (
               <Link to="/finished-goods-dispatch" className="block" title="Finished goods the Day Store has handed over: send them to the customer or, after the Warehouse accepts, to the Warehouse">
                 <StatTile icon={PackageCheck} label="Finished Goods" value={fgDispatch?.length ?? 0} accent={fgDispatch?.length ? "emerald" : "slate"} />
@@ -794,9 +827,19 @@ export function DashboardPage() {
                 <StatTile icon={FileText} label="Shipments with Accounts" value={withAccountsCount + readyToSendCount + sentBackCount} accent={readyToSendCount || sentBackCount ? "amber" : "slate"} />
               </Link>
             )}
+            {canDispatchTile && (
+              <Link to="/returned-goods-dispatch" className="block" title="Goods a customer sent back that QA has passed: store them in the Warehouse or send them again">
+                <StatTile icon={RotateCcw} label="Returned Goods" value={crSummary?.awaitingDispatch ?? 0} accent={crSummary?.awaitingDispatch ? "amber" : "slate"} />
+              </Link>
+            )}
             {canAccountsTile && (
               <Link to="/accounts-dispatch" className="block" title="Customer shipments Dispatch prepared: add the invoice and e-way bill so Dispatch can send them">
                 <StatTile icon={FileText} label="Dispatch Invoices (Pending)" value={withAccountsCount} accent={withAccountsCount ? "amber" : "slate"} />
+              </Link>
+            )}
+            {canAccountsTile && (
+              <Link to="/credit-notes" className="block" title="Customer returns that have no credit note yet">
+                <StatTile icon={FileText} label="Credit Notes" value={crSummary?.noCreditNote ?? 0} accent={crSummary?.noCreditNote ? "amber" : "slate"} />
               </Link>
             )}
             {canAccountsTile && (
@@ -851,6 +894,15 @@ export function DashboardPage() {
                 </Link>
                 <Link to="/bom-board" className="block" title="Products on approved POs: is their RM BOM and Packaging BOM ready? The number is how many are ready out of all of them.">
                   <StatTile icon={ClipboardList} label="Generate BOM" value={`${bomReady}/${bomBoard?.length ?? 0}`} accent={bomNeedWork ? "amber" : "emerald"} />
+                </Link>
+                <Link to="/ppic-planning/material-planning" className="block" title="Products short of material: change the plan to V1 / V2 to make them ready">
+                  <StatTile icon={Layers} label="Material Planning (urgent)" value={rndPlanning?.short ?? 0} accent={rndPlanning?.short ? "rose" : "slate"} />
+                </Link>
+                <Link to="/ppic-planning/po-readiness" className="block" title="Products whose material is all covered: R&D can send the ones it changed to Production">
+                  <StatTile icon={CheckCircle2} label="PO Readiness" value={rndPlanning?.ready ?? 0} accent={rndPlanning?.ready ? "emerald" : "slate"} />
+                </Link>
+                <Link to="/bom-production" className="block" title="Products with Production: change the BOM version of the batches not dispensed yet (PPIC is not told)">
+                  <StatTile icon={Layers} label="In Production: BOM change" value={rndInProduction?.length ?? 0} accent={rndInProduction?.length ? "violet" : "slate"} />
                 </Link>
                 <Link to="/bulk-qc" className="block">
                   <StatTile icon={Truck} label="Bulk QC / COA Pending" value={rndBulkQcCount} accent="blue" />

@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ClipboardCheck, Download, Layers, PackageOpen } from "lucide-react";
+import { ArrowLeft, ChevronDown, ClipboardCheck, Download, Layers, PackageOpen, PauseCircle, XCircle } from "lucide-react";
 import { useCreatePreProduction, usePlansBoard, type PlanBoardRow } from "../lib/hooks";
 import { ApiError } from "../lib/api";
 import { useToast } from "../components/Toast";
@@ -14,10 +14,16 @@ import { AgingCell, agingDays, inAgingBuckets } from "../components/AgingCell";
 import { AGING_FIELD, TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import { EmptyState } from "../components/EmptyState";
 import { fmtQty } from "../lib/format";
-import { exportPlansBoard, isBatchStage, isNewPlan, planStatusOf } from "../lib/plansBoardExport";
+import { exportPlansBoard, isBatchStage, isNewPlan, planStatusOf, shortfallQty } from "../lib/plansBoardExport";
 import { yieldPct } from "../lib/utilization";
 import { describeFilters } from "../lib/excelReport";
 import { CustomerName } from "../components/CustomerName";
+import { RowActionMenu } from "../components/RowActionMenu";
+import { ReworkRows } from "../components/ReworkPanels";
+import { useReworks } from "../lib/reworkHooks";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useAuth } from "../lib/auth";
+import { useCancelProduct, useSetProductHold } from "../lib/heldProductHooks";
 
 type Section = "plan" | "batch";
 
@@ -59,6 +65,12 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
   const filters = useTileFilters();
   const [open, setOpen] = useState<{ itemId: string; section: Section } | null>(null);
   const [downloading, setDownloading] = useState(false);
+  // Production's own Hold / Cancel on a product (New Plan only; a held product moves to Held Products)
+  const { hasRole } = useAuth();
+  const canAct = mode === "plan" && hasRole("PRODUCTION");
+  const setHold = useSetProductHold();
+  const cancelProduct = useCancelProduct();
+  const [asking, setAsking] = useState<{ row: PlanBoardRow; kind: "hold" | "cancel" } | null>(null);
   const picked = (key: string) => filters.applied.picks[key] ?? [];
   const all = (data ?? []).filter(mode === "batch" ? isBatchStage : isNewPlan);
   const distinctMany = (pick: (r: PlanBoardRow) => (string | null | undefined)[]) => [...new Set(all.flatMap(pick).filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
@@ -133,6 +145,18 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
   )
     .map(narrow)
     .filter((r) => (!batchActive && !utilActive) || r.batches.length > 0);
+  // Reworks of customer-returned goods sit in New Plan too, with a Rework tag and a sub-number of the original batch
+  const { data: reworkData } = useReworks({ enabled: mode === "plan" && hasRole("PRODUCTION", "PPIC", "ADMIN") });
+  const openReworks = mode !== "plan"
+    ? []
+    : (reworkData ?? []).filter(
+        (w) =>
+          w.status !== "COMPLETED" &&
+          (!picked("po").length || picked("po").includes(w.poNumber ?? "")) &&
+          (!picked("customer").length || picked("customer").includes(w.customerName)) &&
+          (!picked("product").length || picked("product").includes(w.productName)) &&
+          (!picked("plant").length || picked("plant").includes(w.plantName ?? "")),
+      );
   const pg = useClientPaging(rows);
   const isFiltered = filters.activeCount > 0;
   const notStarted = all.filter((r) => !r.run).length;
@@ -164,6 +188,22 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
     }
   }
 
+  async function confirmAsk(reason: string) {
+    if (!asking) return;
+    try {
+      if (asking.kind === "hold") {
+        await setHold.mutateAsync({ itemId: asking.row.itemId, held: true, reason });
+        toast.success(`${asking.row.productName} is on hold. Release it from Held Products.`);
+      } else {
+        await cancelProduct.mutateAsync({ itemId: asking.row.itemId, reason });
+        toast.success(`${asking.row.productName} is cancelled.`);
+      }
+      setAsking(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not save");
+    }
+  }
+
   const toggle = (itemId: string, section: Section) => setOpen(open?.itemId === itemId && open.section === section ? null : { itemId, section });
   const dropBtn = (r: PlanBoardRow, section: Section, label: string) => {
     const isOpen = open?.itemId === r.itemId && open.section === section;
@@ -184,8 +224,8 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-emerald-500/10 text-emerald-600">
             {mode === "batch" ? <Layers className="h-5 w-5" strokeWidth={2} /> : <ClipboardCheck className="h-5 w-5" strokeWidth={2} />}
           </div>
@@ -198,7 +238,7 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={downloading || rows.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={downloading || rows.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> {downloading ? "Preparing…" : "Download Excel"}
         </button>
       </div>
@@ -207,7 +247,7 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
 
       {isLoading ? (
         <div className="skeleton h-48 w-full" />
-      ) : rows.length === 0 ? (
+      ) : rows.length === 0 && openReworks.length === 0 ? (
         <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : mode === "batch" ? "No plans ready for batches" : "No plans yet"} hint={isFiltered ? "Nothing matches these filters." : mode === "batch" ? "A plan shows here once its Line Clearance is approved." : "Plans show here as soon as PPIC sends a product to Production."} accent="brand" />
       ) : (
         <div className="card overflow-x-auto">
@@ -224,9 +264,11 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
                 <th className="px-4 py-3">Aging</th>
                 <th className="px-4 py-3">Plan</th>
                 <th className="px-4 py-3">{mode === "batch" ? "Batch" : "Run"}</th>
+                {canAct && <th className="px-4 py-3 text-right">Action</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
+              {openReworks.length > 0 && <ReworkRows rows={openReworks} showPlant={showPlant} columns={(showPlant ? 10 : 9) + (canAct ? 1 : 0)} />}
               {pg.rows.map((r) => {
                 const status = planStatusOf(r);
                 const isOpen = open?.itemId === r.itemId;
@@ -243,6 +285,7 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
                       <td className="px-4 py-3 text-right font-mono text-slate-800">
                         {fmtQty(r.quantity)} {r.unit}
                         {r.releasedQty < r.quantity - 1e-6 && <span className="block font-sans text-micro font-bold text-amber-600">Released {fmtQty(r.releasedQty)} of {fmtQty(r.quantity)}</span>}
+                        {shortfallQty(r) > 0 && <span className="block font-sans text-micro font-bold text-rose-600">Shortfall {fmtQty(shortfallQty(r))} {r.unit}: make a batch for it</span>}
                       </td>
                       {showPlant && <td className="px-4 py-3">{r.plant ? <span className="font-semibold text-slate-700">{r.plant.name}</span> : <span className="text-rose-600">Not assigned</span>}</td>}
                       <td className="px-4 py-3">
@@ -264,10 +307,21 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
                           </Link>
                         )}
                       </td>
+                      {canAct && (
+                        <td className="px-4 py-3 text-right">
+                          <RowActionMenu
+                            width="w-52"
+                            actions={[
+                              { label: "Hold", icon: <PauseCircle className="h-3.5 w-3.5" />, tone: "text-amber-700", onClick: () => setAsking({ row: r, kind: "hold" }) },
+                              { label: "Cancel", icon: <XCircle className="h-3.5 w-3.5" />, tone: "text-rose-700", onClick: () => setAsking({ row: r, kind: "cancel" }) },
+                            ]}
+                          />
+                        </td>
+                      )}
                     </tr>
                     {isOpen && open && (
                       <tr className="bg-slate-50/60">
-                        <td colSpan={showPlant ? 10 : 9} className="whitespace-normal px-4 py-4">
+                        <td colSpan={(showPlant ? 10 : 9) + (canAct ? 1 : 0)} className="whitespace-normal px-4 py-4">
                           {open.section === "plan" && <PlanFromPpic poId={r.poId} itemId={r.itemId} />}
                           {open.section === "batch" &&
                             (mode === "batch" ? <BatchPanel row={r} onStart={() => void startRun(r)} starting={start.isPending} only={batchActive || utilActive ? new Set(r.batches.map((b) => b.id)) : undefined} /> : <DividePanel row={r} onStart={() => void startRun(r)} starting={start.isPending} />)}
@@ -282,6 +336,49 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
           <ClientPager pg={pg} />
         </div>
       )}
+
+      <ConfirmDialog
+        open={asking?.kind === "hold"}
+        tone="brand"
+        title="Hold this product?"
+        message={
+          asking && (
+            <>
+              <b>
+                {asking.row.productName} ({asking.row.poNumber ?? "PO"})
+              </b>{" "}
+              leaves New Plan and goes to Held Products. Nothing of it moves (no batch, Indent, Batch No, Dispensing or Line Clearance) until you release it from there.
+            </>
+          )
+        }
+        requireReason
+        reasonLabel="Why are you holding it?"
+        confirmLabel="Hold product"
+        busy={setHold.isPending}
+        onConfirm={(reason) => void confirmAsk(reason)}
+        onCancel={() => setAsking(null)}
+      />
+      <ConfirmDialog
+        open={asking?.kind === "cancel"}
+        tone="danger"
+        title="Cancel this product?"
+        message={
+          asking && (
+            <>
+              <b>
+                {asking.row.productName} ({asking.row.poNumber ?? "PO"})
+              </b>{" "}
+              is cancelled for good, as when PPIC cancels it: it leaves every list and cannot be undone. PPIC and BD are told. Only possible while no batch has been made.
+            </>
+          )
+        }
+        requireReason
+        reasonLabel="Why are you cancelling it?"
+        confirmLabel="Cancel product"
+        busy={cancelProduct.isPending}
+        onConfirm={(reason) => void confirmAsk(reason)}
+        onCancel={() => setAsking(null)}
+      />
     </div>
   );
 }

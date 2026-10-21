@@ -17,6 +17,7 @@ import { ppicRouter } from "./modules/ppic/ppic.routes";
 import { preProductionRouter } from "./modules/batches/pre-production.routes";
 import { productionBatchesRouter } from "./modules/batches/production-batches.routes";
 import { batchPrepRouter } from "./modules/batches/batch-prep.routes";
+import { batchUtilizationRouter } from "./modules/batches/batch-utilization.routes";
 import { plantStockRouter } from "./modules/plant-consumption/plant-stock.routes";
 import { combinedLotRouter } from "./modules/batches/combined-lot.routes";
 import { financeRouter } from "./modules/finance/finance.routes";
@@ -24,6 +25,8 @@ import { alertsRouter } from "./modules/alerts/alerts.routes";
 import { fgRouter } from "./modules/batches/fg.routes";
 import { catalogRouter } from "./modules/packaging-bom/catalog.routes";
 import { bomVersionsRouter } from "./modules/packaging-bom/bom-versions";
+import { bomSlotsRouter } from "./modules/packaging-bom/bom-slots";
+import { bomSwitchRouter } from "./modules/packaging-bom/bom-switch";
 import { bomDocsRouter } from "./modules/packaging-bom/bom-docs";
 import { bomBoardRouter } from "./modules/packaging-bom/bom-board";
 import { sampleRequestsRouter } from "./modules/sample-requests/sample-requests.routes";
@@ -52,6 +55,9 @@ import { qcSampleRouter } from "./modules/batches/qc-sample.routes";
 import { recycleStoreRouter } from "./modules/recycle-store/recycle-store.routes";
 import { addOnPlanRouter } from "./modules/planning/add-on-plan.routes";
 import { stockAdjustmentsRouter } from "./modules/inventory/stock-adjustments.routes";
+import { productVendorsRouter } from "./modules/product-vendors/product-vendors.routes";
+import { customerReturnsRouter } from "./modules/customer-returns/customer-returns.routes";
+import { reworksRouter } from "./modules/reworks/reworks.routes";
 
 export function createApp() {
   const app = express();
@@ -105,6 +111,7 @@ export function createApp() {
   // path and its own "/production-batches/:id" resource path, so it's
   // mounted at the bare "/api" prefix rather than nested under one tier.
   app.use("/api/pre-productions", preProductionRouter);
+  app.use("/api", batchUtilizationRouter);
   app.use("/api", batchPrepRouter); // before productionBatchesRouter: its /production-batches/:id would swallow the board routes
   app.use("/api", productionBatchesRouter);
   app.use("/api/combined-lots", combinedLotRouter);
@@ -113,6 +120,8 @@ export function createApp() {
   app.use("/api/finance", financeRouter);
   app.use("/api/catalog", catalogRouter);
   app.use("/api/bom-versions", bomVersionsRouter);
+  app.use("/api/bom-slots", bomSlotsRouter);
+  app.use("/api/bom-slots", bomSwitchRouter);
   app.use("/api/bom-docs", bomDocsRouter);
   app.use("/api/bom-board", bomBoardRouter);
   app.use("/api/sample-requests", sampleRequestsRouter);
@@ -144,6 +153,9 @@ export function createApp() {
   app.use("/api/recycle-store", recycleStoreRouter);
   app.use("/api/add-on-plan", addOnPlanRouter);
   app.use("/api/stock-adjustments", stockAdjustmentsRouter);
+  app.use("/api/product-vendors", productVendorsRouter);
+  app.use("/api/customer-returns", customerReturnsRouter);
+  app.use("/api/reworks", reworksRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 

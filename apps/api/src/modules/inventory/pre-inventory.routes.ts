@@ -20,6 +20,7 @@ import {
   type UpdatePurchaseLineInput,
 } from "./pre-inventory.schemas";
 import { QTY_EPS, summarizeLines, syncRequirementSummary } from "./purchase-lines";
+import { assertVendorAllowed } from "../product-vendors/vendor-rules";
 import type { InventoryCategory, Prisma } from "@prisma/client";
 
 // --- Pre-Inventory — the planning loop that runs before the Warehouse
@@ -108,7 +109,7 @@ async function withLiveStock<T extends RequirementRow>(rows: T[]) {
 // is read-only here (no write routes below allow it), added so the
 // "stock now available" notification (see stock.ts) has somewhere to
 // actually link to.
-preInventoryRouter.get("/", requireRole("PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION"), async (req: AuthedRequest, res, next) => {
+preInventoryRouter.get("/", requireRole("PPIC", "STORE", "PURCHASE", "ACCOUNTS"), async (req: AuthedRequest, res, next) => {
   try {
     const { category, short } = req.query as { category?: InventoryCategory; short?: string };
     const isPpicOnly = req.user!.roles.every((r) => r === "PPIC");
@@ -411,6 +412,13 @@ preInventoryRouter.post("/purchase/import", requireRole("PURCHASE"), validateBod
         unmatched.push(`${row.itemName} (${row.category})`);
         continue;
       }
+      // Approved vendors: a row for a vendor the product's material may not come from is left out and named back, like an unmatched row.
+      try {
+        await assertVendorAllowed(candidate, row.vendorName);
+      } catch {
+        unmatched.push(`${row.itemName} (${row.category}) - ${row.vendorName} is not an approved vendor for it`);
+        continue;
+      }
       const quantity = row.quantity ?? remaining.get(candidate.id)!;
       remaining.set(candidate.id, (remaining.get(candidate.id) ?? 0) - quantity);
       matches.push({ requirement: candidate, poNumber: row.poNumber, vendorName: row.vendorName, eta: row.eta, quantity });
@@ -471,6 +479,8 @@ preInventoryRouter.patch("/:id/purchase", requireRole("PURCHASE"), validateBody(
     if (currentStock >= existing.requiredQty) return res.status(409).json({ error: "This requirement is already fully covered by current stock — nothing to order" });
 
     const { poNumber, vendorName, eta, quantity } = req.body as SetPurchaseInput;
+    // A shortfall that belongs to a product with approved vendors can only be ordered from one of them (unless R&D allowed another).
+    await assertVendorAllowed(existing, vendorName);
     const { remainingToLog } = summarizeLines(existing.purchaseLines, existing.requiredQty - currentStock);
     const correcting = quantity === undefined && existing.purchaseLines.length > 0;
 
@@ -529,6 +539,7 @@ preInventoryRouter.patch("/:id/lines/:lineId", requireRole("PURCHASE"), validate
     if (line.status === "RECEIVED") return res.status(409).json({ error: "This PI line has already been received — it can't be edited" });
 
     const { poNumber, vendorName, eta, quantity } = req.body as UpdatePurchaseLineInput;
+    await assertVendorAllowed(existing, vendorName);
     const data: Prisma.RequirementPurchaseLineUpdateInput = { piNumber: poNumber, vendorName, eta, correctedAt: new Date() };
 
     if (quantity !== undefined && Math.abs(quantity - line.quantity) > QTY_EPS) {

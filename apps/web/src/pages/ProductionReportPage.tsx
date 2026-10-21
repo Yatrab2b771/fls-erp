@@ -14,6 +14,7 @@ import { materialUsed, q3, utilizationDifference, yieldPct } from "../lib/utiliz
 import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport";
 import { REPORT_STATUS_LABEL, summarize, toReportBatches, type ProductReport, type ReportBatch, type ReportStatus } from "../lib/productionReport";
 import { CustomerName } from "../components/CustomerName";
+import { CloseShortControl } from "../components/CloseShortControl";
 import { customerTypeLabel } from "../lib/customerTags";
 
 const STATUS_PILL: Record<ReportStatus, string> = {
@@ -311,6 +312,7 @@ export function ProductionReportPage() {
     const timelineSheet = perBatch((b) => {
       const d = detailOf.get(b.id);
       return {
+        "BOM Version Used": d ? d.bomVersion + (d.bomVersionNote ? ` (${d.bomVersionNote})` : "") : "",
         "Batch Created": d ? dt(d.createdAt) : "",
         "Indent Signed": d?.indentSignedAt ? dt(d.indentSignedAt) : "",
         "Batch No Allocated": d?.batchNoAllocatedAt ? dt(d.batchNoAllocatedAt) : "",
@@ -356,8 +358,8 @@ export function ProductionReportPage() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
       </Link>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-violet-500/10 text-violet-600">
             <ClipboardList className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -369,7 +371,7 @@ export function ProductionReportPage() {
             </p>
           </div>
         </div>
-        <button type="button" className="btn-primary btn-sm" disabled={reports.length === 0} onClick={download}>
+        <button type="button" className="btn-primary btn-sm shrink-0" disabled={reports.length === 0} onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
@@ -499,6 +501,8 @@ export function ProductionReportPage() {
                                   <Line k="Dispatched" v={`${fmtQty(t.dispatchedQty)} ${row.unit}`} />
                                 </Card>
                               </div>
+
+                              <CloseShortControl row={row} />
 
                               <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
                                 <p className="border-b border-slate-100 bg-slate-50/80 px-3 py-2 text-micro font-bold uppercase tracking-wide text-slate-500">Shift-wise</p>

@@ -113,8 +113,8 @@ export function LeadForecastPage() {
       <Link to="/leads" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Leads
       </Link>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3.5">
           <div className="stat-icon bg-emerald-500/10 text-emerald-600">
             <TrendingUp className="h-5 w-5" strokeWidth={2} />
           </div>
@@ -123,7 +123,7 @@ export function LeadForecastPage() {
             <p className="text-sm text-slate-500">What to expect from your leads, by the month the order is expected. The value is asked once a sample is approved.</p>
           </div>
         </div>
-        <button type="button" className="btn-ghost btn-sm" onClick={download}>
+        <button type="button" className="btn-ghost btn-sm shrink-0" onClick={download}>
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>

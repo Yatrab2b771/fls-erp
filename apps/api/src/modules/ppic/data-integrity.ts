@@ -111,6 +111,8 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
       regulatoryStatus: true,
       planSentToProductionAt: true,
       releasedQty: true,
+      closedShortAt: true,
+      closedShortQty: true,
       purchaseOrder: { select: { poNumber: true, status: true } },
       rmPlans: { where: { status: "CALCULATED" }, select: { id: true } },
       bomPlans: { where: { status: "CALCULATED" }, select: { id: true } },
@@ -135,6 +137,7 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
               fgQaStatus: true,
               handedOverToDispatchAt: true,
               fgShipments: { select: { type: true, status: true, quantity: true } },
+              customerReturns: { select: { quantity: true } },
             },
           },
         },
@@ -200,8 +203,8 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
       bomDone,
       planSent: !!item.planSentToProductionAt,
       isShort: shortItemIds.has(item.id),
-      quantity: item.quantity,
-      batches: batches.map((b) => ({ currentStageId: b.currentStageId, prepStageId: b.prepStageId, handedOverToDispatchAt: b.handedOverToDispatchAt, customerShippedQty: b.fgShipments.filter((s) => s.type === "CUSTOMER" && s.status === "DISPATCHED").reduce((a, s) => a + s.quantity, 0) })),
+      quantity: item.closedShortAt && item.closedShortQty != null ? item.closedShortQty : item.quantity,
+      batches: batches.map((b) => ({ currentStageId: b.currentStageId, prepStageId: b.prepStageId, handedOverToDispatchAt: b.handedOverToDispatchAt, customerShippedQty: Math.max(0, b.fgShipments.filter((s) => s.type === "CUSTOMER" && s.status === "DISPATCHED").reduce((a, s) => a + s.quantity, 0) - b.customerReturns.reduce((a, r) => a + r.quantity, 0)) })),
     });
     stages.set(item.id, stage);
     // What Dispatch has sent on (to the customer or the Warehouse), less what the Warehouse sent back: the same sum as the Dispatch board.

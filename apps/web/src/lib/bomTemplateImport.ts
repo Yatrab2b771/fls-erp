@@ -88,7 +88,7 @@ function valueAfter(row: Cell[], idx: number, labelRe: RegExp): string {
 function findHeaderRow(grid: Grid): number {
   for (let i = 0; i < Math.min(40, grid.length); i++) {
     const joined = grid[i]!.map((c) => text(c).toLowerCase()).join("|");
-    if (/ingr[a-z]*nt|ingredient|packaging material/.test(joined) && /qty|quantity/.test(joined)) return i;
+    if (/ingr[a-z]*nt|ingredient|packaging material|pm material/.test(joined) && /qty|quantity/.test(joined)) return i;
   }
   return -1;
 }
@@ -183,7 +183,7 @@ export function parseBomWorkbook(buffer: ArrayBuffer): ParsedBomWorkbook {
     if (head.avgWeightMg == null) head.avgWeightMg = readHeader(grid, grid.length).avgWeightMg;
 
     const codeC = colIndex(headers, /item code|material code/);
-    const nameC = colIndex(headers, /ingr[a-z]*nt|ingredient|packaging material/);
+    const nameC = colIndex(headers, /ingr[a-z]*nt|ingredient|packaging material|pm material/);
     const makeC = colIndex(headers, /^make/);
     const uomC = colIndex(headers, /^uom/);
     const ovC = colIndex(headers, /ov\s*%|wastage/);

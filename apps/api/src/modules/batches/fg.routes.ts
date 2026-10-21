@@ -41,6 +41,7 @@ const batchSelect = {
   handedOverToDispatchAt: true,
   updatedAt: true,
   fgShipments: { where: { deletedAt: null }, orderBy: { createdAt: "asc" } },
+  customerReturns: { select: { status: true, passedQty: true } },
   preProduction: {
     select: {
       id: true,
@@ -60,9 +61,12 @@ const ACTIVE_STATUSES = ["REQUESTED", "ACCEPTED", "SENT", "RECEIVED", "DISPATCHE
 /** A customer shipment still on its way to being sent: Dispatch fills it, Accounts adds the invoice, then Dispatch sends it. */
 const PENDING_CUSTOMER = ["WITH_ACCOUNTS", "READY_TO_SEND", "SENT_BACK"] as const;
 // Dispatch's own stock of a batch: shipments out (to the customer / the Warehouse), less what the Warehouse has sent back to it.
+// A customer return QA passed is back in Dispatch's stock of the batch (when Dispatch stored it in the Warehouse, that is a transfer out of it again).
+const RETURNED_TO_DISPATCH = ["AWAITING_DISPATCH", "TO_BE_RESENT", "STORED"];
 const shippedOf = (b: BatchRow) =>
   b.fgShipments.filter((s) => s.type !== "FROM_WAREHOUSE" && ACTIVE_STATUSES.includes(s.status)).reduce((sum, s) => sum + s.quantity, 0) -
-  b.fgShipments.filter((s) => s.type === "FROM_WAREHOUSE" && s.status === "RECEIVED").reduce((sum, s) => sum + s.quantity, 0);
+  b.fgShipments.filter((s) => s.type === "FROM_WAREHOUSE" && s.status === "RECEIVED").reduce((sum, s) => sum + s.quantity, 0) -
+  b.customerReturns.filter((r) => RETURNED_TO_DISPATCH.includes(r.status)).reduce((sum, r) => sum + (r.passedQty ?? 0), 0);
 /** What the Warehouse holds of a batch: received from Dispatch, less what it has sent back or is asked to send back (held for the request). */
 const warehouseHeldOf = (b: BatchRow, includeRequested: boolean) =>
   b.fgShipments.filter((s) => s.type === "WAREHOUSE" && s.status === "RECEIVED").reduce((sum, s) => sum + s.quantity, 0) -

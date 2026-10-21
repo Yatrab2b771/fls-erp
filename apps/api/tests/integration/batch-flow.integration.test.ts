@@ -3,13 +3,12 @@ import request from "supertest";
 import { createApp } from "../../src/app";
 import { authHeader, createUser } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
-import { BATCH_LINE_CLEARANCE_ITEMS } from "../../src/modules/batches/batch-checklists";
 
 const app = createApp();
 
 /**
  * The per-batch flow: Start run divides nothing yet, each batch goes Indent (Production) -> Batch No (R&D) -> Dispensing (Day Store) ->
- * Line Clearance (QA), then Production runs it (start fields, RM Utilization, end, complete), then Packaging (PM Utilization).
+ * then Production runs it (start fields, RM Utilization, end, complete), then Packaging (PM Utilization).
  */
 async function setup() {
   const production = await createUser(["PRODUCTION"]);
@@ -40,8 +39,8 @@ async function setup() {
   return { userId: production.user.id, production: production.token, rnd: rnd.token, qa: qa.token, store: store.token, itemId, plant, dayStore, whey, tub, stock };
 }
 
-describe("The per-batch flow: Indent -> Batch No -> Dispensing -> Line Clearance -> production -> Packaging", () => {
-  it("walks two batches through it, each with its own number and material, and derives input and output from the Utilization", async () => {
+describe("The per-batch flow: Indent -> Batch No -> Dispensing -> production -> Packaging", () => {
+  it("walks two batches through it, each with its own number and material, and fills the Utilization of the whole batch after Bulk QC (editable)", async () => {
     const s = await setup();
     const call = (token: string, method: "get" | "post" | "patch", path: string, body?: object) => {
       const r = request(app)[method](path).set(authHeader(token));
@@ -99,61 +98,83 @@ describe("The per-batch flow: Indent -> Batch No -> Dispensing -> Line Clearance
     const given = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: b1.id }, select: { quantity: true } });
     expect(given.map((g) => g.quantity)).toEqual([40, 40]);
 
-    // QA clears the line
-    expect((await call(s.production, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved" })).status).toBe(403);
-    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Hold" })).status).toBe(400); // a remark is needed
-    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Hold", lineClearanceRemarks: "Line is wet" })).status).toBe(200);
-    expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shift: "Day" })).status).toBe(409); // Hold: still not cleared
-    // Approving needs every item of QA's BMR 4.0 checklist ticked
-    const allTicked = Object.fromEntries(BATCH_LINE_CLEARANCE_ITEMS.map((i) => [i.key, true]));
-    const partial = await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceChecks: { ...allTicked, [BATCH_LINE_CLEARANCE_ITEMS[0]!.key]: false } });
-    expect(partial.status).toBe(400);
-    expect(JSON.stringify(partial.body)).toMatch(/Tick every Line Clearance checklist item/);
-    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceChecks: { not_an_item: true } })).status).toBe(400);
-    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved" })).status).toBe(400); // no checklist at all
-    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved", lineClearanceChecks: allTicked })).body).toMatchObject({ prepStageId: "READY" });
+    // What the Day Store sent is on its way: Production receives it before the batch is READY
+    const sent = await prisma.batchDispensingLine.findMany({ where: { productionBatchId: b1.id, deliveryStatus: "PENDING" } });
+    expect(sent).toHaveLength(2);
+    expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shift: "Day" })).status).toBe(409); // material not received yet: not READY
+    expect((await call(s.store, "post", `/api/production-batches/${b1.id}/receive`, { lines: sent.map((l) => ({ lineId: l.id, action: "RECEIVE" })) })).status).toBe(403); // not the Day Store's step
+    const received = await call(s.production, "post", `/api/production-batches/${b1.id}/receive`, { lines: sent.map((l) => ({ lineId: l.id, action: "RECEIVE" })) });
+    expect(received.status).toBe(200);
+    expect(received.body).toMatchObject({ prepStageId: "READY" }); // no Line Clearance step: READY as soon as the material is received
+
+    expect((await call(s.qa, "post", `/api/production-batches/${b1.id}/line-clearance`, { lineClearanceStatus: "Approved" })).status).toBe(404); // the step no longer exists
     expect((await call(s.rnd, "patch", `/api/production-batches/${b1.id}/batch-no`, { batchNo: "FLS-99-9999" })).status).toBe(409); // locked once dispensed
     const summary = (await call(s.production, "get", "/api/production-batches/prep-summary")).body;
     expect(summary.READY).toBeGreaterThanOrEqual(1);
 
-    // Production: the start fields, then the RM Utilization, then the end; input and output are worked out from the Utilization
+    // Production: the start fields, then the end and the bulk output. The Utilization is NOT needed to complete the batch: it comes after Bulk QC
     expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shift: "Day", manpowerCount: 8, shiftStartAt: "2026-10-14T08:00:00.000Z" })).status).toBe(200);
-    const early = await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shiftEndAt: "2026-10-14T17:00:00.000Z" });
-    expect(early.status).toBe(409);
-    expect(early.body.error).toMatch(/RM Utilization/);
-    const log = (itemId: string, unit: string, body: object) => call(s.production, "post", `/api/plant-consumption/${runId}/entries`, { itemId, unit, productionBatchId: b1.id, ...body });
-    expect((await log(s.whey.id, "Kg", { consumedQty: 37, wastedQty: 1, rejectedQty: 0.5, sampleQty: 0.5, returnedQty: 1 })).status).toBe(201);
-    const listed = (await call(s.production, "get", `/api/pre-productions/${runId}/production-batches`)).body as { id: string; utilization: { complete: boolean; pm: { complete: boolean; missing: string[] }; items: { itemName: string; givenQty: number; requiredQty: number }[] } }[];
-    const u1 = listed.find((b) => b.id === b1.id)!.utilization;
-    expect(u1.complete).toBe(true);
-    expect(u1.pm.complete).toBe(false); // the tubs are used at Packaging
-    expect(u1.items.find((i) => i.itemName === s.whey.name)).toMatchObject({ givenQty: 40, requiredQty: 40 });
     expect((await call(s.production, "post", `/api/production-batches/${b1.id}/complete`)).status).toBe(409); // no end time yet
-    expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shiftEndAt: "2026-10-14T17:00:00.000Z", manufacturingStatus: "Completed", outputQty: 999 })).status).toBe(200);
+    expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { shiftEndAt: "2026-10-14T17:00:00.000Z", manufacturingStatus: "Completed" })).status).toBe(200);
+    const noOutput = await call(s.production, "post", `/api/production-batches/${b1.id}/complete`);
+    expect(noOutput.status).toBe(409);
+    expect(noOutput.body.error).toMatch(/bulk output/);
+    expect((await call(s.production, "patch", `/api/production-batches/${b1.id}`, { outputQty: 40 })).status).toBe(200);
     const done = await call(s.production, "post", `/api/production-batches/${b1.id}/complete`);
     expect(done.status).toBe(200);
-    expect(done.body.productionBatch).toMatchObject({ status: "COMPLETED", inputQty: 39, outputQty: 37 }); // input 37+1+0.5+0.5 (the 1 left over is not used); the typed 999 was ignored
+    expect(done.body.productionBatch).toMatchObject({ status: "COMPLETED", outputQty: 40 });
+    const runNow = () => prisma.preProduction.findUniqueOrThrow({ where: { id: runId }, select: { combinedQty: true } });
+    expect((await runNow()).combinedQty).toBe(40);
 
-    // The leftover (E) stays in the Plant's stock; Production sends it back to the Day Store from Plant Stock
-    type StockRow = { itemId: string; onHand: number; reserved: number; free: number; pendingReturn: number };
-    const stockOf = async () => ((await call(s.production, "get", `/api/plant-stock?plantId=${s.plant.id}`)).body.rows as StockRow[]).find((r) => r.itemId === s.whey.id);
-    expect(await stockOf()).toMatchObject({ onHand: 1, reserved: 0, free: 1, pendingReturn: 1 });
-    const sendBack = (quantity: number) => call(s.production, "post", "/api/plant-stock/return", { plantId: s.plant.id, itemId: s.whey.id, quantity });
-    expect((await sendBack(2)).status).toBe(409); // only 1 is free
-    expect((await call(s.store, "post", "/api/plant-stock/return", { plantId: s.plant.id, itemId: s.whey.id, quantity: 1 })).status).toBe(403); // Production's call
-    expect((await sendBack(1)).status).toBe(201);
-    expect(await stockOf()).toBeUndefined(); // nothing of it is left at the Plant
-    const moved = await prisma.stockTransfer.findFirstOrThrow({ where: { itemId: s.whey.id, sourcePlantId: s.plant.id } });
-    expect(moved).toMatchObject({ quantity: 1, destinationType: "DAY_STORE", destDayStoreId: s.dayStore.id });
-
-    // Packaging: its own production sheet and the PM Utilization (the tubs)
+    // Packaging: first the RM Utilization of the whole batch (after Bulk QC), then the packaging sheet, then the PM Utilization
     await prisma.productionBatch.update({ where: { id: b1.id }, data: { currentStageId: "PACKAGING" } });
     const pack = (body: object) => call(s.production, "patch", `/api/production-batches/${b1.id}/packaging`, body);
+    const noRm = await pack({ packagingShift: "Day", packagingManpowerCount: 6, packagingStartAt: "2026-10-15T14:00:00.000Z", packagingStatus: "Labelling" });
+    expect(noRm.status).toBe(409);
+    expect(noRm.body.error).toMatch(/RM Utilization/);
+    const put = (token: string, category: string, body: object) => request(app).put(`/api/production-batches/${b1.id}/utilization/${category}`).set(authHeader(token)).send(body);
+    const rmBody = (produced: number, waste: number, reject: number, sample: number) => ({
+      producedQty: produced,
+      wasteQty: waste,
+      rejectQty: reject,
+      sampleQty: sample,
+      lines: [{ itemId: s.whey.id, consumedQty: produced, wastedQty: waste, rejectedQty: reject, sampleQty: sample }],
+    });
+    expect((await put(s.qa, "RM", rmBody(37, 1, 0.5, 0.5))).status).toBe(403); // Production's step
+    expect((await put(s.production, "PM", rmBody(37, 1, 0.5, 0.5))).status).toBe(409); // the RM sheet comes first
+    expect((await put(s.production, "RM", { producedQty: 37, lines: [] })).status).toBe(400); // every plan material needs its A
+    expect((await put(s.production, "RM", { ...rmBody(37, 1, 0.5, 0.5), lines: [{ itemId: s.tub.id, consumedQty: 5 }] })).status).toBe(400); // a PM material is not an RM material
+    const tooMuch = await put(s.production, "RM", rmBody(50, 1, 0.5, 0.5)); // the Plant holds only the 40 it was given
+    expect(tooMuch.status).toBe(409);
+    expect(tooMuch.body.error).toMatch(/on hand/);
+    const saved = await put(s.production, "RM", rmBody(37, 1, 0.5, 0.5));
+    expect(saved.status).toBe(200);
+    expect(saved.body).toMatchObject({ outputQty: 37, inputQty: 39 });
+    expect(saved.body.utilization).toMatchObject({ complete: true, sheets: { RM: { producedQty: 37, wasteQty: 1, rejectQty: 0.5, sampleQty: 0.5 }, PM: null } });
+    expect(saved.body.utilization.entries.find((e: { itemId: string }) => e.itemId === s.whey.id)).toMatchObject({ consumedQty: 37, wastedQty: 1, rejectedQty: 0.5, sampleQty: 0.5 });
+    expect((await runNow()).combinedQty).toBe(37); // made so far follows the real output
+    expect((await call(s.production, "get", `/api/pre-productions/${runId}/production-batches`)).body.find((b: { id: string }) => b.id === b1.id).utilization.items.find((i: { itemName: string }) => i.itemName === s.whey.name)).toMatchObject({ givenQty: 40, requiredQty: 40 });
+
+    // Edit it: saving again replaces the earlier rows (the Plant's stock and the Recycle Store follow), nothing is counted twice
+    const edited = await put(s.production, "RM", rmBody(38, 1, 0.5, 0.5));
+    expect(edited.status).toBe(200);
+    expect(edited.body).toMatchObject({ outputQty: 38, inputQty: 40 });
+    expect((await runNow()).combinedQty).toBe(38);
+    const wheyRows = await prisma.batchMaterialConsumption.findMany({ where: { productionBatchId: b1.id, itemId: s.whey.id }, select: { purpose: true, quantity: true } });
+    expect(wheyRows.reduce((t, r) => t + r.quantity, 0)).toBe(40);
+    expect(wheyRows).toHaveLength(4);
+    const sink = await prisma.inventoryTransaction.findMany({ where: { productionBatchId: b1.id, type: "ISSUED_RECYCLE", deletedAt: null }, select: { recycleKind: true, quantity: true } });
+    expect(sink.map((r) => `${r.recycleKind}:${r.quantity}`).sort()).toEqual(["REJECTED:0.5", "WASTAGE:1"]);
+
+    // Packaging's own sheet is open now; its end (and Handover) wait for the PM Utilization
     expect((await pack({ packagingShift: "Day", packagingManpowerCount: 6, packagingStartAt: "2026-10-15T14:00:00.000Z", packagingStatus: "Labelling" })).status).toBe(200);
     const blocked = await pack({ packagingStatus: "Completed", packagingEndAt: "2026-10-15T19:00:00.000Z" });
     expect(blocked.status).toBe(409);
     expect(blocked.body.error).toMatch(/PM Utilization/);
-    expect((await log(s.tub.id, "Count", { consumedQty: 38, wastedQty: 1 })).status).toBe(201);
+    const pmSaved = await put(s.production, "PM", { producedQty: 38, wasteQty: 1, lines: [{ itemId: s.tub.id, consumedQty: 38, wastedQty: 1 }] });
+    expect(pmSaved.status).toBe(200);
+    expect(pmSaved.body.utilization).toMatchObject({ pm: { complete: true }, sheets: { PM: { producedQty: 38, wasteQty: 1 } } });
+    expect(pmSaved.body.outputQty).toBe(38); // the PM sheet does not touch the batch's output
     const finished = await pack({ packagingStatus: "Completed", packagingEndAt: "2026-10-15T19:00:00.000Z", packagingRemarks: "Packed" });
     expect(finished.status).toBe(200);
     expect(finished.body).toMatchObject({ packagingStatus: "Completed", packagingShift: "Day", packagingManpowerCount: 6 });
@@ -165,13 +186,13 @@ describe("The per-batch flow: Indent -> Batch No -> Dispensing -> Line Clearance
     type ReportMaterial = { itemName: string; category: string; inPlan: boolean; requiredQty: number; givenQty: number; consumedQty: number; wastedQty: number; returnedQty: number };
     const report = (await call(s.production, "get", "/api/production-batches/report-board")).body as { batchId: string; batchNo: string; packagingShift: string; packagingManpowerCount: number; indentSignedAt: string | null; dispensedAt: string | null; lineClearanceStatus: string; materials: ReportMaterial[] }[];
     const r1 = report.find((b) => b.batchId === b1.id)!;
-    expect(r1).toMatchObject({ batchNo: n1, packagingShift: "Day", packagingManpowerCount: 6, lineClearanceStatus: "Approved" });
+    expect(r1).toMatchObject({ batchNo: n1, packagingShift: "Day", packagingManpowerCount: 6 });
     expect(r1.indentSignedAt).not.toBeNull();
     expect(r1.dispensedAt).not.toBeNull();
-    expect(r1.materials.find((m) => m.itemName === s.whey.name)).toMatchObject({ category: "RM", inPlan: true, requiredQty: 40, givenQty: 40, consumedQty: 37, wastedQty: 1, returnedQty: 1 });
+    expect(r1.materials.find((m) => m.itemName === s.whey.name)).toMatchObject({ category: "RM", inPlan: true, requiredQty: 40, givenQty: 40, consumedQty: 38, wastedQty: 1, returnedQty: 0 });
     expect(r1.materials.find((m) => m.itemName === s.tub.name)).toMatchObject({ category: "PM", inPlan: true, requiredQty: 40, givenQty: 40, consumedQty: 38, wastedQty: 1 });
     expect((await call(s.store, "get", "/api/production-batches/report-board")).status).toBe(403); // Production and PPIC only
-    expect(r1).toMatchObject({ lineClearanceChecks: allTicked, dispatchedQty: 0, dispatchDate: null });
+    expect(r1).toMatchObject({ dispatchedQty: 0, dispatchDate: null });
 
     // Dispatch: what customer shipments have sent counts for the batch, wherever the batch is now; extra material shows per product
     await prisma.fgShipment.create({ data: { productionBatchId: b1.id, type: "CUSTOMER", status: "DISPATCHED", quantity: 12, dispatchDate: new Date("2026-10-20T10:00:00.000Z"), invoiceDate: new Date("2026-10-19T10:00:00.000Z"), requestedById: s.userId } });

@@ -6,6 +6,7 @@ import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { productionBatchInclude, preProductionInclude, serializeProductionBatch, serializePreProduction, type ProductionBatchWithRelations } from "./batch-include";
 import { buildBmrReportPdf } from "./bmr-report-pdf";
+import { bomVersionsOfBatches } from "./bom-version";
 import { BATCH_LINE_CLEARANCE_ITEMS } from "./batch-checklists";
 import {
   assignBatchNoSchema,
@@ -59,18 +60,9 @@ productionBatchesRouter.get("/production-batches", async (req: AuthedRequest, re
   }
 });
 
-const PREP_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", LINE_CLEARANCE: "Line Clearance", READY: "ready" };
+const PREP_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", LINE_CLEARANCE: "Line Clearance", READY: "ready" };
 
-/** From the batch's raw-material Utilization: input = A + B + C + D (what the batch took and accounted for; the E leftover stays in the Plant's stock), output = A (what went into the product). */
-async function rawMaterialInputOutput(batchId: string): Promise<{ inputQty: number; outputQty: number }> {
-  const rows = await prisma.batchMaterialConsumption.findMany({ where: { productionBatchId: batchId, item: { category: "RM" } }, select: { quantity: true, purpose: true } });
-  const a = rows.filter((r) => r.purpose === "PRODUCTION").reduce((sum, r) => sum + r.quantity, 0);
-  const used = rows.reduce((sum, r) => sum + r.quantity, 0);
-  const q3 = (n: number) => Math.round(n * 1000) / 1000;
-  return { inputQty: q3(used), outputQty: q3(a) };
-}
-
-// A batch as the screens read it, plus where its Utilization stands: the RM sheet (`utilization`, which gates the end of manufacturing),
+// A batch as the screens read it, plus where its Utilization stands: the RM sheet (`utilization`, filled after Bulk QC: it opens Packaging),
 // the PM sheet (`utilization.pm`, which gates the end of Packaging) and the plan's materials with what was dispensed for the batch.
 const NO_PART = { required: 0, logged: 0, missing: [] as string[], complete: true };
 export async function withUtilization(batches: ProductionBatchWithRelations[]) {
@@ -82,7 +74,7 @@ export async function withUtilization(batches: ProductionBatchWithRelations[]) {
     if (!poItemId) continue;
     for (const [id, u] of await utilizationOfBatches(poItemId, list.map((b) => ({ id: b.id, plannedQty: b.plannedQty })))) out.set(id, u);
   }
-  return batches.map((b) => ({ ...serializeProductionBatch(b), utilization: out.get(b.id) ?? { ...NO_PART, pm: NO_PART, items: [] } }));
+  return batches.map((b) => ({ ...serializeProductionBatch(b), utilization: out.get(b.id) ?? { ...NO_PART, pm: NO_PART, items: [], sheets: { RM: null, PM: null }, entries: [], pmPacks: null } }));
 }
 
 async function requirePreProduction(preProductionId: string) {
@@ -120,7 +112,7 @@ productionBatchesRouter.post("/pre-productions/:preProductionId/production-batch
   try {
     const parsed = createProductionBatchSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
-    const { batchNo, plannedQty, shift, manpowerCount, shiftStartAt } = parsed.data as CreateProductionBatchInput;
+    const { batchNo, plannedQty, shift, manpowerCount, shiftStartAt, reason } = parsed.data as CreateProductionBatchInput;
 
     const preProduction = await requirePreProduction(req.params.preProductionId);
     if (!preProduction) return res.status(404).json({ error: "Pre-production run not found" });
@@ -155,6 +147,14 @@ productionBatchesRouter.post("/pre-productions/:preProductionId/production-batch
       return res.status(400).json({ error: `PPIC has released ${released} of ${preProduction.plannedQty} to Production — only ${Math.max(0, Math.round(releaseLeft * 1000) / 1000)} can be planned until PPIC releases more.` });
     }
 
+    // A shortfall batch: the earlier batches made less than they were planned for (loss, rejects, samples), so this one makes up the
+    // difference. It goes beyond what the batches were planned to cover, so Production says why (no one else has to approve it).
+    const planned = await prisma.productionBatch.aggregate({ where: { preProductionId: preProduction.id }, _sum: { plannedQty: true } });
+    const isShortfallBatch = (planned._sum.plannedQty ?? 0) + plannedQty > released + 1e-6;
+    if (isShortfallBatch && (reason ?? "").length < 3) {
+      return res.status(400).json({ error: "The earlier batches made less than planned. Write why this extra batch is needed." });
+    }
+
     const batch = await prisma.productionBatch.create({
       // The batch has ONE start date-time: it is also its manufacturing start date. In the per-batch flow it starts at Indent Issue (it
       // needs its indent, batch number, Dispensing and Line Clearance before production); otherwise it is ready from the start.
@@ -162,7 +162,7 @@ productionBatchesRouter.post("/pre-productions/:preProductionId/production-batch
       include: productionBatchInclude,
     });
 
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.created", entityType: "ProductionBatch", entityId: batch.id });
+    await recordAudit({ actorId: req.user!.id, action: isShortfallBatch ? "production_batch.created_for_shortfall" : "production_batch.created", entityType: "ProductionBatch", entityId: batch.id, ...(isShortfallBatch ? { metadata: { plannedQty, reason } } : {}) });
 
     res.status(201).json((await withUtilization([batch]))[0]);
   } catch (err) {
@@ -307,11 +307,13 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
         dispatchedQty: true,
         // What went to customers: the batch's own Dispatch Plan (old flow) and the customer shipments Dispatch has sent (new flow).
         fgShipments: { where: { type: "CUSTOMER", status: "DISPATCHED", deletedAt: null }, select: { quantity: true, dispatchDate: true, invoiceDate: true } },
+        bomSlot: true,
         preProductionId: true,
         preProduction: { select: { purchaseOrderItem: { select: { id: true } } } },
       },
     });
     if (batches.length === 0) return res.json([]);
+    const versions = await bomVersionsOfBatches(batches.map((b) => ({ id: b.id, bomSlot: b.bomSlot, purchaseOrderItemId: b.preProduction.purchaseOrderItem.id })), req.user!.roles);
 
     const ids = batches.map((b) => b.id);
     const [consumed, returned, leftovers] = await Promise.all([
@@ -327,7 +329,7 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
     for (const [poItemId, list] of byItem) for (const [id, u] of await utilizationOfBatches(poItemId, list)) util.set(id, u);
 
     // Usage on materials outside the plan: name them, and add what was dispensed for them.
-    const given = await prisma.batchDispensingLine.groupBy({ by: ["productionBatchId", "itemId"], where: { productionBatchId: { in: ids } }, _sum: { quantity: true } });
+    const given = await prisma.batchDispensingLine.groupBy({ by: ["productionBatchId", "itemId"], where: { productionBatchId: { in: ids }, deliveryStatus: { not: "REFUSED" } }, _sum: { quantity: true } });
     const touched = new Set<string>([...consumed.map((c) => c.itemId), ...returned.map((r) => r.itemId), ...leftovers.map((l) => l.itemId), ...given.map((g) => g.itemId)]);
     const itemInfo = new Map((await prisma.inventoryItem.findMany({ where: { id: { in: [...touched] } }, select: { id: true, name: true, category: true, unit: true } })).map((i) => [i.id, i]));
     const q3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -379,12 +381,13 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
           const extra = extraBy.get(`${b.preProduction.purchaseOrderItem.id}::${r.itemId}`);
           return { ...r, requiredQty: q3(r.requiredQty), givenQty: q3(r.givenQty), consumedQty: q3(r.consumedQty), wastedQty: q3(r.wastedQty), rejectedQty: q3(r.rejectedQty), sampleQty: q3(r.sampleQty), returnedQty: q3(r.returnedQty), extraRequestedQty: q3(extra?.requested ?? 0), extraIssuedQty: q3(extra?.issued ?? 0) };
         });
-        const { preProduction: _run, fgShipments, ...rest } = b;
+        const { preProduction: _run, fgShipments, bomSlot: _slot, ...rest } = b;
+        const version = versions.get(b.id);
         const legacy = b.currentStageId === "DISPATCH_PLAN";
         const sentQty = q3((legacy ? (b.dispatchedQty ?? 0) : 0) + fgShipments.reduce((sum, s) => sum + s.quantity, 0));
         const sentDates = [...(legacy && b.dispatchDate ? [b.dispatchDate] : []), ...fgShipments.flatMap((s) => (s.dispatchDate ? [s.dispatchDate] : []))].sort((x, y) => y.getTime() - x.getTime());
         const invoiceDates = [...(legacy && b.invoiceDate ? [b.invoiceDate] : []), ...fgShipments.flatMap((s) => (s.invoiceDate ? [s.invoiceDate] : []))].sort((x, y) => y.getTime() - x.getTime());
-        return { ...rest, batchId: b.id, dispatchedQty: sentQty, dispatchDate: sentDates[0] ?? null, invoiceDate: invoiceDates[0] ?? null, materials };
+        return { ...rest, batchId: b.id, bomVersion: version?.label ?? "Display BOM", bomVersionNote: version?.note ?? null, dispatchedQty: sentQty, dispatchDate: sentDates[0] ?? null, invoiceDate: invoiceDates[0] ?? null, materials };
       }),
     );
   } catch (err) {
@@ -449,15 +452,15 @@ productionBatchesRouter.patch("/production-batches/:id", requireRole("PRODUCTION
     const poItemId = existing.preProduction?.purchaseOrderItem.id;
     const batchFlow = !!existing.preProduction?.batchFlow;
     if (batchFlow) {
-      // Production starts only once the batch is cleared (indent, batch number, Dispensing, Line Clearance). Input and output come from
-      // the Utilization, not from boxes.
+      // Production starts only once the batch is READY (indent, batch number, Dispensing, material received). The output typed here is the
+      // bulk made (QA's gates work on it); the RM Utilization, filled after Bulk QC, gives the batch its final input and output.
       if (existing.prepStageId !== "READY") return res.status(409).json({ error: `This batch is not cleared for production yet: it is at ${PREP_LABEL[existing.prepStageId]}.` });
       delete data.inputQty;
-      delete data.outputQty;
     }
     // What Production fills when the batch FINISHES (output, end time, status, remarks) opens only once the Utilization is complete.
     const finishing = data.outputQty !== undefined || data.shiftEndAt !== undefined || data.manufacturingEndDate !== undefined || data.manufacturingStatus !== undefined || data.manufacturingRemarks !== undefined;
-    if (finishing && poItemId) {
+    // A per-batch-flow batch is completed without the Utilization: that is filled after Bulk QC, at Packaging.
+    if (finishing && poItemId && !batchFlow) {
       const u = (await utilizationOfBatches(poItemId, [{ id: existing.id, plannedQty: existing.plannedQty }])).get(existing.id)!;
       if (!u.complete) return res.status(409).json({ error: utilizationGapMessage(u, "record the end time, status and remarks") });
     }
@@ -504,26 +507,24 @@ productionBatchesRouter.post("/production-batches/:id/complete", requireRole("PR
     await assertPlantAccess(req.user!.id, req.user!.roles, existing.preProduction?.plantId);
     if (existing.status === "COMPLETED") return res.status(409).json({ error: "Already completed." });
     const batchFlow = !!existing.preProduction?.batchFlow;
-    if (existing.preProduction?.purchaseOrderItem.id) {
+    if (!batchFlow && existing.preProduction?.purchaseOrderItem.id) {
       const u = (await utilizationOfBatches(existing.preProduction.purchaseOrderItem.id, [{ id: existing.id, plannedQty: existing.plannedQty }])).get(existing.id)!;
       if (!u.complete) return res.status(409).json({ error: utilizationGapMessage(u, "complete the batch") });
     }
-    // Per-batch flow: the batch must be cleared and have its production sheet filled, and its input / output are worked out from its
-    // raw-material Utilization (input = what it took: A + B + C + D - E; output = what went into the product: A), not typed.
-    let derived: { inputQty: number; outputQty: number } | null = null;
+    // Per-batch flow: the batch must be cleared and have its production sheet filled, with the bulk output typed. The RM Utilization comes
+    // later (after Bulk QC, at Packaging) and then gives the batch its final input and output.
     if (batchFlow) {
       if (existing.prepStageId !== "READY") return res.status(409).json({ error: `This batch is not cleared for production yet: it is at ${PREP_LABEL[existing.prepStageId]}.` });
       if (!existing.shift || !existing.manpowerCount || !existing.shiftStartAt) return res.status(409).json({ error: "Fill the start fields first: shift, manpower and the start date and time." });
       if (!existing.shiftEndAt) return res.status(409).json({ error: "Record the end date and time before completing the batch." });
-      derived = await rawMaterialInputOutput(existing.id);
-      if (derived.outputQty <= 0) return res.status(409).json({ error: "Log the raw material's Production quantity (A) before completing the batch." });
+      if (!(existing.outputQty != null && existing.outputQty > 0)) return res.status(409).json({ error: "Record the bulk output (how much was made) before completing the batch." });
     } else if (existing.outputQty == null) {
       return res.status(400).json({ error: "Record this run's output quantity before completing it." });
     }
 
-    const outputQty = derived ? derived.outputQty : existing.outputQty!;
+    const outputQty = existing.outputQty!;
     const batch = await prisma.$transaction(async (tx) => {
-      await tx.productionBatch.update({ where: { id: existing.id }, data: { status: "COMPLETED", completedById: req.user!.id, completedAt: new Date(), ...(derived ? { inputQty: derived.inputQty, outputQty: derived.outputQty } : {}) } });
+      await tx.productionBatch.update({ where: { id: existing.id }, data: { status: "COMPLETED", completedById: req.user!.id, completedAt: new Date() } });
       await tx.preProduction.update({ where: { id: existing.preProductionId }, data: { combinedQty: { increment: outputQty } } });
       return tx.productionBatch.findUniqueOrThrow({ where: { id: existing.id }, include: productionBatchInclude });
     });
@@ -551,7 +552,7 @@ productionBatchesRouter.patch("/production-batches/:id/batch-no", requireRole("Q
     if (existing.preProduction?.batchFlow) {
       // The batch number is R&D's; it can be corrected until Dispensing has started, then it is locked (Admin can still change it).
       if (!req.user!.roles.includes("ADMIN") && !req.user!.roles.includes("RND")) return res.status(403).json({ error: "The batch number is allocated by R&D." });
-      if (!req.user!.roles.includes("ADMIN") && ["LINE_CLEARANCE", "READY"].includes(existing.prepStageId)) return res.status(409).json({ error: "The batch number is locked: Dispensing has been done." });
+      if (!req.user!.roles.includes("ADMIN") && ["RECEIVE", "LINE_CLEARANCE", "READY"].includes(existing.prepStageId)) return res.status(409).json({ error: "The batch number is locked: Dispensing has been done." });
     }
     const taken = await prisma.productionBatch.findFirst({ where: { batchNo, id: { not: existing.id } }, select: { id: true } });
     if (taken) return res.status(409).json({ error: `Batch number ${batchNo} is already used by another batch.` });
@@ -627,7 +628,8 @@ productionBatchesRouter.get("/production-batches/:id/bmr-report.pdf", async (req
     const lineClearanceRows = preProduction.batchFlow
       ? BATCH_LINE_CLEARANCE_ITEMS.map((i) => ({ itemKey: i.key, label: i.label, deptOk: null, qaOk: batch.lineClearanceChecks ? ((batch.lineClearanceChecks as Record<string, boolean>)[i.key] ?? null) : null }))
       : serializedPreProduction.bulkMfgLineClearanceChecklist;
-    const doc = buildBmrReportPdf(batch, lineClearanceRows, preProduction.sampleQcStatus, preProduction.sampleQcRemarks, dispensingSheet);
+    const bomVersion = (await bomVersionsOfBatches([{ id: batch.id, bomSlot: batch.bomSlot, purchaseOrderItemId: batch.preProduction.purchaseOrderItem.id }], req.user!.roles)).get(batch.id) ?? null;
+    const doc = buildBmrReportPdf(batch, lineClearanceRows, preProduction.sampleQcStatus, preProduction.sampleQcRemarks, dispensingSheet, bomVersion);
 
     await recordAudit({ actorId: req.user!.id, action: "production_batch.bmr_report_exported", entityType: "ProductionBatch", entityId: batch.id });
 

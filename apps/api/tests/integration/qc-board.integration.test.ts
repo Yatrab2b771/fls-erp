@@ -7,7 +7,7 @@ import { prisma } from "../../src/common/lib/prisma";
 const app = createApp();
 
 describe("QA/QC dashboard: one list per QA stage, with the full row and the actions", () => {
-  it("lists a run at Line Clearance and batches at IPQC, both QA gates and FG release; Hold collects in ON_HOLD; the actions move them", async () => {
+  it("lists batches at IPQC, both QA gates and FG release; Hold collects in ON_HOLD; the actions move them", async () => {
     const { token: bd } = await createUser(["BD"]);
     const { token: qa } = await createUser(["QA_QC"]);
     const { token: ppic } = await createUser(["PPIC"]);
@@ -32,7 +32,6 @@ describe("QA/QC dashboard: one list per QA stage, with the full row and the acti
       });
     };
 
-    const run = await mkRun("QC Run");
     const ipqc = await mkBatch("QC Ipqc", "IPQC");
     const mfg = await mkBatch("QC Mfg", "QA_GATE_MFG");
     const pack = await mkBatch("QC Pack", "QA_GATE_PACKAGING", { mfgApprovedQty: 98 });
@@ -43,11 +42,7 @@ describe("QA/QC dashboard: one list per QA stage, with the full row and the acti
     expect((await board(qa, "NOPE")).status).toBe(400);
 
     // Every stage lists its own row, with the full detail on it
-    const lc = (await board(qa, "LINE_CLEARANCE")).body.filter((r: { id: string }) => r.id === run.id);
-    expect(lc).toHaveLength(1);
-    expect(lc[0]).toMatchObject({ kind: "RUN", stage: "LINE_CLEARANCE", productName: "QC Run", unit: "KG", plantName: plant.name, plannedQty: 100, isHold: false });
-    expect(lc[0].poNumber).toBe(po.body.poNumber);
-    expect(lc[0].customerName).toBe(customer.body.companyName);
+    expect((await board(qa, "LINE_CLEARANCE")).status).toBe(400); // the stage no longer exists
     const ip = (await board(qa, "IPQC")).body.find((r: { id: string }) => r.id === ipqc.id);
     expect(ip).toMatchObject({ kind: "BATCH", batchNo: "B-QC Ipqc", outputQty: 98, shift: "Day", manpowerCount: 6, plantName: plant.name });
     expect((await board(qa, "QA_GATE_MFG")).body.some((r: { id: string }) => r.id === mfg.id)).toBe(true);
@@ -68,11 +63,5 @@ describe("QA/QC dashboard: one list per QA stage, with the full row and the acti
     expect(approved.body.currentStageId).toBe("QA_GATE_MFG");
     expect((await board(qa, "IPQC")).body.some((r: { id: string }) => r.id === ipqc.id)).toBe(false);
     expect((await board(qa, "QA_GATE_MFG")).body.some((r: { id: string }) => r.id === ipqc.id)).toBe(true);
-
-    // Line Clearance: Approve forwards the run; Hold keeps it; Reject needs a reason
-    expect((await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(qa)).send({ action: "REJECT" })).status).toBe(400);
-    const lcHold = await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(qa)).send({ action: "FORWARD", sampleQcStatus: "Hold", sampleQcRemarks: "Line not clean" });
-    expect(lcHold.status).toBe(200);
-    expect((await board(qa, "ON_HOLD")).body.find((r: { id: string }) => r.id === run.id)).toMatchObject({ kind: "RUN", isHold: true });
   });
 });

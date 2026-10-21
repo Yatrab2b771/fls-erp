@@ -120,40 +120,11 @@ describe("GET /api/qc/dashboard", () => {
     expect(dashboard.body.batches.onHoldMfg.map((b: { id: string }) => b.id)).toEqual([lotHeld.id]);
   });
 
-  // Closes the gap the client hit: the pipeline itself already blocks
-  // manufacturing until QC actually Approves the sample, but nothing on
-  // this dashboard ever mentioned it — a run could sit there needing
-  // QC's attention with no visible queue for it.
-  it("lists every run sitting at Sample QC Approval — even one with no status set yet, not just an explicit Hold", async () => {
-    const { token: bdToken } = await createUser(["BD"]);
-    const itemId = await createApprovedPoItem(bdToken);
-    const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: adminToken } = await createUser(["ADMIN"]);
-    const { token: qaToken } = await createUser(["QA_QC"]);
-
-    const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
-    await request(app).patch(`/api/pre-productions/${run.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
-
-    const freshlyArrived = await request(app).get("/api/qc/dashboard").set(authHeader(qaToken));
-    expect(freshlyArrived.body.counts.pendingSampleQcBatches).toBe(1);
-    expect(freshlyArrived.body.batches.pendingSampleQc.map((b: { id: string }) => b.id)).toEqual([run.body.id]);
-
-    // Once QC actually Approves it, it drops out of the queue — same
-    // "scoped to current stage" rule as the QA gates. (The run itself
-    // stays at SAMPLE_QC_APPROVAL — it's this tier's own terminal stage —
-    // but Approved is no longer "pending".)
-    await request(app).patch(`/api/pre-productions/${run.body.id}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
-    const afterApproval = await request(app).get("/api/qc/dashboard").set(authHeader(qaToken));
-    expect(afterApproval.body.counts.pendingSampleQcBatches).toBe(0);
-    expect(afterApproval.body.batches.pendingSampleQc).toEqual([]);
-  });
-
   // Same rule, extended to Line Clearance (PreProduction) and IPQC/Bulk QC
   // (CombinedLot) — the three extra QC checkpoints added against the
   // client's Production Process Flow doc.
-  it("lists every run/lot sitting at Line Clearance, IPQC, or Bulk QC too", async () => {
+  it("lists every lot sitting at IPQC or Bulk QC too", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const itemLc = await createApprovedPoItem(bdToken);
     const itemIpqc = await createApprovedPoItem(bdToken);
     const itemBulk = await createApprovedPoItem(bdToken);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
@@ -161,18 +132,13 @@ describe("GET /api/qc/dashboard", () => {
     const { token: qaToken } = await createUser(["QA_QC"]);
     const tokens = { production: productionToken, admin: adminToken };
 
-    const runLc = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemLc });
-    await request(app).patch(`/api/pre-productions/${runLc.body.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "LINE_CLEARANCE" });
-
     const lotIpqc = await createFreshCombinedLot(itemIpqc, tokens); // already sits at IPQC — no JUMP needed
     const lotBulk = await createFreshCombinedLot(itemBulk, tokens);
     await request(app).patch(`/api/combined-lots/${lotBulk.id}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "BULK_QC" });
 
     const dashboard = await request(app).get("/api/qc/dashboard").set(authHeader(qaToken));
-    expect(dashboard.body.counts.pendingLineClearanceBatches).toBe(1);
     expect(dashboard.body.counts.pendingIpqcBatches).toBe(1);
     expect(dashboard.body.counts.pendingBulkQcBatches).toBe(1);
-    expect(dashboard.body.batches.pendingLineClearance.map((b: { id: string }) => b.id)).toEqual([runLc.body.id]);
     expect(dashboard.body.batches.pendingIpqc.map((b: { id: string }) => b.id)).toEqual([lotIpqc.id]);
     expect(dashboard.body.batches.pendingBulkQc.map((b: { id: string }) => b.id)).toEqual([lotBulk.id]);
   });

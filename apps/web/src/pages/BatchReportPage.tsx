@@ -185,6 +185,7 @@ export function BatchReportPage() {
         Status: b.status === "COMPLETED" ? "Completed" : "In progress",
         Unit: unit,
         "Planned Qty": b.plannedQty,
+        "BOM Version Used": b.bomVersion + (b.bomVersionNote ? ` (${b.bomVersionNote})` : ""),
         Shift: b.shift ?? "",
         Manpower: b.manpowerCount ?? "",
         "Start Time": dt(b.shiftStartAt),
@@ -258,6 +259,8 @@ export function BatchReportPage() {
           <Line k="Packed (QA approved)" v={b.packApprovedQty != null ? `${fmtQty(b.packApprovedQty)} ${unit}` : "—"} />
           <Line k="Packaging wastage" v={b.packWastageQty != null ? `${fmtQty(b.packWastageQty)} ${unit}` : "—"} />
           <Line k="Dispatched" v={b.dispatchedQty ? `${fmtQty(b.dispatchedQty)} ${unit}` : "—"} />
+          <Line k="BOM version used" v={b.bomVersion} />
+          {b.bomVersionNote && <p className="pt-1 text-micro text-slate-400">{b.bomVersionNote}</p>}
         </Card>
       </div>
 
