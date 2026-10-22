@@ -20,8 +20,8 @@ import { openQtyOf } from "./purchase-lines";
  *   GET  /production-requests/options                   dropdown values
  *   POST /production-requests/:id/request-from-warehouse
  *
- * Approving, rejecting and issuing use the normal request endpoints (/api/inventory/requests/:id/...), which allow
- * a Day Store login for the production requests of its own Plant.
+ * What a plan needs is approved from the start and goes on to the Plant at Dispensing (which closes these requests as it gives the material); the
+ * normal request endpoints (/api/inventory/requests/:id/...) still allow a Day Store login to review / issue the production requests of its own Plant.
  */
 export const myStoreProductionRouter = Router();
 myStoreProductionRouter.use(requireAuth, requireRole("STORE", "PPIC"));
@@ -36,9 +36,9 @@ const isOpen = (status: string) => (OPEN_STATUSES as readonly string[]).includes
 
 type TrailStage = "WITH_DAY_STORE" | "REQUESTED_FROM_WAREHOUSE" | "ISSUED_TO_DAY_STORE" | "ISSUED_TO_PLANT" | "CLOSED";
 const TRAIL_LABEL: Record<TrailStage, string> = {
-  WITH_DAY_STORE: "With Day Store",
+  WITH_DAY_STORE: "With Store",
   REQUESTED_FROM_WAREHOUSE: "Requested from Warehouse",
-  ISSUED_TO_DAY_STORE: "Issued to Day Store",
+  ISSUED_TO_DAY_STORE: "Issued to Store",
   ISSUED_TO_PLANT: "Issued to Plant",
   CLOSED: "Closed",
 };
@@ -60,12 +60,14 @@ export async function loadProductionRequests(scope: string[] | null, opts: { pla
       status: true,
       isExtra: true,
       extraForPoItemId: true,
+      newMaterial: true,
+      productionBatchId: true,
       purchaseOrderItemId: true,
       preProduction: { select: { purchaseOrderItemId: true } },
       item: { select: { name: true, unit: true } },
       plant: { select: { name: true, dayStoreId: true } },
       requestedBy: { select: { fullName: true } },
-      fulfillments: { where: { deletedAt: null }, select: { quantity: true } },
+      fulfillments: { where: { deletedAt: null }, select: { id: true, quantity: true, isTransitTracked: true, deliveredAt: true, grnNo: true } },
     },
     orderBy: { createdAt: "desc" },
   });
@@ -83,6 +85,9 @@ export async function loadProductionRequests(scope: string[] | null, opts: { pla
   // Extra material: the product it was raised for (a note only), and where its purchase need stands (Warehouse short -> PPIC -> Purchase -> PI).
   const refIds = [...new Set(requests.map((r) => r.extraForPoItemId).filter((id): id is string => !!id))];
   const refProducts = new Map((refIds.length ? await prisma.purchaseOrderItem.findMany({ where: { id: { in: refIds } }, select: { id: true, productName: true, purchaseOrder: { select: { poNumber: true } } } }) : []).map((p) => [p.id, p]));
+  // The batch an extra request is for (so its material can be traced to it).
+  const batchIds = [...new Set(requests.map((r) => r.productionBatchId).filter((id): id is string => !!id))];
+  const batchNos = new Map((batchIds.length ? await prisma.productionBatch.findMany({ where: { id: { in: batchIds } }, select: { id: true, batchNo: true } }) : []).map((b) => [b.id, b.batchNo]));
   const askIdsOf = new Map<string, string[]>();
   for (const l of linked) askIdsOf.set(l.forRequestId!, [...(askIdsOf.get(l.forRequestId!) ?? []), l.id]);
   const allAskIds = linked.map((l) => l.id);
@@ -188,7 +193,13 @@ export async function loadProductionRequests(scope: string[] | null, opts: { pla
       purchaseState,
       isExtra: r.isExtra,
       // A card title for requests that belong to no product.
-      bundleTitle: r.isExtra ? `Extra material${r.extraForPoItemId && refProducts.get(r.extraForPoItemId) ? ` - for ${refProducts.get(r.extraForPoItemId)!.productName}` : ""}` : null,
+      bundleTitle: r.isExtra ? `Extra material${r.extraForPoItemId && refProducts.get(r.extraForPoItemId) ? ` - for ${refProducts.get(r.extraForPoItemId)!.productName}` : ""}${r.productionBatchId && batchNos.get(r.productionBatchId) ? `, batch ${batchNos.get(r.productionBatchId)}` : ""}` : null,
+      newMaterial: r.newMaterial,
+      // What the Store has sent for it that Production has not received yet (extra material dispensed for a batch is on its way until then)
+      onItsWay: r.fulfillments.filter((f) => f.isTransitTracked && !f.deliveredAt).map((f) => ({ id: f.id, quantity: f.quantity, grnNo: f.grnNo })),
+      grnNos: [...new Set(r.fulfillments.map((f) => f.grnNo).filter((g): g is string => !!g))],
+      batchId: r.productionBatchId,
+      batchNo: r.productionBatchId ? (batchNos.get(r.productionBatchId) ?? null) : null,
       supplyStage: extraSupply?.stage ?? null,
       supplyLabel: extraSupply ? SUPPLY_LABEL[extraSupply.stage] : null,
       refProduct: r.extraForPoItemId ? (refProducts.get(r.extraForPoItemId)?.productName ?? null) : null,
@@ -252,7 +263,7 @@ myStoreProductionRouter.post("/production-requests/:id/request-from-warehouse", 
     if (!row || !row.storeId) return res.status(404).json({ error: "Production request not found for your store" });
     if (!row.open) return res.status(409).json({ error: "This request is already closed." });
     if (row.askedFromWarehouse > 0) return res.status(409).json({ error: "You have already asked the Warehouse for this." });
-    if (row.toAsk <= 1e-6) return res.status(409).json({ error: "Your store has enough of this - issue it to the Plant instead." });
+    if (row.toAsk <= 1e-6) return res.status(409).json({ error: "Your store has enough of this: it goes on to the Plant at Dispensing." });
 
     const source = await prisma.inventoryRequest.findUniqueOrThrow({
       where: { id: row.id },

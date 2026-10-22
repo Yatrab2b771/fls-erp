@@ -23,7 +23,7 @@ stockIssuedRouter.use(requireAuth, requireRole("STORE", "PPIC", "ACCOUNTS", "PUR
 const ISSUE_TYPES = ["ISSUED_DAY_STORE", "ISSUED_RND"] as const;
 const ISSUED: Prisma.InventoryTransactionWhereInput = { type: { in: [...ISSUE_TYPES] }, deletedAt: null };
 const RND_LABEL = "R&D Store";
-const DAY_PREFIX = "Day Store: ";
+const DAY_PREFIX = "Store: ";
 
 const many = (raw: unknown): string[] => (Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]).filter((v): v is string => typeof v === "string" && v.trim() !== "").map((v) => v.trim()).slice(0, 500);
 const isoDay = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
@@ -115,7 +115,7 @@ stockIssuedRouter.get("/", async (req: AuthedRequest, res, next) => {
           category: r.item.category,
           unit: r.unit,
           quantity: r.quantity,
-          locationType: rnd ? "R&D Store" : "Day Store",
+          locationType: rnd ? "R&D Store" : "Store",
           locationName: rnd ? RND_LABEL : r.dayStore?.name ?? null,
           batchNo: r.batchNo,
           grnNo: r.grnNo,

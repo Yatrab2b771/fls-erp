@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, CalendarClock, Lock, Pencil, Plus } from "lucide-react";
 import { ApiError } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { useBackTo } from "../lib/backTo";
 import {
   LEAD_STATUS_META,
   LEAD_STATUS_ORDER,
@@ -18,6 +20,7 @@ import {
   useAddMeeting,
   useConvertLead,
   useLead,
+  useLeadAssignees,
   useRescheduleLead,
   useUpdateLead,
   type LeadDetail,
@@ -35,9 +38,45 @@ import { useToast } from "../components/Toast";
 const MODES: LeadMeetingMode[] = ["CALL", "VIDEO", "IN_PERSON"];
 const errorText = (err: unknown) => (err instanceof ApiError ? err.message : "Could not save");
 
+/** BD / Admin: hand the lead to whoever should follow it up (any department). */
+function HandOver({ lead }: { lead: LeadDetail }) {
+  const toast = useToast();
+  const update = useUpdateLead();
+  const { data: people } = useLeadAssignees();
+  const [pick, setPick] = useState("");
+  async function hand() {
+    const who = (people ?? []).find((p) => p.id === pick);
+    if (!who || !window.confirm(`Hand this lead to ${who.name}? It then leaves your list unless you made it.`)) return;
+    try {
+      await update.mutateAsync({ id: lead.id, pocId: pick });
+      toast.success(`Handed to ${who.name}.`);
+      setPick("");
+    } catch (err) {
+      toast.error(errorText(err));
+    }
+  }
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <select className="field !h-8 !w-56 !py-0 !text-xs" value={pick} onChange={(e) => setPick(e.target.value)}>
+        <option value="">Hand over to…</option>
+        {(people ?? []).filter((p) => p.id !== lead.pocId).map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}{p.department ? ` (${p.department})` : ""}
+          </option>
+        ))}
+      </select>
+      <button type="button" className="btn-ghost btn-sm" disabled={!pick || update.isPending} onClick={hand}>
+        Hand over
+      </button>
+    </div>
+  );
+}
+
 export function LeadDetailPage() {
+  const { hasRole } = useAuth();
   const { id } = useParams<{ id: string }>();
   const [params, setParams] = useSearchParams();
+  const back = useBackTo({ from: "/leads", label: "Leads" }); // where this lead was opened from
   const { data: lead, isLoading, error, refetch, isFetching } = useLead(id);
   const [showMeeting, setShowMeeting] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -54,8 +93,8 @@ export function LeadDetailPage() {
   if (!lead) {
     return (
       <div className="space-y-4">
-        <Link to="/leads" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
-          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Leads
+        <Link to={back.from} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {back.label}
         </Link>
         {/* Only a real 404 means "not found"; any other failure (server down, network, an error) says so, with its message and a retry. */}
         {error && !(error instanceof ApiError && error.status === 404) ? (
@@ -77,8 +116,8 @@ export function LeadDetailPage() {
   const f = followUpState(lead.nextFollowUpAt, lead.status);
   return (
     <div className="space-y-5">
-      <Link to="/leads" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
-        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Leads
+      <Link to={back.from} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {back.label}
       </Link>
 
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -88,6 +127,7 @@ export function LeadDetailPage() {
           <p className="text-micro font-black uppercase tracking-wider text-slate-400">Lead · added {fmtDay(lead.createdAt)}{lead.businessCardId ? " from a visiting card" : ""} · POC {lead.pocName}</p>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">{lead.brandName}</h1>
           <p className="text-sm text-slate-600">{[lead.contactPerson, lead.designation, lead.phones.join(", "), lead.email].filter(Boolean).join(" · ") || "No contact details yet"}</p>
+          {hasRole("BD") && <HandOver lead={lead} />}
           </div>
         </div>
         <StatusBox lead={lead} />
@@ -135,7 +175,7 @@ export function LeadDetailPage() {
           <ClosureCard lead={lead} />
 
           <EstimateCard lead={lead} />
-          <SampleCard lead={lead} />
+          {hasRole("BD") && <SampleCard lead={lead} />}
 
           {lead.reschedules.length > 0 && (
             <div className="card p-4">
@@ -164,6 +204,7 @@ export function LeadDetailPage() {
 
 /** The estimated order size (opens once a sample is approved), Convert lead, and what happens after: waiting for the PO. */
 function EstimateCard({ lead }: { lead: LeadDetail }) {
+  const { hasRole } = useAuth();
   const toast = useToast();
   const update = useUpdateLead();
   const convert = useConvertLead();
@@ -234,7 +275,7 @@ function EstimateCard({ lead }: { lead: LeadDetail }) {
               Save estimate
             </button>
           )}
-          {lead.status !== "DROPPED" && (
+          {lead.status !== "DROPPED" && hasRole("BD") && (
             <button type="button" className="btn-primary btn-sm" disabled={convert.isPending} onClick={doConvert}>
               Convert lead
             </button>

@@ -12,11 +12,13 @@ import { productionHoldMessage } from "../purchase-orders/hold-guards";
 import { withUtilization } from "./production-batches.routes";
 import { productionBatchInclude } from "./batch-include";
 import { utilizationOfBatches } from "./batch-utilization";
+import { goodQtyOf } from "./good-qty";
+import { backWithProduction } from "./batch-pipeline";
 
 /**
  * A batch's Utilization is entered for the whole batch, then shared out over the materials:
  *
- *   PUT /production-batches/:id/utilization/:category      category RM (before Packaging starts) or PM (after Packaging)
+ *   PUT /production-batches/:id/utilization/:category      category RM (while the batch is in production, before its end time) or PM (at Packaging)
  *
  * Production gives the four numbers of the whole batch (Produced, Waste, Reject, Sample) and, material by material, the lines the form worked
  * out from the plan (each editable, with extra materials added). Saving REPLACES that kind's Utilization of the batch (it can be edited again
@@ -61,14 +63,19 @@ batchUtilizationRouter.put("/production-batches/:id/utilization/:category", requ
     if (!run.batchFlow) return res.status(409).json({ error: "This run is from before the per-batch flow: log its usage material by material." });
     await assertPlantAccess(req.user!.id, req.user!.roles, run.plantId);
     if (!run.plantId) return res.status(400).json({ error: "This run has no Plant set yet." });
-    if (batch.status !== "COMPLETED" || batch.currentStageId !== "PACKAGING") {
-      return res.status(409).json({ error: "The Utilization is filled while the batch is at Packaging (after Bulk QC), until it is handed over to QA." });
+    // The RM sheet is filled once the batch is back with Production from Bulk QC (before its end time and Send to Packaging open) and, for a batch
+    // that reached Packaging without it, at Packaging. The PM sheet is Packaging's. Both can be edited until the batch is handed over to QA.
+    const atPackaging = batch.status === "COMPLETED" && batch.currentStageId === "PACKAGING";
+    const inProduction = batch.prepStageId === "READY" && !!batch.shiftStartAt && backWithProduction(batch);
+    if (category === "RM" ? !inProduction : !atPackaging) {
+      return res.status(409).json({
+        error: category === "RM" ? "The RM Utilization is filled once Bulk QC has passed and the batch is back with Production, before it is sent to Packaging." : "The PM Utilization is filled while the batch is at Packaging, until it is handed over to QA.",
+      });
     }
     const productHeld = await productionHoldMessage(run.purchaseOrderItem.id);
     if (productHeld) return res.status(409).json({ error: productHeld });
 
     const status = (await utilizationOfBatches(run.purchaseOrderItem.id, [{ id: batch.id, plannedQty: batch.plannedQty }])).get(batch.id)!;
-    if (category === "PM" && !status.complete) return res.status(409).json({ error: "Fill the RM Utilization first (before Packaging), then the PM Utilization." });
 
     // What this sheet has to cover: every plan material of the kind needs its A. Extra materials are free, but must be of the same kind.
     const planItems = status.items.filter((i) => i.category === category);
@@ -158,9 +165,11 @@ batchUtilizationRouter.put("/production-batches/:id/utilization/:category", requ
       // far" of the run follows the change in output.
       if (category === "RM") {
         const output = q3(input.producedQty);
-        const delta = output - (batch.outputQty ?? 0);
+        // What the batch counts for in "made so far" follows the change (its output, less what the QA gate it has passed already took out)
+        const delta = goodQtyOf({ ...batch, outputQty: output }) - goodQtyOf(batch);
         await tx.productionBatch.update({ where: { id: batch.id }, data: { outputQty: output, inputQty: q3(input.producedQty + input.wasteQty + input.rejectQty + input.sampleQty) } });
-        if (Math.abs(delta) > EPS) await tx.preProduction.update({ where: { id: batch.preProductionId }, data: { combinedQty: { increment: delta } } });
+        // A batch still in production adds its output to the run's "made so far" when it is completed; only one already completed is trued up here.
+        if (batch.status === "COMPLETED" && Math.abs(delta) > EPS) await tx.preProduction.update({ where: { id: batch.preProductionId }, data: { combinedQty: { increment: delta } } });
       }
       return tx.productionBatch.findUniqueOrThrow({ where: { id: batch.id }, include: productionBatchInclude });
     });

@@ -176,7 +176,7 @@ describe("Urgent production: R&D changes a product's plan to V1 while it is stil
     expect((await sw(rnd.token, "V1", "Whey is gone again")).status).toBe(200);
     expect((await prisma.purchaseOrderItem.findUniqueOrThrow({ where: { id: itemId } })).productionBomSlot).toBeNull();
     expect((await itemsOf()).waiting).toContain(isolate.name);
-    expect(await extra()).toHaveLength(0); // the Day Store had not started on the Whey: it is withdrawn
+    expect(await extra()).toHaveLength(0); // the Store had not started on the Whey: it is withdrawn
     expect((await prisma.productionBatch.findUniqueOrThrow({ where: { id: dispensed.id } })).bomSlot).toBe("BASE");
     expect((await itemsOf()).dispensed).toContain(isolate.name);
 

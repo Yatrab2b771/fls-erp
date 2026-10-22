@@ -28,19 +28,19 @@ async function setup() {
 
 const send = (token: string, body: Record<string, unknown>) => request(app).post("/api/stock-transfers").set(authHeader(token)).send(body);
 
-describe("Stock transfers - a Day Store returns stock to the Warehouse or sends it to its own Plant", () => {
-  it("only a Day Store sends its own stock: not the Warehouse, not to another store, not to another store's Plant", async () => {
+describe("Stock transfers - a Store returns stock to the Warehouse or sends it to its own Plant", () => {
+  it("only a Store sends its own stock: not the Warehouse, not to another store, not to another store's Plant", async () => {
     const { warehouse, storeA, cocoa, a, b, plantB } = await setup();
     const base = { itemId: cocoa.id, quantity: 10, unit: "Kg", sourceType: "DAY_STORE", sourceDayStoreId: a.id };
 
-    expect((await send(warehouse, { ...base, destinationType: "WAREHOUSE" })).status).toBe(403); // the Warehouse does not send from a Day Store
-    expect((await send(storeA, { ...base, destinationType: "DAY_STORE", destDayStoreId: b.id })).status).toBe(400); // never to another Day Store
+    expect((await send(warehouse, { ...base, destinationType: "WAREHOUSE" })).status).toBe(403); // the Warehouse does not send from a Store
+    expect((await send(storeA, { ...base, destinationType: "DAY_STORE", destDayStoreId: b.id })).status).toBe(400); // never to another Store
     expect((await send(storeA, { ...base, destinationType: "PLANT", destPlantId: plantB.id })).status).toBe(400); // not another store's Plant
     expect((await send(storeA, { ...base, sourceDayStoreId: b.id, destinationType: "WAREHOUSE" })).status).toBe(403); // not another store's stock
     expect((await send(storeA, { ...base, quantity: 500, destinationType: "WAREHOUSE" })).status).toBe(409); // more than it holds
   });
 
-  it("a return to the Warehouse is confirmed by the Warehouse (not the Day Store login) and lands as stock", async () => {
+  it("a return to the Warehouse is confirmed by the Warehouse (not the Store login) and lands as stock", async () => {
     const { warehouse, storeA, cocoa, a } = await setup();
     const sent = await send(storeA, { itemId: cocoa.id, quantity: 10, unit: "Kg", sourceType: "DAY_STORE", sourceDayStoreId: a.id, destinationType: "WAREHOUSE" });
     expect(sent.status).toBe(201);

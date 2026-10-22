@@ -58,6 +58,7 @@ import { stockAdjustmentsRouter } from "./modules/inventory/stock-adjustments.ro
 import { productVendorsRouter } from "./modules/product-vendors/product-vendors.routes";
 import { customerReturnsRouter } from "./modules/customer-returns/customer-returns.routes";
 import { reworksRouter } from "./modules/reworks/reworks.routes";
+import { transportersRouter } from "./modules/transporters/transporters.routes";
 
 export function createApp() {
   const app = express();
@@ -116,6 +117,7 @@ export function createApp() {
   app.use("/api", productionBatchesRouter);
   app.use("/api/combined-lots", combinedLotRouter);
   app.use("/api/fg", fgRouter);
+  app.use("/api/transporters", transportersRouter);
   app.use("/api/alerts", alertsRouter);
   app.use("/api/finance", financeRouter);
   app.use("/api/catalog", catalogRouter);

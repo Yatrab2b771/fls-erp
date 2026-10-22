@@ -110,7 +110,7 @@ export function RndBomControl({ product, showSend = false }: { product: RndBomPr
         confirmLabel={result ? "Change again" : "Change the plan"}
         cancelLabel="Close"
         requireReason
-        reasonLabel={inProduction ? "Why (shown to Production and the Day Store)" : "Why (shown to PPIC and in the history)"}
+        reasonLabel={inProduction ? "Why (shown to Production and the Store)" : "Why (shown to PPIC and in the history)"}
         busy={sw.isPending}
         onConfirm={(reason) => {
           if (info?.locked) return toast.error(info.locked);
@@ -123,11 +123,11 @@ export function RndBomControl({ product, showSend = false }: { product: RndBomPr
             <p className="text-xs text-slate-500">
               {inProduction ? (
                 <>
-                  This product is with Production, made from <b>{LABEL[current] ?? current}</b> now. A new version applies to the batches <b>not dispensed yet</b>. A batch already dispensed keeps the material it was given, and what the new version still needs for it is asked from the Day Store as an <b>extra request for that batch</b>. Production and the Day Store are told; <b>PPIC is not</b>.
+                  This product is with Production, made from <b>{LABEL[current] ?? current}</b> now. A new version applies to the batches <b>not dispensed yet</b>. A batch already dispensed keeps the material it was given, and what the new version still needs for it is asked from the Store as an <b>extra request for that batch</b>. Production and the Store are told; <b>PPIC is not</b>.
                 </>
               ) : (
                 <>
-                  The plan is made from <b>{LABEL[current] ?? current}</b> now. Choosing another version works out the RM plan and the Packaging plan again from it. PPIC sees the new plan, and the Day Store's requests follow.
+                  The plan is made from <b>{LABEL[current] ?? current}</b> now. Choosing another version works out the RM plan and the Packaging plan again from it. PPIC sees the new plan, and the Store's requests follow.
                 </>
               )}
             </p>
@@ -170,7 +170,7 @@ export function RndBomControl({ product, showSend = false }: { product: RndBomPr
                 )}
                 {result.extraRequests.length > 0 && (
                   <div>
-                    <p className="font-bold">Asked from the Day Store (extra, for the batch):</p>
+                    <p className="font-bold">Asked from the Store (extra, for the batch):</p>
                     <ul className="list-disc pl-4">
                       {result.extraRequests.map((x, i) => (
                         <li key={i}>

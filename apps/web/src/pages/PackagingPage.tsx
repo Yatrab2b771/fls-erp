@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import { ArrowLeft, Check, Download, PackageCheck, Save, Send } from "lucide-react";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useHandOverBatch, usePackagingBoard, usePlansBoard, useUpdatePackaging, type PlanBoardRow } from "../lib/hooks";
+import { useHandOverToStore, usePackagingBoard, usePlansBoard, useUpdatePackaging, type PlanBoardRow } from "../lib/hooks";
 import type { ProductionBatch } from "../lib/types";
 import { PACKAGING_STATUSES } from "../lib/productionBatchStage";
 import { useTileFilters } from "../lib/tileFilters";
@@ -27,10 +27,9 @@ const toLocalInput = (iso: string | null) => {
 };
 const isCompleted = (status: string | null) => String(status ?? "").trim().toLowerCase() === "completed";
 
-// Production's Packaging tile: the batches that have passed Bulk QC. Each row is one batch number. First the RM Utilization of the whole batch is
-// filled (produced, waste, reject, sample; every material fills itself from the plan and can be edited), and only then Packaging opens: its own
-// production sheet (shift, manpower, start and end date-time, status, remarks) and, after the packing, the PM Utilization (label, tub, carton...).
-// The end of Packaging (status Completed, end time, remarks) opens only once every plan PM has its quantity; then the batch is handed over to QA.
+// Production's Packaging tile: the batches Production has sent to Packaging (their RM Utilization was filled on the Batch tile, before the batch
+// ended). Each row is one batch number: its own production sheet (shift, manpower, start and end date-time, status, remarks) and, after the packing, the PM Utilization (label, tub, carton...).
+// The end of Packaging (status Completed, end time, remarks) opens only once every plan PM has its quantity; then saving sends the batch to QA, and once QA approves it Production hands it over to the store.
 export function PackagingPage() {
   const { hasRole } = useAuth();
   const canAct = hasRole("PRODUCTION", "ADMIN");
@@ -66,7 +65,6 @@ export function PackagingPage() {
       "Start": b.packagingStartAt ? new Date(b.packagingStartAt).toLocaleString("en-GB") : "",
       "End": b.packagingEndAt ? new Date(b.packagingEndAt).toLocaleString("en-GB") : "",
       "Packaging Status": b.packagingStatus ?? "",
-      "RM Utilization": b.utilization ? (b.utilization.complete ? "Done" : "Pending") : "",
       "PM Utilization": b.utilization ? `${b.utilization.pm.logged} of ${b.utilization.pm.required}` : "",
       Remarks: b.packagingRemarks ?? "",
     }));
@@ -90,7 +88,7 @@ export function PackagingPage() {
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Packaging</h1>
             <p className="text-sm text-slate-500">
               {rows.length.toLocaleString()} batch{rows.length === 1 ? "" : "es"}
-              {isFiltered ? ` of ${everyRow.length}` : ""} that passed Bulk QC. Fill the RM Utilization first, then the packaging sheet and the PM Utilization of each batch, then hand it over to QA.
+              {isFiltered ? ` of ${everyRow.length}` : ""} sent to Packaging. Fill the packaging sheet and the PM Utilization of each batch, then hand it over to QA.
             </p>
           </div>
         </div>
@@ -114,7 +112,6 @@ export function PackagingPage() {
                   <th className="px-3 py-2.5">Batch No</th>
                   <th className="px-3 py-2.5">Product</th>
                   <th className="px-3 py-2.5 text-right">Qty</th>
-                  <th className="px-3 py-2.5">RM Utilization</th>
                   <th className="px-3 py-2.5">Shift</th>
                   <th className="px-3 py-2.5">Manpower</th>
                   <th className="px-3 py-2.5">Start date &amp; time</th>
@@ -141,7 +138,11 @@ export function PackagingPage() {
 function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: PlanBoardRow | undefined; canAct: boolean }) {
   const toast = useToast();
   const update = useUpdatePackaging();
-  const handOver = useHandOverBatch();
+  const handOver = useHandOverToStore();
+  // Where the batch is: at Packaging (Production's sheet), waiting for QA's approval (stays here, read only), or approved and waiting for Production's hand-over to the store
+  const atPackaging = batch.currentStageId === "PACKAGING";
+  const waitingQa = batch.currentStageId === "QA_GATE_PACKAGING";
+  const approved = batch.currentStageId === "FG_STORE";
   const [open, setOpen] = useState(!(batch.utilization ? batch.utilization.complete : true));
   const [v, setV] = useState({
     packagingShift: batch.packagingShift ?? "",
@@ -154,12 +155,10 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
   const set = (k: keyof typeof v) => (e: { target: { value: string } }) => setV((cur) => ({ ...cur, [k]: e.target.value }));
   const pm = batch.utilization?.pm;
   const pmDone = pm ? pm.complete : true;
-  // Packaging opens only once the RM Utilization of the whole batch is filled.
-  const rmDone = batch.utilization ? batch.utilization.complete : true;
   const startFilled = !!batch.packagingShift && !!batch.packagingManpowerCount && !!batch.packagingStartAt;
-  const sheetLocked = !canAct || !rmDone;
+  const sheetLocked = !canAct || !atPackaging;
   const finishLocked = sheetLocked || !pmDone || !startFilled;
-  const tip = !rmDone ? "Fill the RM Utilization first" : !startFilled ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !pmDone ? "Fill the PM Utilization first" : undefined;
+  const tip = !startFilled ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !pmDone ? "Fill the PM Utilization first" : undefined;
   const done = isCompleted(batch.packagingStatus);
   const item = batch.preProduction.purchaseOrderItem;
 
@@ -171,43 +170,44 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
         if (finishLocked && (k === "packagingEndAt" || k === "packagingRemarks" || (k === "packagingStatus" && isCompleted(val)))) continue; // shut until the PM Utilization and start fields are in
         body[k] = k === "packagingManpowerCount" ? Number(val) : k === "packagingStartAt" || k === "packagingEndAt" ? new Date(val).toISOString() : val;
       }
-      await update.mutateAsync(body as never);
-      toast.success("Saved.");
+      const saved = (await update.mutateAsync(body as never)) as { currentStageId?: string };
+      toast.success(saved?.currentStageId && saved.currentStageId !== "PACKAGING" ? "Saved. The batch now waits for QA's approval." : "Saved.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not save");
     }
   }
   async function hand() {
-    if (!window.confirm("Hand this batch over to QA? It then waits at QA's packaging gate.")) return;
+    if (!window.confirm("Hand these finished goods over to the store? They then show in the Store's finished goods.")) return;
     try {
       await handOver.mutateAsync(batch.id);
-      toast.success("Handed over to QA.");
+      toast.success("Handed over to the store.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not hand over");
     }
   }
-  const items: ActionMenuItem[] = canAct
-    ? [
-        { key: "save", label: update.isPending ? "Saving…" : "Save", icon: Save, onClick: save, disabled: update.isPending },
-        { key: "hand", label: handOver.isPending ? "Handing over…" : "Hand over to QA", icon: Send, tone: "primary", onClick: hand, disabled: !done || handOver.isPending, title: done ? undefined : "Packaging status must be Completed first" },
-      ]
-    : [];
+  // Saving a finished sheet (start and end time, PM Utilization done) sends the batch to QA by itself; once QA has approved it, Production hands it over to the store
+  const items: ActionMenuItem[] = !canAct
+    ? []
+    : atPackaging
+      ? [{ key: "save", label: update.isPending ? "Saving…" : "Save", icon: Save, onClick: save, disabled: update.isPending }]
+      : approved
+        ? [{ key: "hand", label: handOver.isPending ? "Handing over…" : "Handover to Store", icon: Send, tone: "primary", onClick: hand, disabled: handOver.isPending }]
+        : [];
 
   return (
     <Fragment>
       <tr className={open ? "bg-slate-50/70" : "hover:bg-slate-50"}>
-        <td className="px-3 py-1.5 font-mono font-black text-orange-800">{batch.batchNo ?? `Batch ${batch.id.slice(0, 8)}`}</td>
+        <td className="px-3 py-1.5 font-mono font-black text-orange-800">
+          {batch.batchNo ?? `Batch ${batch.id.slice(0, 8)}`}
+          {waitingQa && <span className="mt-0.5 block font-sans"><span className="pill border-sky-200 bg-sky-50 text-sky-700">Waiting for QA approval</span></span>}
+          {approved && <span className="mt-0.5 block font-sans"><span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Approved by QA</span></span>}
+        </td>
         <td className="px-3 py-1.5 font-bold text-slate-800">
           {item.productName}
           <span className="block text-micro font-normal text-slate-400">{item.purchaseOrder.poNumber ?? "—"}</span>
         </td>
         <td className="px-3 py-1.5 text-right font-mono text-slate-600">
           {fmtQty(batch.plannedQty)} {item.unit}
-        </td>
-        <td className="px-3 py-1.5">
-          <button type="button" onClick={() => setOpen((o) => !o)} className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-tiny font-bold ${rmDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`} title={rmDone ? "RM Utilization is saved (editable until handover)" : "Fill the RM Utilization of the whole batch first"}>
-            {rmDone ? "Done" : "Fill"} {open ? "▴" : "▾"}
-          </button>
         </td>
         <td className="px-3 py-1.5">
           <select disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-24`} value={v.packagingShift} onChange={set("packagingShift")}>
@@ -225,7 +225,7 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
         <td className="px-3 py-1.5">
           <select disabled={sheetLocked} title={sheetLocked ? tip : undefined} className={`${CELL} w-40`} value={v.packagingStatus} onChange={set("packagingStatus")}>
             <option value="">—</option>
-            {PACKAGING_STATUSES.map((s) => (
+            {[...PACKAGING_STATUSES, ...(v.packagingStatus && !(PACKAGING_STATUSES as readonly string[]).includes(v.packagingStatus) ? [v.packagingStatus] : [])].map((s) => (
               <option key={s} value={s} disabled={isCompleted(s) && finishLocked}>
                 {s}
               </option>
@@ -252,20 +252,16 @@ function PackagingRow({ batch, plan, canAct }: { batch: ProductionBatch; plan: P
       </tr>
       {open && (
         <tr className="bg-slate-50/70">
-          <td colSpan={11} className="whitespace-normal px-4 py-3">
+          <td colSpan={10} className="whitespace-normal px-4 py-3">
             <div className="space-y-4">
-              <div className="space-y-1.5">
-                <p className="text-micro font-bold uppercase tracking-wide text-brand-700">1 · RM Utilization (whole batch, before Packaging)</p>
-                {batch.utilization ? <UtilizationFillForm batch={batch} category="RM" plantId={plan?.plant?.id} canEdit={canAct} /> : <p className="text-xs text-slate-400">Loading…</p>}
-              </div>
               <div className="flex items-center gap-3">
                 <label className="text-xs font-bold text-slate-600">Packaging remarks</label>
-                <input disabled={finishLocked} title={tip} className="field !h-8 flex-1 !py-0 !text-xs" value={v.packagingRemarks} onChange={set("packagingRemarks")} placeholder={finishLocked ? "Opens once the RM and PM Utilization are complete" : ""} />
+                <input disabled={finishLocked} title={tip} className="field !h-8 flex-1 !py-0 !text-xs" value={v.packagingRemarks} onChange={set("packagingRemarks")} placeholder={finishLocked ? "Opens once the start fields are saved and the PM Utilization is complete" : ""} />
                 {done && <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700"><Check className="h-3 w-3" strokeWidth={2.5} /> Completed</span>}
               </div>
               <div className="space-y-1.5">
-                <p className="text-micro font-bold uppercase tracking-wide text-brand-700">2 · PM Utilization (after Packaging)</p>
-                {!rmDone ? <p className="text-xs text-slate-400">Fill the RM Utilization first.</p> : batch.utilization ? <UtilizationFillForm batch={batch} category="PM" plantId={plan?.plant?.id} canEdit={canAct} /> : null}
+                <p className="text-micro font-bold uppercase tracking-wide text-brand-700">PM Utilization (after Packaging)</p>
+                {batch.utilization ? <UtilizationFillForm batch={batch} category="PM" plantId={plan?.plant?.id} canEdit={canAct && atPackaging} /> : null}
               </div>
             </div>
           </td>

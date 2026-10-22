@@ -111,7 +111,7 @@ export function StockReceivedPage() {
       {paged.isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : paged.total === 0 ? (
-        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "Nothing received yet"} hint={isFiltered ? "Nothing matches these filters." : "Deliveries show here once Store logs a Material Received entry."} accent="brand" />
+        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "Nothing received yet"} hint={isFiltered ? "Nothing matches these filters." : "Deliveries show here once Warehouse logs a Material Received entry."} accent="brand" />
       ) : (
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">

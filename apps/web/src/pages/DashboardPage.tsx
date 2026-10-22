@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Wallet,
+  ScanLine,
   FileText,
   AlarmClock,
   ArrowDownToLine,
@@ -91,6 +92,7 @@ import { useAlertSummary } from "./AlertsPage";
 import { useFinanceRows } from "../lib/financeHooks";
 import { StatTile, type StatAccent } from "../components/StatTile";
 import { useLeadSummary } from "../lib/leadHooks";
+import { useBusinessCards } from "../lib/businessCardHooks";
 import { useItemChangeRequests } from "../lib/itemChangeHooks";
 import { useHeldProducts } from "../lib/heldProductHooks";
 import { isBatchStage, isNewPlan } from "../lib/plansBoardExport";
@@ -294,15 +296,16 @@ export function DashboardPage() {
   const { data: plantStock } = usePlantStockBoard({ enabled: canProduction || isAdminView });
   const plantStockItems = plantStock?.rows.length ?? 0;
   const plantLeftover = (plantStock?.rows ?? []).filter((r) => r.pendingReturn > 0).length;
-  const packagingOpen = (packagingBoard ?? []).filter((b) => String(b.packagingStatus ?? "").trim().toLowerCase() !== "completed").length;
+  // Packaging: sheets still to fill (at Packaging) plus QA-approved batches waiting for the hand-over to the store; those waiting for QA are not Production's to act on
+  const packagingOpen = (packagingBoard ?? []).filter((b) => b.currentStageId === "PACKAGING" || b.currentStageId === "FG_STORE").length;
   const financeOpen = (financeRows ?? []).filter((r) => r.status !== "PAID_FULL").length; // everything not paid in full: the list filters it by status
   const withAccountsCount = (accountsQueue ?? []).filter((r) => r.status === "WITH_ACCOUNTS").length;
   const readyToSendCount = (accountsQueue ?? []).filter((r) => r.status === "READY_TO_SEND").length;
   const sentBackCount = (accountsQueue ?? []).filter((r) => r.status === "SENT_BACK").length;
   const fgStockRequestsOpen = (fgStockRequests ?? []).filter((r) => r.status === "REQUESTED" || r.status === "SENT").length;
   const fgRequestsOpen = (fgRequests ?? []).filter((r) => r.status === "REQUESTED" || r.status === "SENT").length;
-  // Production: batches whose packaging is done and waiting to be handed over. Dispatch: batches Production has handed over.
-  const handoverReady = (handoverBoard ?? []).filter((b) => !b.handedOverAt && b.currentStageId === "PACKAGING" && String(b.packagingStatus ?? "").toLowerCase().trim() === "completed").length;
+  // Production: batches QA has approved, waiting to be handed over to the store.
+  const handoverReady = (handoverBoard ?? []).filter((b) => b.awaitingStoreHandover).length;
   const materialsPending = new Set((materialBoard ?? []).filter((m) => m.status !== "FULL").map((m) => m.itemId)).size;
   // PPIC also reads this (just the count, same as RND) so they can see
   // whether the RM/PM they asked Purchase for has actually arrived at
@@ -393,7 +396,7 @@ export function DashboardPage() {
       badge: rndPill,
     })),
     ...rndAwaitingConfirmation.map((t) => ({ key: `rt-${t.id}`, to: "/rnd-store", title: t.itemName, subtitle: `Confirm receipt · ${t.quantity} ${t.unit}`, badge: rndPill })),
-    ...(rndPendingSampleRequests ?? []).map((r) => ({ key: `rsr-${r.id}`, to: "/rnd-store", title: r.itemName, subtitle: `Awaiting Store · ${r.quantity} ${r.unit}`, badge: rndPill })),
+    ...(rndPendingSampleRequests ?? []).map((r) => ({ key: `rsr-${r.id}`, to: "/rnd-store", title: r.itemName, subtitle: `Awaiting Warehouse · ${r.quantity} ${r.unit}`, badge: rndPill })),
   ];
 
   const myQueueRows = [...preRunRows, ...lotRows, ...batchRows, ...inventoryRows, ...rndRows];
@@ -453,21 +456,46 @@ export function DashboardPage() {
   const recentOrders = recentPage ?? [];
   const attentionRows = orgWide ? orgDelayed : myDelayed;
 
-  const { data: leadSummary } = useLeadSummary({ enabled: hasRole("BD") });
+  // Every department except BD and Admin gets its own visiting cards and leads as the first two tiles of its dashboard
+  const showLeadTiles = !orgWide || isPpicOnlyView;
+  const { data: leadSummary } = useLeadSummary({ enabled: hasRole("BD") || showLeadTiles });
   const { data: bdPendingRequests } = useItemChangeRequests("PENDING", { enabled: hasRole("BD") });
+  // The visiting cards every department collects (an event, say): the ones still to be checked, and the possible duplicates BD sorts out
+  const { data: allCards } = useBusinessCards({ enabled: hasRole("BD") || showLeadTiles });
+  const cardsToCheck = (allCards ?? []).filter((c) => c.status !== "VERIFIED").length;
+  const cardDuplicates = (allCards ?? []).filter((c) => !!c.duplicateOf).length;
+  // The first two tiles of every other department's dashboard: the visiting cards it collected that are still to be checked, and the leads BD handed it.
+  // The Leads tile turns amber when a follow-up is due today and rose when one is late.
+  const leadTitle = leadSummary?.followUpToday
+    ? `Leads BD gave you to follow up: ${leadSummary.dueToday} follow-up${leadSummary.dueToday === 1 ? "" : "s"} today, ${leadSummary.overdue} late`
+    : "Leads BD gave you to follow up, with their status and next follow-up";
+  const leadTiles = (
+    <>
+      <Link to="/visiting-cards" className="block" title={`Visiting cards you collected: ${cardsToCheck} still to be checked`}>
+        <StatTile icon={ScanLine} label="Visiting Cards" value={cardsToCheck} accent={cardsToCheck ? "amber" : "slate"} />
+      </Link>
+      <Link to="/leads" className="block" title={leadTitle}>
+        <StatTile icon={Users} label="Leads" value={leadSummary?.total ?? 0} accent={leadSummary?.overdue ? "rose" : leadSummary?.dueToday ? "amber" : "brand"} />
+      </Link>
+    </>
+  );
   const bdTiles = (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {/* Order: visiting cards, leads, follow-ups, then samples */}
+      <Link to="/visiting-cards" className="block" title={`Visiting cards collected by every department: ${cardsToCheck} still to be checked, ${cardDuplicates} possible duplicates`}>
+        <StatTile icon={ScanLine} label="Visiting Cards" value={cardsToCheck} accent={cardDuplicates ? "rose" : cardsToCheck ? "amber" : "slate"} />
+      </Link>
+      <Link to="/leads" className="block" title="Every lead you are working on, with its status and next follow-up">
+        <StatTile icon={Users} label="Leads" value={leadSummary?.total ?? 0} accent="brand" />
+      </Link>
       <Link to="/leads/follow-ups" className="block" title="Leads whose next follow-up is today or earlier">
         <StatTile icon={AlarmClock} label="Follow up today" value={leadSummary?.followUpToday ?? 0} accent={leadSummary?.overdue ? "rose" : leadSummary?.followUpToday ? "amber" : "slate"} />
-      </Link>
-      <Link to="/leads" className="block" title="Leads that are Converted and wait for their PO: enter the PO from the lead">
-        <StatTile icon={ShoppingCart} label="Waiting for PO" value={leadSummary?.waitingForPo ?? 0} accent={leadSummary?.waitingForPo ? "amber" : "slate"} />
       </Link>
       <Link to="/sample-requests" className="block" title="Samples you asked R&D for. The number is how many are not handed over yet.">
         <StatTile icon={Beaker} label="Sample Request" value={(sampleRequests ?? []).filter((r) => r.status !== "DISPATCHED" && r.status !== "CANNOT_MAKE").length} accent="violet" />
       </Link>
-      <Link to="/leads" className="block" title="Every lead you are working on, with its status and next follow-up">
-        <StatTile icon={Users} label="Leads" value={leadSummary?.total ?? 0} accent="brand" />
+      <Link to="/purchase-orders" className="block" title="Enter a new PO, see every PO and how old each one is. The number is how many are not completed yet.">
+        <StatTile icon={ShoppingCart} label="Purchase Orders" value={pendingOrders.length} accent={delayedPendingOrders.length ? "rose" : "brand"} />
       </Link>
       <Link to="/bd-requests" className="block" title="Ask PPIC to hold or cancel a product, and see what it decided. The number is how many wait for PPIC.">
         <StatTile icon={PauseCircle} label="Hold / Cancel Requests" value={bdPendingRequests?.length ?? 0} accent={bdPendingRequests?.length ? "amber" : "slate"} />
@@ -494,6 +522,7 @@ export function DashboardPage() {
   );
   const ppicTiles = (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {leadTiles}
       <Link to="/ppic-planning/not-planned-pos" className="block">
         <StatTile icon={ShoppingCart} label="Not Planned" value={ppicSummary?.notPlannedProducts ?? 0} accent={ppicSummary?.notPlannedProducts ? "rose" : "slate"} />
       </Link>
@@ -615,8 +644,8 @@ export function DashboardPage() {
                     { to: "/batch-indent", icon: ClipboardList, label: "Indent Issue (Batch)", value: prep?.INDENT_ISSUE ?? 0, accent: prep?.INDENT_ISSUE ? "amber" : "slate", hint: "Batches waiting for Production to sign their indent" },
                     { to: "/held-products", icon: PauseCircle, label: "Held Products", value: heldProductCount, accent: heldToDecide ? "amber" : heldProductCount ? "violet" : "slate", hint: "Products PPIC has put on hold, with their batches: Production holds the batches still in preparation" },
                     { to: "/batch-no", icon: Hash, label: "Batch No", value: prep?.BATCH_NO ?? 0, accent: prep?.BATCH_NO ? "amber" : "slate", hint: "Batches waiting for R&D to allocate their batch number" },
-                    { to: "/batch-dispensing", icon: Send, label: "Dispensing (Batch)", value: prep?.DISPENSING ?? 0, accent: prep?.DISPENSING ? "amber" : "slate", hint: "Batches with a batch number: the Day Store dispenses their material" },
-                    { to: "/material-received", icon: PackageCheck, label: "Material Received", value: prep?.RECEIVE ? prep.RECEIVE : materialsPending, accent: prep?.RECEIVE || materialsPending ? "amber" : "emerald", hint: "Batch-wise material status. Batches whose material the Day Store has sent are confirmed here" },
+                    { to: "/batch-dispensing", icon: Send, label: "Dispensing (Batch)", value: prep?.DISPENSING ?? 0, accent: prep?.DISPENSING ? "amber" : "slate", hint: "Batches with a batch number: the Store dispenses their material" },
+                    { to: "/material-received", icon: PackageCheck, label: "Material Received", value: prep?.RECEIVE ? prep.RECEIVE : materialsPending, accent: prep?.RECEIVE || materialsPending ? "amber" : "emerald", hint: "Batch-wise material status. Batches whose material the Store has sent are confirmed here" },
                     { to: "/rework", icon: Wrench, label: "Rework", value: crSummary?.inRework ?? 0, accent: crSummary?.inRework ? "amber" : "slate", hint: "Returned goods QA wants reprocessed" },
                     { to: "/batches", icon: Layers, label: "Batch", value: batchPlans, accent: batchPlans ? "amber" : "slate", hint: "Plans with a batch cleared for production" },
                     { to: "/plant-stock", icon: Factory, label: "Plant Stock", value: plantStockItems, accent: plantLeftover ? "violet" : plantStockItems ? "emerald" : "slate", hint: "What each Plant holds: reserved, free, leftover to send back" },
@@ -646,6 +675,7 @@ export function DashboardPage() {
           </div>
         ) : isQcOnlyView ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {leadTiles}
             <Link to="/qc/ipqc" className="block" title="Batches whose in-process check waits for QA">
               <StatTile icon={Beaker} label="IPQC" value={qcCounts?.IPQC ?? 0} accent={qcCounts?.IPQC ? "sky" : "slate"} />
             </Link>
@@ -655,7 +685,7 @@ export function DashboardPage() {
             <Link to="/qc/qa-gate-packaging" className="block" title="Batches that finished packaging and wait at QA's gate">
               <StatTile icon={ShieldAlert} label="QA Gate: Packaging" value={qcCounts?.QA_GATE_PACKAGING ?? 0} accent={qcCounts?.QA_GATE_PACKAGING ? "sky" : "slate"} />
             </Link>
-            <Link to="/qc/fg-release" className="block" title="Finished goods at the Day Store waiting for your approval">
+            <Link to="/qc/fg-release" className="block" title="Finished goods at the Store waiting for your approval">
               <StatTile icon={PackageCheck} label="FG QC & Release" value={qcCounts?.FG_QC_RELEASE ?? 0} accent={qcCounts?.FG_QC_RELEASE ? "amber" : "slate"} />
             </Link>
             <Link to="/qc/on-hold" className="block" title="Everything QA has put on hold, at any stage">
@@ -670,6 +700,7 @@ export function DashboardPage() {
           </div>
         ) : isPurchaseOnlyView ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {leadTiles}
             <Link to="/purchase-planning/shortfall" className="block" title="Log or update a PO straight from this list">
               <StatTile icon={Package} label="Shortfall" value={purchaseStats.shortfall} accent={purchaseStats.shortfall ? "amber" : "slate"} />
             </Link>
@@ -682,6 +713,7 @@ export function DashboardPage() {
           </div>
         ) : isRegulatoryOnlyView ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {leadTiles}
             <Link to="/regulatory-planning/pending-review" className="block">
               <StatTile icon={ShieldAlert} label="Pending Review" value={regulatoryStats.pendingReview} accent={regulatoryStats.pendingReview ? "amber" : "slate"} />
             </Link>
@@ -694,6 +726,7 @@ export function DashboardPage() {
           </div>
         ) : isStoreOnlyView && isDayStoreLogin ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {leadTiles}
             <Link to="/available-stock" className="block" title="Every RM / PM on hand in your store and its Plant">
               <StatTile icon={Boxes} label="Available Stock (Items)" value={availableSummary?.itemsInStock ?? 0} accent="emerald" />
             </Link>
@@ -712,13 +745,14 @@ export function DashboardPage() {
             <Link to="/my-store/requests" className="block" title="Ask the Warehouse for material, and follow your requests">
               <StatTile icon={HandHelping} label="My Material Requests (Open)" value={myStoreSummary?.requests ?? 0} accent="amber" />
             </Link>
-            <Link to="/my-store/issued-to-plant" className="block" title="What your store has issued on to its own Plant">
-              <StatTile icon={Send} label="Stock Issued to Plant (Entries)" value={myStoreSummary?.issuedToPlant ?? 0} accent="violet" />
+            <Link to="/my-store/issued-to-plant" className="block" title="What your store has dispensed to its own Plant: batch and GRN wise, extra material too">
+              <StatTile icon={Send} label="Dispensed to Plant (Entries)" value={myStoreSummary?.issuedToPlant ?? 0} accent="violet" />
             </Link>
           </div>
         ) : isStoreOnlyView ? (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Link to="/available-stock" className="block" title="Every RM / PM on hand across Warehouse, Day Stores, R&D Store and Plants, in one list">
+            {leadTiles}
+            <Link to="/available-stock" className="block" title="Every RM / PM on hand across Warehouse, Stores, R&D Store and Plants, in one list">
               <StatTile icon={Boxes} label="Available Stock (Items)" value={availableSummary?.itemsInStock ?? 0} accent="emerald" />
             </Link>
             <Link to="/stock-received" className="block" title="Every delivery the Warehouse has received from a vendor, with filters">
@@ -734,7 +768,7 @@ export function DashboardPage() {
             >
               <StatTile icon={PackageCheck} label="Finished Goods" value={storeSummary?.fgProductCount ?? 0} accent={fgStockRequestsOpen + (isWarehouseSeat ? (crSummary?.open ?? 0) : 0) ? "amber" : "emerald"} />
             </Link>
-            <Link to="/stock-issued" className="block" title="Everything the Warehouse has issued out - to Day Stores and the R&D Store - with filters">
+            <Link to="/stock-issued" className="block" title="Everything the Warehouse has issued out - to Stores and the R&D Store - with filters">
               <StatTile icon={Send} label="Stock Issued (Entries)" value={issuedSummary?.total ?? 0} accent="violet" />
             </Link>
             <Link to="/incoming-material" className="block" title="Material Purchase has put on order (PI lines) that has not arrived yet, by ETA">
@@ -743,15 +777,16 @@ export function DashboardPage() {
             <Link to="/fg-warehouse-requests" className="block" title="Dispatch asking to send finished goods to the Warehouse: accept them, and confirm when they arrive">
               <StatTile icon={PackageCheck} label="FG Requests (Open)" value={fgRequestsOpen} accent={fgRequestsOpen ? "amber" : "slate"} />
             </Link>
-            <Link to="/material-requests-plan" className="block" title="Urgent: Day Stores asking for material a production plan needs - late ones first">
+            <Link to="/material-requests-plan" className="block" title="Urgent: Stores asking for material a production plan needs - late ones first">
               <StatTile icon={AlarmClock} label="Material Request (Plan)" value={requestsSummary?.plan ?? 0} accent={requestsSummary?.planOverdue ? "rose" : requestsSummary?.plan ? "amber" : "slate"} />
             </Link>
-            <Link to="/material-requests" className="block" title="What Day Stores and the R&D Store have asked the Warehouse for, with filters">
+            <Link to="/material-requests" className="block" title="What Stores and the R&D Store have asked the Warehouse for, with filters">
               <StatTile icon={HandHelping} label="Material Requests (Open)" value={requestsSummary?.open ?? 0} accent={requestsSummary?.open ? "amber" : "slate"} />
             </Link>
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {leadTiles}
             {canProduction && (
               <Link to="/new-plans" className="block" title="Plans PPIC has sent to Production that have not cleared Line Clearance yet: start the run and take it through the pre-production steps">
                 <StatTile icon={ClipboardCheck} label="New Plan" value={underProcessPlans} accent={underProcessPlans ? "emerald" : "slate"} />
@@ -763,15 +798,10 @@ export function DashboardPage() {
               </Link>
             )}
             {canProduction && (
-              <Link to="/held-products" className="block" title={`Products PPIC has put on hold, with their batches: hold the batches still in preparation, release them later. ${heldToDecide} batch${heldToDecide === 1 ? "" : "es"} to decide.`}>
-                <StatTile icon={PauseCircle} label="Held Products" value={heldProductCount} accent={heldToDecide ? "amber" : heldProductCount ? "violet" : "slate"} />
-              </Link>
-            )}
-            {canProduction && (
               <Link
                 to="/material-received"
                 className="block"
-                title={prep?.RECEIVE ? `${prep.RECEIVE} batch${prep.RECEIVE === 1 ? "" : "es"} whose material the Day Store has sent: confirm what arrived. Also each batch's material required, received, still to come, in production and available.` : "For each batch: material required, received, still to come, in production and available"}
+                title={prep?.RECEIVE ? `${prep.RECEIVE} batch${prep.RECEIVE === 1 ? "" : "es"} whose material the Store has sent: confirm what arrived. Also each batch's material required, received, still to come, in production and available.` : "For each batch: material required, received, still to come, in production and available"}
               >
                 {/* Waiting for Production's confirmation: the number of batches; otherwise the materials not yet fully received */}
                 <StatTile icon={PackageCheck} label="Material Received" value={prep?.RECEIVE ? prep.RECEIVE : materialsPending} accent={prep?.RECEIVE || materialsPending ? "amber" : "emerald"} />
@@ -783,27 +813,27 @@ export function DashboardPage() {
               </Link>
             )}
             {canProduction && (
-              <Link to="/packaging" className="block" title="Batches that passed Bulk QC: packaging sheet and PM Utilization, then hand over to QA">
+              <Link to="/packaging" className="block" title="Batches that passed Bulk QC: packaging sheet and PM Utilization (saving it sends the batch to QA), then the hand-over to the store">
                 <StatTile icon={PackageCheck} label="Packaging" value={packagingOpen} accent={packagingOpen ? "amber" : "slate"} />
               </Link>
             )}
             {canProduction && (
-              <Link to="/plant-stock" className="block" title={`What your Plant holds of each material: reserved for batches, free, and leftover to send back to the Day Store. ${plantLeftover} with leftover to send back.`}>
-                <StatTile icon={Factory} label="Plant Stock" value={plantStockItems} accent={plantLeftover ? "violet" : plantStockItems ? "emerald" : "slate"} />
-              </Link>
-            )}
-            {canProduction && (
-              <Link to="/extra-material" className="block" title="Ask your Plant's Day Store for material that is not in any plan, and follow it until it reaches the Plant">
-                <StatTile icon={PackagePlus} label="Extra Material" value={extraOpen} accent={extraOpen ? "violet" : "slate"} />
-              </Link>
-            )}
-            {canProduction && (
-              <Link to="/handover" className="block" title="Batches whose packaging is complete: hand them over to QA">
+              <Link to="/handover" className="block" title="Batches QA has approved after packaging: hand them over to the store">
                 <StatTile icon={Truck} label="Handover" value={handoverReady} accent={handoverReady ? "emerald" : "slate"} />
               </Link>
             )}
             {canProduction && (
-              <Link to="/production-report" className="block" title="The full report of each product: batches, shifts, manpower, output, material and hand-over to Dispatch">
+              <Link to="/plant-stock" className="block" title={`What your Plant holds of each material: reserved for batches, free, and leftover to send back to the Store. ${plantLeftover} with leftover to send back.`}>
+                <StatTile icon={Factory} label="Plant Stock" value={plantStockItems} accent={plantLeftover ? "violet" : plantStockItems ? "emerald" : "slate"} />
+              </Link>
+            )}
+            {canProduction && (
+              <Link to="/extra-material" className="block" title="Ask your Plant's Store for material that is not in any plan, and follow it until it reaches the Plant">
+                <StatTile icon={PackagePlus} label="Extra Material" value={extraOpen} accent={extraOpen ? "violet" : "slate"} />
+              </Link>
+            )}
+            {canProduction && (
+              <Link to="/production-report" className="block" title="One sheet, a row for each batch by day: shift, hours, planned and produced quantity, manpower, efficiency and yield. Filter any column and download it as Excel">
                 <StatTile icon={ClipboardList} label="Production Report" value={reportProducts} accent="violet" />
               </Link>
             )}
@@ -812,8 +842,13 @@ export function DashboardPage() {
                 <StatTile icon={Wrench} label="Rework" value={crSummary?.inRework ?? 0} accent={crSummary?.inRework ? "amber" : "slate"} />
               </Link>
             )}
+            {canProduction && (
+              <Link to="/held-products" className="block" title={`Products PPIC has put on hold, with their batches: hold the batches still in preparation, release them later. ${heldToDecide} batch${heldToDecide === 1 ? "" : "es"} to decide.`}>
+                <StatTile icon={PauseCircle} label="Held Products" value={heldProductCount} accent={heldToDecide ? "amber" : heldProductCount ? "violet" : "slate"} />
+              </Link>
+            )}
             {canDispatchTile && (
-              <Link to="/finished-goods-dispatch" className="block" title="Finished goods the Day Store has handed over: send them to the customer or, after the Warehouse accepts, to the Warehouse">
+              <Link to="/finished-goods-dispatch" className="block" title="Finished goods the Store has handed over: send them to the customer or, after the Warehouse accepts, to the Warehouse">
                 <StatTile icon={PackageCheck} label="Finished Goods" value={fgDispatch?.length ?? 0} accent={fgDispatch?.length ? "emerald" : "slate"} />
               </Link>
             )}

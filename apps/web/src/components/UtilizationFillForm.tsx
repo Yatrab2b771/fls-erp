@@ -8,8 +8,8 @@ import { useToast } from "./Toast";
 
 // The Utilization of a whole batch. Production gives the four numbers of the batch (Produced, Waste, Reject, Sample); every plan material's
 // row fills itself from them (that material's share of the batch plan x what was entered). Each cell can still be edited and extra materials
-// added BEFORE saving; the totals, the Difference and the yield follow whatever is in the table. RM is filled after Bulk QC, before Packaging
-// starts; PM after Packaging. Both can be edited again until the batch is handed over to QA.
+// added BEFORE saving; the totals, the Difference and the yield follow whatever is in the table. RM is filled while the batch is in production (before its end time); a batch that reached Packaging without it fills it there
+// starts; PM after Packaging. Both can be edited again until the batch is sent to QA.
 
 type Cells = { a: string; b: string; c: string; d: string };
 type Row = Cells & { itemId: string; name: string; unit: string; given: number; required: number; inPlan: boolean; edited: boolean };
@@ -53,8 +53,13 @@ export function UtilizationFillForm({ batch, category, plantId, canEdit }: { bat
       return { itemId: i.itemId, name: i.itemName, unit: i.unit, given: i.givenQty, required: i.requiredQty, inPlan: true, edited: sheet ? differs(cells.a, auto.a) || differs(cells.b, auto.b) || differs(cells.c, auto.c) || differs(cells.d, auto.d) : true, ...cells };
     });
     const planIds = new Set(planItems.map((i) => i.itemId));
-    const extraRows = entries.filter((e) => !planIds.has(e.itemId)).map((e): Row => ({ itemId: e.itemId, name: e.itemName, unit: e.unit, given: 0, required: 0, inPlan: false, edited: true, a: show(e.consumedQty), b: show(e.wastedQty), c: show(e.rejectedQty), d: show(e.sampleQty) }));
-    return [...planRows, ...extraRows];
+    // Extra material: what was saved on the batch, plus what the Store issued for it as an extra request (listed even before any of it is used)
+    const askedExtra = util.extraItems.filter((x) => x.category === category && !planIds.has(x.itemId));
+    const givenExtra = (id: string) => askedExtra.find((x) => x.itemId === id)?.givenQty ?? 0;
+    const extraRows = entries.filter((e) => !planIds.has(e.itemId)).map((e): Row => ({ itemId: e.itemId, name: e.itemName, unit: e.unit, given: givenExtra(e.itemId), required: 0, inPlan: false, edited: true, a: show(e.consumedQty), b: show(e.wastedQty), c: show(e.rejectedQty), d: show(e.sampleQty) }));
+    const savedIds = new Set(entries.map((e) => e.itemId));
+    const issuedOnly = askedExtra.filter((x) => !savedIds.has(x.itemId)).map((x): Row => ({ itemId: x.itemId, name: x.itemName, unit: x.unit, given: x.givenQty, required: 0, inPlan: false, edited: true, a: "", b: "", c: "", d: "" }));
+    return [...planRows, ...extraRows, ...issuedOnly];
   });
   const [pick, setPick] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +86,7 @@ export function UtilizationFillForm({ batch, category, plantId, canEdit }: { bat
   const produced = num(top.produced);
   const accounted = produced + num(top.waste) + num(top.reject) + num(top.sample);
   const diffOf = (r: Row) => {
-    if (!r.inPlan || r.given <= 0) return null;
+    if (r.given <= 0) return null;
     return r3(r.given - (num(r.a) + num(r.b) + num(r.c) + num(r.d)));
   };
 
@@ -129,9 +134,9 @@ export function UtilizationFillForm({ batch, category, plantId, canEdit }: { bat
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className={`text-xs font-bold ${part.complete && sheet ? "text-emerald-700" : "text-amber-700"}`}>
           {part.complete && sheet
-            ? `${category} Utilization is saved. ${isRm ? "Packaging is open now." : "Packaging status Completed and Handover are open now."} You can edit it until the batch is handed over to QA.`
+            ? `${category} Utilization is saved. ${isRm ? "The end date and time, status, remarks and Send to Packaging are open now." : "Packaging status Completed and Handover are open now."} You can edit it until the batch is handed over to QA.`
             : isRm
-              ? "Enter what the whole batch produced, wasted, rejected and gave as sample. Every material fills itself from the plan; change anything or add an extra material, then Save. Packaging opens after this."
+              ? "Enter what the whole batch produced, wasted, rejected and gave as sample. Every material fills itself from the plan; change anything or add an extra material, then Save. The end date and time open after this."
               : "Enter the packs made, wasted, rejected and given as sample. Every packaging material fills itself from the plan; change anything or add an extra material, then Save."}
         </p>
         {canEdit && hasEdited && (
@@ -179,7 +184,7 @@ export function UtilizationFillForm({ batch, category, plantId, canEdit }: { bat
                 <tr key={r.itemId} className={r.inPlan ? "" : "bg-orange-50/40"}>
                   <td className="px-3 py-1.5 font-bold text-slate-700">
                     {r.name}
-                    {!r.inPlan && <span className="ml-1.5 rounded-full border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-micro font-bold text-rose-700">Extra · not in plan</span>}
+                    {!r.inPlan && <span className="ml-1.5 rounded-full border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-micro font-bold text-rose-700">{r.given > 0 ? "Extra · asked for this batch" : "Extra · not in plan"}</span>}
                     {r.inPlan && r.edited && <span className="ml-1.5 text-micro font-normal text-slate-400">edited</span>}
                   </td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-500">{r.given > 0 ? `${r3(r.given)} ${r.unit}` : "—"}</td>

@@ -956,22 +956,27 @@ inventoryRouter.get("/transactions/:id/export.pdf", requireRole("STORE", "QA_QC"
 // ISSUED_PRODUCTION is excluded — see the same note on POST /transactions
 // below; a spreadsheet row can't carry an approved Material Request. ---
 
+// Everything the Warehouse issues to a Store is in transit until the Store receives it (Stock Received, or Inventory -> In Transit): it leaves the
+// Warehouse's stock at once but only counts at the Store once the Store has confirmed what arrived. (Store -> Plant issues keep it optional.)
+const warehouseIssueToStore = (type: string) => type === "ISSUED_DAY_STORE";
+
 inventoryRouter.post("/transactions/import", requireRole("STORE"), validateBody(importInventoryTransactionsSchema), async (req: AuthedRequest, res, next) => {
   try {
-    const { type, rows, dayStoreId, isTransitTracked } = req.body as ImportInventoryTransactionsInput;
+    const { type, rows, dayStoreId, isTransitTracked: askedTransit } = req.body as ImportInventoryTransactionsInput;
+    const isTransitTracked = warehouseIssueToStore(type) ? true : askedTransit;
 
     if (type === "ISSUED_PRODUCTION" && !req.user!.roles.includes("ADMIN")) {
       return res.status(400).json({ error: "Issued to Production entries must come from an approved Material Request — see the Material Requests tab." });
     }
     if (dayStoreId && type !== "ISSUED_DAY_STORE") {
-      return res.status(400).json({ error: "Day Store only applies to Issued to Day Store rows." });
+      return res.status(400).json({ error: "Store only applies to Issued to Store rows." });
     }
-    if (isTransitTracked && type !== "ISSUED_DAY_STORE") {
-      return res.status(400).json({ error: "Transit tracking only applies to Issued to Day Store rows in a bulk import." });
+    if (askedTransit && type !== "ISSUED_DAY_STORE") {
+      return res.status(400).json({ error: "Transit tracking only applies to Issued to Store rows in a bulk import." });
     }
     if (dayStoreId) {
       const dayStore = await prisma.dayStore.findUnique({ where: { id: dayStoreId } });
-      if (!dayStore) return res.status(400).json({ error: "Unknown Day Store" });
+      if (!dayStore) return res.status(400).json({ error: "Unknown Store" });
     }
 
     // Resolve every distinct (category, name) pair to an item id up front,
@@ -1131,7 +1136,7 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     let ownPlantId: string | undefined;
     if (rest.type === "ISSUED_PRODUCTION") {
       if (!rest.dayStoreId) {
-        return res.status(400).json({ error: "Material goes to a Plant only from a Day Store - pick the Day Store it is coming out of. The Warehouse does not issue to a Plant." });
+        return res.status(400).json({ error: "Material goes to a Plant only from a Store - pick the Store it is coming out of. The Warehouse does not issue to a Plant." });
       }
       try {
         ownPlantId = await resolveOwnPlant(prisma, rest.dayStoreId, null);
@@ -1146,7 +1151,7 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
     // Direct-to-store receiving was removed — a Material Received row
     // always goes through the Warehouse now, same as every other item.
     if (rest.dayStoreId && rest.type === "RECEIVED") {
-      return res.status(400).json({ error: "Material Received entries go through the Warehouse — Day Store only applies to Issued to Day Store rows." });
+      return res.status(400).json({ error: "Material Received entries go through the Warehouse — Store only applies to Issued to Store rows." });
     }
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
@@ -1176,9 +1181,9 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
       // the destination (see POST /transactions/:id/confirm-delivery);
       // everything else is "delivered" the same instant it's created,
       // exactly today's behavior (see schema.prisma comment).
-      isTransitTracked: !!rest.isTransitTracked,
-      deliveredAt: rest.isTransitTracked ? null : new Date(),
-      deliveredById: rest.isTransitTracked ? null : req.user!.id,
+      isTransitTracked: !!rest.isTransitTracked || warehouseIssueToStore(rest.type),
+      deliveredAt: rest.isTransitTracked || warehouseIssueToStore(rest.type) ? null : new Date(),
+      deliveredById: rest.isTransitTracked || warehouseIssueToStore(rest.type) ? null : req.user!.id,
     };
 
     // Same live-stock gate as /requests/:id/issue — a direct Day Store
@@ -1234,7 +1239,7 @@ inventoryRouter.post("/transactions", requireRole("STORE"), validateBody(createI
         notifyFailed(req, "inventory.material_received"),
       );
     }
-    if (rest.isTransitTracked) {
+    if (rest.isTransitTracked || warehouseIssueToStore(rest.type)) {
       await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
 
@@ -1935,8 +1940,8 @@ inventoryRouter.patch("/requests/:id/review", requireRole("STORE"), validateBody
  */
 async function resolveOwnPlant(db: Pick<typeof prisma, "plant">, dayStoreId: string, plantId: string | null): Promise<string> {
   const own = await db.plant.findUnique({ where: { dayStoreId }, select: { id: true } });
-  if (!own) throw new RouteError(400, "That Day Store has no Plant of its own to issue to.");
-  if (plantId && plantId !== own.id) throw new RouteError(400, "A Day Store can only issue to its own Plant.");
+  if (!own) throw new RouteError(400, "That Store has no Plant of its own to issue to.");
+  if (plantId && plantId !== own.id) throw new RouteError(400, "A Store can only issue to its own Plant.");
   return own.id;
 }
 
@@ -1963,7 +1968,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
       // Filling a Day Store's request is the Warehouse's job (a Day Store login cannot issue to itself), and it
       // always goes to the store that asked.
       if (existing.purpose === "ISSUED_DAY_STORE") {
-        if ((await getScopedDayStoreIds(req.user!.id, req.user!.roles)) !== null) throw new RouteError(403, "Only the Warehouse issues material to a Day Store.");
+        if ((await getScopedDayStoreIds(req.user!.id, req.user!.roles)) !== null) throw new RouteError(403, "Only the Warehouse issues material to a Store.");
         if (existing.requestingDayStoreId) data.dayStoreId = existing.requestingDayStoreId;
       }
 
@@ -1978,7 +1983,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
       let plantId = existing.plantId;
       if (toProduction) {
         if (!data.dayStoreId) {
-          throw new RouteError(400, "Material goes to a Plant only from a Day Store - pick the Day Store it is coming out of. The Warehouse does not issue to a Plant.");
+          throw new RouteError(400, "Material goes to a Plant only from a Store - pick the Store it is coming out of. The Warehouse does not issue to a Plant.");
         }
         plantId = await resolveOwnPlant(tx, data.dayStoreId, plantId);
       }
@@ -2020,7 +2025,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         const dayStoreOnHand = await getOnHandByDayStoreAndItem(data.dayStoreId, [existing.itemId], tx);
         const storeStock = dayStoreOnHand.get(existing.itemId)?.onHand ?? 0;
         if (data.quantity > storeStock) {
-          throw new RouteError(409, `Only ${storeStock} ${data.unit} actually on hand at that Day Store — can't issue more than what's there.`);
+          throw new RouteError(409, `Only ${storeStock} ${data.unit} actually on hand at that Store — can't issue more than what's there.`);
         }
       }
 
@@ -2033,7 +2038,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         if (allowedVendors && rule) {
           const approved = toProduction ? await approvedStoreStock(tx, existing.itemId, allowedVendors, data.dayStoreId!) : await approvedWarehouseStock(tx, existing.itemId, allowedVendors);
           if (data.quantity > approved + 1e-9) {
-            throw new RouteError(409, `This product may only use ${rule.vendorNames.join(" / ")} for this material. ${toProduction ? "The Day Store" : "The Warehouse"} holds only ${Math.round(approved * 1000) / 1000} ${data.unit} from ${rule.vendorNames.length === 1 ? "that vendor" : "those vendors"} - can't issue ${data.quantity}. Ask R&D to allow another vendor, or wait for the approved vendor's material.`);
+            throw new RouteError(409, `This product may only use ${rule.vendorNames.join(" / ")} for this material. ${toProduction ? "The Store" : "The Warehouse"} holds only ${Math.round(approved * 1000) / 1000} ${data.unit} from ${rule.vendorNames.length === 1 ? "that vendor" : "those vendors"} - can't issue ${data.quantity}. Ask R&D to allow another vendor, or wait for the approved vendor's material.`);
           }
         }
       }
@@ -2057,9 +2062,9 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
           plantId,
           // Transit gate — same as a direct POST /transactions entry;
           // see createInventoryTransactionSchema's isTransitTracked.
-          isTransitTracked: !!data.isTransitTracked,
-          deliveredAt: data.isTransitTracked ? null : new Date(),
-          deliveredById: data.isTransitTracked ? null : req.user!.id,
+          isTransitTracked: !!data.isTransitTracked || warehouseIssueToStore(existing.purpose),
+          deliveredAt: data.isTransitTracked || warehouseIssueToStore(existing.purpose) ? null : new Date(),
+          deliveredById: data.isTransitTracked || warehouseIssueToStore(existing.purpose) ? null : req.user!.id,
         },
         include: txnInclude,
       });
@@ -2086,7 +2091,7 @@ inventoryRouter.post("/requests/:id/issue", requireRole("STORE"), validateBody(i
         : { title: `Partially issued: ${txn.item.name}`, body: `${data.quantity} ${data.unit} now, ${remainingAfter} ${data.unit} still remaining.`, link: issuedLink },
     ).catch(notifyFailed(req, "inventory_request.issued"));
 
-    if (data.isTransitTracked) {
+    if (data.isTransitTracked || warehouseIssueToStore(existing.purpose)) {
       await notifyTransitDispatched({ txn, actorId: req.user!.id, onFail: (label) => notifyFailed(req, label) });
     }
 
@@ -2281,7 +2286,7 @@ inventoryRouter.post("/dispatch-transfers/import", requireRole("STORE"), validat
     });
 
     if (type === "FG" && result.count > 0) {
-      await notifyRoles(["QA_QC"], { title: `${result.count} FG transfer${result.count === 1 ? "" : "s"} awaiting outward QC`, body: "Bulk import from Store.", link: "/inventory" }, req.user!.id).catch(
+      await notifyRoles(["QA_QC"], { title: `${result.count} FG transfer${result.count === 1 ? "" : "s"} awaiting outward QC`, body: "Bulk import from Warehouse.", link: "/inventory" }, req.user!.id).catch(
         notifyFailed(req, "inventory.dispatch_transfers_imported"),
       );
     }

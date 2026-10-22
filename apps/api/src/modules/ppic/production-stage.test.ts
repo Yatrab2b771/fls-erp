@@ -19,7 +19,7 @@ describe("productionStageOf: the one rule for where a product sent to Production
     }
   });
 
-  it("is Finished goods once past the packaging gate, until the Day Store hands it to Dispatch", () => {
+  it("is Finished goods once past the packaging gate, until the Store hands it to Dispatch", () => {
     for (const s of ["FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"]) {
       expect(productionStageOf({ planSentToProductionAt: sent, quantity: 100, batches: [batch(s)] })).toBe("FINISHED_GOODS");
     }

@@ -8,6 +8,7 @@ import { actorCanActOnStage, COMBINED_LOT_STAGE_LABEL, COMBINED_LOT_STAGE_ROLE, 
 import { notifyPlantDayStore } from "../inventory/plan-requests";
 import { PRODUCTION_BATCH_STAGE_FIELD_SCHEMA } from "./batch.schemas";
 import { checkMassBalance } from "./mass-balance";
+import { backWithProduction, EARLY_QA_STAGES } from "./batch-pipeline";
 import type { Prisma, ProductionBatch, RoleName } from "@prisma/client";
 
 // --- The forward/reject transition for a ProductionBatch's OWN Tier-3
@@ -35,7 +36,19 @@ export async function transitionProductionBatchStage(params: {
 }): Promise<TransitionProductionBatchStageResult> {
   const { batch, action, note, rawBody, actorId, actorRoles } = params;
 
-  if (batch.status !== "COMPLETED") {
+  // A per-batch-flow batch goes through In-Process QA, the QA Gate and Bulk QC as soon as it has started (it is still in production then);
+  // from Packaging on it must have been sent to Packaging (completed). A batch of an older run is completed before it enters any of them.
+  const run = await prisma.preProduction.findUnique({ where: { id: batch.preProductionId }, select: { batchFlow: true } });
+  if (run?.batchFlow) {
+    if (batch.status !== "COMPLETED") {
+      if (!batch.shift || !batch.manpowerCount || !batch.shiftStartAt) {
+        return { ok: false, status: 409, error: "This batch has not started yet: Production fills its start fields (shift, manpower, start date and time) first." };
+      }
+      if (!(EARLY_QA_STAGES as readonly string[]).includes(batch.currentStageId)) {
+        return { ok: false, status: 409, error: "Production has to send this batch to Packaging first (fill its RM Utilization and end time)." };
+      }
+    }
+  } else if (batch.status !== "COMPLETED") {
     return { ok: false, status: 409, error: "This run needs to be completed (output quantity recorded) before it can move through QC/packaging/dispatch." };
   }
 
@@ -76,6 +89,11 @@ export async function transitionProductionBatchStage(params: {
 
   // QA approves the finished goods (held by the Day Store): only a real Approved releases them to be handed over to Dispatch.
   const isFgNotApproved = action === "FORWARD" && currentStage === "FG_QC_RELEASE" && (fieldData.fgQaStatus ?? batch.fgQaStatus) !== "Approved";
+
+  // The Day Store receives the finished goods only once Production has handed them over to the store.
+  if (action === "FORWARD" && currentStage === "FG_STORE" && !batch.handedToStoreAt) {
+    return { ok: false, status: 409, error: "Production has not handed these finished goods over to the store yet." };
+  }
 
   const isIpqcBlocked = action === "FORWARD" && currentStage === "IPQC" && (fieldData.ipqcStatus ?? batch.ipqcStatus) !== "Approved";
   const isBulkQcBlocked = action === "FORWARD" && currentStage === "BULK_QC" && (fieldData.bulkQcStatus ?? batch.bulkQcStatus) !== "Approved";
@@ -129,7 +147,8 @@ export async function transitionProductionBatchStage(params: {
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.productionBatch.update({
       where: { id: batch.id },
-      data: { ...(fieldData as Prisma.ProductionBatchUpdateInput), currentStageId: effectiveTarget },
+      // (QA approving the packaging gate puts the goods at FG Store but not yet in the Day Store's hands: that is Production's hand-over)
+      data: { ...(fieldData as Prisma.ProductionBatchUpdateInput), currentStageId: effectiveTarget, ...(effectiveTarget === "FG_STORE" && currentStage === "QA_GATE_PACKAGING" ? { handedToStoreAt: null } : {}) },
       include: productionBatchInclude,
     });
     // A QA gate's rejected and wasted quantities go to the Recycle Store (waste gone for good; rejected held for a decision), so
@@ -152,7 +171,8 @@ export async function transitionProductionBatchStage(params: {
     // A QA gate that takes quantity out (rejected, wasted) lowers what the batch counts for in the run's "made so far": the run's
     // shortfall, and Close short, then see what QA actually passed. Worked out from the batch before and after, so a gate that is cleared
     // again, or a batch sent back, never counts twice.
-    const delta = goodQtyOf(row) - goodQtyOf(batch);
+    // (A batch still in production adds to "made so far" when it is sent to Packaging, by what is good then: nothing to adjust before.)
+    const delta = batch.status === "COMPLETED" ? goodQtyOf(row) - goodQtyOf(batch) : 0;
     if (Math.abs(delta) > 1e-9) {
       const run = await tx.preProduction.findUnique({ where: { id: row.preProductionId }, select: { combinedQty: true, batchFlow: true } });
       if (run?.batchFlow) await tx.preProduction.update({ where: { id: row.preProductionId }, data: { combinedQty: Math.max(0, Math.round((run.combinedQty + delta) * 1000) / 1000) } });
@@ -172,11 +192,14 @@ export async function transitionProductionBatchStage(params: {
     const productName = updated.preProduction.purchaseOrderItem.productName;
     const content = {
       title: `${productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}) is now at ${COMBINED_LOT_STAGE_LABEL[effectiveTarget]}`,
-      body: action === "REJECT" ? `Sent back: ${note}` : "Production batch in progress.",
-      link: effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER" ? "/my-store/finished-goods" : `/production-batches/${updated.id}`,
+      body: action === "REJECT" ? `Sent back: ${note}` : backWithProduction(updated) ? "Bulk QC has passed: fill the RM Utilization and the end time, then send it to Packaging." : "Production batch in progress.",
+      link: effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER" ? "/my-store/finished-goods" : backWithProduction(updated) ? "/batches" : `/production-batches/${updated.id}`,
     };
-    // The finished goods sit with the Day Store of the batch's Plant, so it (not every Store seat) is told.
-    if (effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER") {
+    // QA approved the packed goods: Production is told to hand them over to the store.
+    if (effectiveTarget === "FG_STORE" && currentStage === "QA_GATE_PACKAGING") {
+      await notifyRoles(["PRODUCTION"], { title: `${productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}): QA approved the packed goods`, body: "Hand them over to the store.", link: "/handover" }, actorId).catch((err) => logger.error({ err }, "notify failed: production_batch.qa_approved"));
+    } else if (effectiveTarget === "FG_STORE" || effectiveTarget === "FG_HANDOVER") {
+      // The finished goods sit with the Day Store of the batch's Plant, so it (not every Store seat) is told.
       const plant = updated.preProduction.plantId ? await prisma.plant.findUnique({ where: { id: updated.preProduction.plantId }, select: { dayStoreId: true } }) : null;
       await notifyPlantDayStore(plant?.dayStoreId, content, actorId).catch((err) => logger.error({ err }, "notify failed: production_batch.transition.day_store"));
     } else {

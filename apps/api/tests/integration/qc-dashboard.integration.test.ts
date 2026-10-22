@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, sendPlanToProduction } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -12,6 +13,7 @@ async function createApprovedPoItem(bdToken: string) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -26,8 +28,9 @@ async function createFreshCombinedLot(itemId: string, tokens: { production: stri
   await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
   const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, plannedQty: 100 })).body;
   await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: 100 });
-  const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
-  return completed.body.combinedLot as { id: string };
+  await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
+  // A completed batch no longer combines into a lot by itself (see production-batches.routes.ts); the lot is made directly
+  return prisma.combinedLot.create({ data: { preProductionId: run.id } });
 }
 
 // One aggregate view over every QC checkpoint — see qc.routes.ts. Nothing

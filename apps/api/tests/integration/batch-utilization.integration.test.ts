@@ -26,7 +26,7 @@ async function setup() {
   return { production, user, run, material };
 }
 
-describe("Batch Utilization books the material the Day Store dispensed to the run", () => {
+describe("Batch Utilization books the material the Store dispensed to the run", () => {
   it("takes a batch's usage out of the Dispensing pool (no new stock needed); only what goes beyond the pool has to be on hand at the Plant", async () => {
     const { production, user, run, material } = await setup();
     const item = await prisma.inventoryItem.create({ data: { category: "RM", name: material, unit: "Kg" } });

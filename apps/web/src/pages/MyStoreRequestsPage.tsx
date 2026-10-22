@@ -35,7 +35,7 @@ export function MyStoreRequestsPage() {
     setError(null);
     if (!itemId) return setError("Choose the item you need.");
     if (!qty || Number(qty) <= 0) return setError("Enter a quantity greater than zero.");
-    if (stores.length > 1 && !dayStoreId) return setError("Choose which Day Store this is for.");
+    if (stores.length > 1 && !dayStoreId) return setError("Choose which Store this is for.");
     try {
       await create.mutateAsync({ itemId, requestedQty: Number(qty), neededBy: neededBy || undefined, note: note.trim() || undefined, dayStoreId: dayStoreId || undefined });
       toast.success("Request sent to the Warehouse.");
@@ -81,7 +81,7 @@ export function MyStoreRequestsPage() {
           </div>
           {stores.length > 1 && (
             <div>
-              <label className="label">Day Store</label>
+              <label className="label">Store</label>
               <select className="field" value={dayStoreId} onChange={(e) => setDayStoreId(e.target.value)}>
                 <option value="">— Select —</option>
                 {stores.map((s) => (

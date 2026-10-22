@@ -217,7 +217,7 @@ export function MaterialReceivedPage() {
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Material Received</h1>
             <p className="text-sm text-slate-500">
               {groups.length.toLocaleString()} batch{groups.length === 1 ? "" : "es"}
-              {isFiltered ? ` of ${everyProduct.length}` : ""} — how much of each batch's material the Day Store has dispensed to you. When material has been sent, press Receive and confirm what arrived. Open Materials on a row for the line-by-line detail.
+              {isFiltered ? ` of ${everyProduct.length}` : ""} — how much of each batch's material the Store has dispensed to you. When material has been sent, press Receive and confirm what arrived. Open Materials on a row for the line-by-line detail.
             </p>
           </div>
         </div>
@@ -336,7 +336,7 @@ export function MaterialReceivedPage() {
                                   <th className="px-3 py-2">Material</th>
                                   <th className="px-3 py-2">Category</th>
                                   <th className="px-3 py-2 text-right" title="Needed for the part PPIC has released">Required</th>
-                                  <th className="px-3 py-2 text-right" title="Issued by the Day Store and received at the Plant">Received</th>
+                                  <th className="px-3 py-2 text-right" title="Issued by the Store and received at the Plant">Received</th>
                                   <th className="px-3 py-2 text-right" title="Issued but not yet received at the Plant">In Transit</th>
                                   <th className="px-3 py-2 text-right" title="Required - Received - In transit">Still to come</th>
                                   <th className="px-3 py-2 text-right" title="A + B + C + D - E: used in production, wastage, rejected, sample, minus what went back to the store">In Production</th>

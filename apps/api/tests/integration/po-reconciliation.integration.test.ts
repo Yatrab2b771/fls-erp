@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, receiveAcceptedStock, sendPlanToProduction, adminToken, advanceRunToDispensing, confirmPlantReceipts, issueToPlant } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -13,6 +14,7 @@ async function createApprovedPo(bdToken: string, poNumber: string, quantity: num
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Recon Product", productCategory: "Powder", quantity, unit }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return { poId: po.body.id as string, itemId: po.body.items[0].id as string };
 }
 
@@ -40,10 +42,7 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
     // Get real stock into this run's Plant — same Material Request ->
     // approve -> issue flow every other Dispensing test in this suite uses.
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Recon Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Recon Plant" });
     await request(app).patch(`/api/pre-productions/${runId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
     const mr = await request(app)
@@ -51,17 +50,16 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
       .set(authHeader(ppicToken))
       .send({ itemId: item.body.id, category: "RM", requestedQty: 100, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${mr.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${mr.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 100, dayStoreId: null });
+    await issueToPlant(storeToken, mr.body.id, { date: "2026-08-01", unit: "Kg", quantity: 100 });
 
     // Walk to Dispensing.
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // -> INDENT_ISSUE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" }); // -> LINE_CLEARANCE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" }); // -> DISPENSING
+    await confirmPlantReceipts();
+    await advanceRunToDispensing(runId);
 
     // The 3-way split: 70 Production, 20 Sample, 10 Waste (all 100 Kg accounted for).
     const dispensed = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(await adminToken()))
       .send({
         action: "FORWARD",
         consumption: [
@@ -88,8 +86,7 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
     expect(sampleQc.body.currentStageId).toBe("SAMPLE_QC_APPROVAL"); // completes in place
 
     // Tier 2 — one ProductionBatch covering the whole planned 100 Kg,
-    // completed with no self-reported wastage so combinedQty reaches
-    // plannedQty and the CombinedLot is created automatically.
+    // completed with no self-reported wastage so combinedQty reaches plannedQty.
     const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app)
       .patch(`/api/production-batches/${pb.id}`)
@@ -97,8 +94,8 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
       .send({ manufacturingStartDate: "2026-08-05", manufacturingEndDate: "2026-08-06", manufacturingStatus: "Completed", inputQty: 100, outputQty: 100 });
     const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
     expect(completed.status).toBe(200);
-    const lot = completed.body.combinedLot as { id: string; currentStageId: string };
-    expect(lot).not.toBeNull();
+    // A completed batch no longer combines into a lot by itself; the lot (which has its own stage routes) is made directly
+    const lot = await prisma.combinedLot.create({ data: { preProductionId: runId } });
     expect(lot.currentStageId).toBe("IPQC");
 
     await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", ipqcStatus: "Approved" }); // -> QA_GATE_MFG
@@ -112,7 +109,7 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
     expect(mfgGate.body.currentStageId).toBe("BULK_QC");
     expect(mfgGate.body.mfgWastageQty).toBe(2);
 
-    await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", bulkQcStatus: "Approved" }); // -> PACKAGING
+    await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader((await createUser(["RND"])).token)).send({ action: "FORWARD", bulkQcStatus: "Approved" }); // -> PACKAGING (Bulk QC is R&D's step)
 
     // Packaging, then QA Gate Packaging — same split, its own numbers.
     await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(productionToken)).send({ action: "FORWARD", packagingStatus: "Completed" }); // -> QA_GATE_PACKAGING
@@ -121,7 +118,12 @@ describe("GET /api/purchase-orders/:id/reconciliation", () => {
       .set(authHeader(qaToken))
       .send({ action: "FORWARD", packQaStatus: "Approved", packQcStatus: "Approved", packApprovedQty: 55, packRejectedQty: 3, packWastageQty: 2 });
     expect(packGate.status).toBe(200);
-    expect(packGate.body.currentStageId).toBe("BILLING_EWAY_BILL");
+    expect(packGate.body.currentStageId).toBe("FG_STORE");
+
+    // The finished goods are received by the Day Store and released by QA before Billing
+    await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // -> FG_QC_RELEASE
+    const fgRelease = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", fgQaStatus: "Approved", fgQcStatus: "Approved" });
+    expect(fgRelease.body.currentStageId).toBe("BILLING_EWAY_BILL");
 
     // Both gates' Wastage buckets landed in the Recycle Store's own
     // per-lot ledger — one row per gate that actually cleared.

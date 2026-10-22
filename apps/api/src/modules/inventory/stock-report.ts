@@ -245,7 +245,7 @@ export async function loadItemEntries(locations: ReportLocation[], names: Map<st
     });
   }
   for (const r of issued) {
-    if (r.type === "ISSUED_DAY_STORE") push({ date: r.date, label: "Issued to Day Store", fromKey: "warehouse", toKey: store(r.dayStoreId), qty: r.quantity, unit: r.unit, batchNo: r.batchNo, grnNo: r.grnNo, mfgDate: r.mfgDate, expiryDate: r.expiryDate, reference: r.remark });
+    if (r.type === "ISSUED_DAY_STORE") push({ date: r.date, label: "Issued to Store", fromKey: "warehouse", toKey: store(r.dayStoreId), qty: r.quantity, unit: r.unit, batchNo: r.batchNo, grnNo: r.grnNo, mfgDate: r.mfgDate, expiryDate: r.expiryDate, reference: r.remark });
     else if (r.type === "ISSUED_RND") push({ date: r.date, label: "Issued to R&D Store", fromKey: "warehouse", toKey: "rnd", qty: r.quantity, unit: r.unit, batchNo: r.batchNo, reference: r.remark });
     else push({ date: r.date, label: "Issued to Plant", fromKey: store(r.dayStoreId), toKey: plant(r.plantId), qty: r.quantity, unit: r.unit, batchNo: r.batchNo, reference: r.remark });
   }

@@ -71,7 +71,7 @@ export function PlantStockPage() {
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Plant Stock</h1>
             <p className="text-sm text-slate-500">
               {rows.length.toLocaleString()} material{rows.length === 1 ? "" : "s"}
-              {isFiltered ? ` of ${everyRow.length}` : ""} at the Plant{pendingTotal > 0 ? ` · ${pendingTotal} with leftover to send back` : ""}. Reserved is what batches were given and have not accounted for yet; Free is what a new batch could get. Leftover (E) from a batch stays here until you send it back to the Day Store.
+              {isFiltered ? ` of ${everyRow.length}` : ""} at the Plant{pendingTotal > 0 ? ` · ${pendingTotal} with leftover to send back` : ""}. Reserved is what batches were given and have not accounted for yet; Free is what a new batch could get. Leftover (E) from a batch stays here until you send it back to the Store.
             </p>
           </div>
         </div>
@@ -91,7 +91,7 @@ export function PlantStockPage() {
         </div>
         <div>
           <p className="font-bold text-emerald-700">Free = On hand − Reserved</p>
-          <p className="text-slate-500">Not any batch's. It can go to a new batch, or you can send it back to the Day Store with "Send back".</p>
+          <p className="text-slate-500">Not any batch's. It can go to a new batch, or you can send it back to the Store with "Send back".</p>
         </div>
         <div>
           <p className="font-bold text-amber-700">Leftover to send back</p>
@@ -104,7 +104,7 @@ export function PlantStockPage() {
       {isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : rows.length === 0 ? (
-        <EmptyState icon={Factory} title={isFiltered ? "Nothing matches these filters" : "No stock at the Plant"} hint="Material shows here once the Day Store has issued it to the Plant." />
+        <EmptyState icon={Factory} title={isFiltered ? "Nothing matches these filters" : "No stock at the Plant"} hint="Material shows here once the Store has issued it to the Plant." />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -176,7 +176,7 @@ function Detail({ row, canReturn, onDone }: { row: PlantStockRow; canReturn: boo
     if (n > row.free + 1e-9) return setError(`Only ${fmtQty(row.free)} ${row.unit} is free: the rest is reserved for batches.`);
     try {
       await send.mutateAsync({ plantId: row.plantId, itemId: row.itemId, quantity: n, note: note.trim() || undefined });
-      toast.success(`${fmtQty(n)} ${row.unit} of ${row.itemName} sent back to the Day Store. It waits for the store to confirm.`);
+      toast.success(`${fmtQty(n)} ${row.unit} of ${row.itemName} sent back to the Store. It waits for the store to confirm.`);
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not send it back");
@@ -185,7 +185,7 @@ function Detail({ row, canReturn, onDone }: { row: PlantStockRow; canReturn: boo
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-[20rem_1fr]">
       <div className="space-y-2.5">
-        <p className="label">Send {row.itemName} back to the Day Store</p>
+        <p className="label">Send {row.itemName} back to the Store</p>
         {canReturn && row.free > 0 ? (
           <>
             <div>
@@ -201,9 +201,9 @@ function Detail({ row, canReturn, onDone }: { row: PlantStockRow; canReturn: boo
             </div>
             {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
             <button type="button" className="btn-primary btn-sm w-full" disabled={send.isPending} onClick={submit}>
-              <Undo2 className="h-3.5 w-3.5" strokeWidth={2.5} /> {send.isPending ? "Sending…" : "Send back to Day Store"}
+              <Undo2 className="h-3.5 w-3.5" strokeWidth={2.5} /> {send.isPending ? "Sending…" : "Send back to Store"}
             </button>
-            <p className="text-micro text-slate-400">The Plant's stock drops now; the Day Store's rises once it confirms.</p>
+            <p className="text-micro text-slate-400">The Plant's stock drops now; the Store's rises once it confirms.</p>
           </>
         ) : (
           <p className="text-xs text-slate-400">{row.free > 0 ? "Production sends material back." : "Nothing is free to send back: all of it is reserved for batches."}</p>

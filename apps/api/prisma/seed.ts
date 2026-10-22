@@ -451,7 +451,7 @@ async function seedBatchPipelineV2Demo(userIds: Partial<Record<RoleName, string>
   });
 
   const plant = await prisma.plant.upsert({ where: { name: "Plant 41" }, create: { name: "Plant 41", createdById: ppicId }, update: {} });
-  const dayStore = await prisma.dayStore.upsert({ where: { name: "Day Store 59" }, create: { name: "Day Store 59", createdById: storeId }, update: {} });
+  const dayStore = await prisma.dayStore.upsert({ where: { name: "Store 59" }, create: { name: "Store 59", createdById: storeId }, update: {} });
 
   // Real inflow to Plant 41 — a Material Request, approved and issued the
   // normal way, so its own real-time balance (not just the Warehouse
@@ -675,7 +675,7 @@ async function seedBatchPipelineV2Demo(userIds: Partial<Record<RoleName, string>
   }
 
   console.log(
-    `Created batch-pipeline-v2 demo: PO "${v2Po}" (Plant 41, Day Store 59) — 1 pre-production run through Sample QC Approval with 2 completed production batches combined into a CombinedLot Held at QA Gate Mfg.`,
+    `Created batch-pipeline-v2 demo: PO "${v2Po}" (Plant 41, Store 59) — 1 pre-production run through Sample QC Approval with 2 completed production batches combined into a CombinedLot Held at QA Gate Mfg.`,
   );
 
   // R&D Store — one small, fully-resolved sample lifecycle so that page

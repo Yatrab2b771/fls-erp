@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, Check, ChevronDown, ClipboardList, Download, Hash, PackageCheck, Pencil, Send } from "lucide-react";
 import { ActionMenu } from "../components/ActionMenu";
-import { ApiError } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useBatchPrepAction, useCorrectBatchNo, usePrepBoard, type BatchPrepRow } from "../lib/hooks";
 import type { BatchPrepStageId } from "../lib/types";
@@ -16,6 +16,7 @@ import { useToast } from "../components/Toast";
 import { fmtQty } from "../lib/format";
 import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport";
 import { CustomerName } from "../components/CustomerName";
+import { ExtraToDispense } from "../components/ExtraToDispense";
 import { customerTypeLabel } from "../lib/customerTags";
 
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
@@ -29,7 +30,7 @@ const STAGE_INFO: Record<Stage, { title: string; tileKey: string; role: "PRODUCT
   INDENT_ISSUE: { title: "Indent Issue", tileKey: "batch-indent", role: "PRODUCTION", icon: ClipboardList, accent: "bg-amber-500/10 text-amber-600", blurb: "Sign the indent of each batch. The materials come from the plan, scaled to the batch's quantity. R&D gives the batch number next.", empty: "A batch shows here once Production has divided a plan into batches (New Plan)." },
   BATCH_NO: { title: "Batch No", tileKey: "batch-no", role: "RND", icon: Hash, accent: "bg-orange-500/10 text-orange-600", blurb: "Allocate the batch number. The system gives the next serial (FLS-26-0001, ...), never repeated. The numbers you have given stay in the list (a number can be changed until the batch is dispensed).", empty: "A batch shows here once Production has signed its indent." },
   DISPENSING: { title: "Dispensing", tileKey: "batch-dispensing", role: "STORE", icon: Send, accent: "bg-emerald-500/10 text-emerald-600", blurb: "Dispense each batch's material to the Plant: only what that batch needs. Production can start the batch once its material is there.", empty: "A batch shows here once R&D has given it a batch number." },
-  RECEIVE: { title: "Receive Material", tileKey: "batch-receive", role: "PRODUCTION", icon: PackageCheck, accent: "bg-sky-500/10 text-sky-600", blurb: "The Day Store has sent each batch's material to the Plant. Confirm what arrived, material by material: all of it, less (say why), or refuse it (it goes back to the Day Store). Production can start the batch once everything is received.", empty: "A batch shows here once the Day Store has dispensed it and sent material to the Plant." },
+  RECEIVE: { title: "Receive Material", tileKey: "batch-receive", role: "PRODUCTION", icon: PackageCheck, accent: "bg-sky-500/10 text-sky-600", blurb: "The Store has sent each batch's material to the Plant. Confirm what arrived, material by material: all of it, less (say why), or refuse it (it goes back to the Store). Production can start the batch once everything is received.", empty: "A batch shows here once the Store has dispensed it and sent material to the Plant." },
 };
 
 export function BatchPrepPage({ stage }: { stage: Stage }) {
@@ -113,6 +114,8 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
           <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
         </button>
       </div>
+
+      {stage === "DISPENSING" && canAct && <ExtraToDispense />}
 
       <TileFilterBar filters={filters} tileKey={info.tileKey} fields={fields} dateLabel="Waiting since" hideDates />
 
@@ -237,9 +240,10 @@ export function BatchPrepPage({ stage }: { stage: Stage }) {
 // How far a weighed quantity may be from the plan before the Day Store has to say why (the server enforces the same 5%).
 const WEIGH_TOLERANCE = 0.05;
 type Weighed = Record<string, { qty: string; note: string }>;
-const deviates = (planned: number, weighed: string) => weighed !== "" && planned > 0 && Math.abs(Number(weighed) - planned) / planned > WEIGH_TOLERANCE;
+// Giving a part of what is left is a partial round; only giving more than what is left (beyond the tolerance) needs a reason.
+const deviates = (left: number, weighed: string) => weighed !== "" && left > 0 && (Number(weighed) - left) / left > WEIGH_TOLERANCE;
 
-function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { values: Weighed; onChange: (itemId: string, patch: Partial<Weighed[string]>) => void; disabled: boolean } }) {
+function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { values: Weighed; onChange: (itemId: string, patch: Partial<Weighed[string]>) => void; disabled: boolean; picked: Record<string, boolean>; onPick: (itemId: string, on: boolean) => void } }) {
   const reqs = row.requirements ?? [];
   return (
     <>
@@ -253,16 +257,18 @@ function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { 
                 <th className="px-3 py-2 text-left">Material</th>
                 <th className="px-3 py-2 text-left">Type</th>
                 <th className="px-3 py-2 text-right">Needed</th>
+                {weighing && <th className="px-3 py-2 text-right">Given so far</th>}
+                {weighing && <th className="px-3 py-2 text-right">Left to give</th>}
                 <th className="px-3 py-2 text-right">Free at Plant</th>
-                <th className="px-3 py-2 text-right">At Day Store</th>
+                <th className="px-3 py-2 text-right">At Store</th>
                 <th className="px-3 py-2 text-left">Status</th>
-                {weighing && <th className="px-3 py-2 text-left">Weighed (if different)</th>}
+                {weighing && <th className="px-3 py-2 text-left">Give now</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {reqs.length === 0 && (
                 <tr>
-                  <td colSpan={weighing ? 7 : 6} className="px-3 py-4 text-center text-slate-400">
+                  <td colSpan={weighing ? 9 : 6} className="px-3 py-4 text-center text-slate-400">
                     No plan material for this product.
                   </td>
                 </tr>
@@ -277,25 +283,28 @@ function RequirementsTable({ row, weighing }: { row: BatchPrepRow; weighing?: { 
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">
                     {fmtQty(m.requiredQty)} {m.unit}
                   </td>
+                  {weighing && <td className="px-3 py-1.5 text-right font-mono text-slate-700">{m.givenQty > 0 ? fmtQty(m.givenQty) : "—"}</td>}
+                  {weighing && <td className="px-3 py-1.5 text-right font-mono text-slate-700">{m.dispensed ? "—" : fmtQty(m.remainingQty)}</td>}
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.plantFreeQty)}</td>
                   <td className="px-3 py-1.5 text-right font-mono text-slate-700">{fmtQty(m.dayStoreQty)}</td>
-                  <td className="px-3 py-1.5">{m.dispensed ? <span className="pill border-sky-200 bg-sky-50 text-sky-700">Already dispensed</span> : m.enough ? <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Available</span> : <span className="pill border-amber-200 bg-amber-50 text-amber-700">Short</span>}</td>
+                  <td className="px-3 py-1.5">{m.dispensed ? <span className="pill border-sky-200 bg-sky-50 text-sky-700">Already dispensed</span> : m.givenQty > 0 && weighing && !weighing.picked[m.itemId] ? <span className="pill border-violet-200 bg-violet-50 text-violet-700">Partly dispensed</span> : m.enough ? <span className="pill border-emerald-200 bg-emerald-50 text-emerald-700">Available</span> : <span className="pill border-amber-200 bg-amber-50 text-amber-700">Short</span>}</td>
                   {weighing && m.dispensed && <td className="px-3 py-1.5 text-slate-300">—</td>}
                   {weighing && !m.dispensed && (
                     <td className="px-3 py-1.5">
                       <div className="flex items-center gap-1.5">
+                        <input type="checkbox" className="h-3.5 w-3.5" checked={weighing.picked[m.itemId] !== false} disabled={weighing.disabled} onChange={(e) => weighing.onPick(m.itemId, e.target.checked)} title="Dispense this material now" />
                         <input
                           type="number"
                           min="0"
                           step="any"
                           className="field !w-24 !py-1 font-mono text-xs"
-                          placeholder={fmtQty(m.requiredQty)}
+                          placeholder={fmtQty(m.remainingQty)}
                           value={weighing.values[m.itemId]?.qty ?? ""}
-                          disabled={weighing.disabled}
+                          disabled={weighing.disabled || weighing.picked[m.itemId] === false}
                           onChange={(e) => weighing.onChange(m.itemId, { qty: e.target.value })}
                         />
                         <span className="text-micro text-slate-400">{m.unit}</span>
-                        {deviates(m.requiredQty, weighing.values[m.itemId]?.qty ?? "") && (
+                        {weighing.picked[m.itemId] !== false && deviates(m.remainingQty, weighing.values[m.itemId]?.qty ?? "") && (
                           <input className="field !w-44 !py-1 text-xs" placeholder="Why different? *" value={weighing.values[m.itemId]?.note ?? ""} disabled={weighing.disabled} onChange={(e) => weighing.onChange(m.itemId, { note: e.target.value })} />
                         )}
                       </div>
@@ -348,7 +357,7 @@ function IndentForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: boolea
       </div>
       <div>
         <RequirementsTable row={row} />
-        <p className="mt-1 text-micro text-slate-400">These quantities come from the plan, scaled to this batch, and are the same ones the Day Store dispenses.</p>
+        <p className="mt-1 text-micro text-slate-400">These quantities come from the plan, scaled to this batch, and are the same ones the Store dispenses.</p>
       </div>
     </div>
   );
@@ -363,7 +372,7 @@ function AllocateCell({ row }: { row: BatchPrepRow }) {
   async function go(batchNo?: string) {
     try {
       const res = await act.mutateAsync({ id: row.id, ...(batchNo ? { batchNo } : {}) });
-      toast.success(`Batch number ${res.batchNo} allocated. The Day Store dispenses next.`);
+      toast.success(`Batch number ${res.batchNo} allocated. The Store dispenses next.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not allocate the batch number");
     }
@@ -458,7 +467,7 @@ export function ReceiveForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct
     try {
       const res = await act.mutateAsync({ id: row.id, lines: body });
       const refused = body.filter((b) => b.action === "REFUSE").length;
-      toast.success(res.prepStageId === "READY" ? `${row.batchNo ?? "Batch"}: material received. Production can start it.` : refused ? "Refused material goes back to the Day Store, which dispenses it again." : "Saved.");
+      toast.success(res.prepStageId === "READY" ? `${row.batchNo ?? "Batch"}: material received. Production can start it.` : refused ? "Refused material goes back to the Store, which dispenses it again." : "Saved.");
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save");
@@ -508,7 +517,7 @@ export function ReceiveForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct
                         <span className="text-micro text-slate-400">{l.unit}</span>
                       </div>
                     ) : (
-                      <span className="text-slate-300">goes back to the Day Store</span>
+                      <span className="text-slate-300">goes back to the Store</span>
                     )}
                   </td>
                   <td className="px-3 py-1.5">
@@ -524,7 +533,7 @@ export function ReceiveForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct
           </tbody>
         </table>
       </div>
-      <p className="text-micro text-slate-400">A material you receive joins the Plant&apos;s stock. A shortage is kept as a recorded loss. A refused material goes back to the Day Store, and the batch returns to Dispensing for that material only.</p>
+      <p className="text-micro text-slate-400">A material you receive joins the Plant&apos;s stock. A shortage is kept as a recorded loss. A refused material goes back to the Store, and the batch returns to Dispensing for that material only.</p>
       {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
       {canAct && (
         <button type="button" className="btn-primary btn-sm" disabled={act.isPending || lines.length === 0} onClick={submit}>
@@ -541,30 +550,50 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
   const [rmDate, setRmDate] = useState(today());
   const [pmDate, setPmDate] = useState(today());
   const [remarks, setRemarks] = useState("");
-  const [grn, setGrn] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The GRN comes from the Generate button, never typed. It is made for this round and checked again when the batch is dispensed.
+  const [grn, setGrn] = useState("");
+  const [generating, setGenerating] = useState(false);
   const reqs = row.requirements ?? [];
-  const short = reqs.filter((m) => !m.enough);
-  // What was actually weighed out, where it differs from the plan. Nothing entered = the plan quantity is given.
+  // A round can give only some of the materials, and only a part of one: the ticked materials, each for the quantity in its box (blank = all that is left).
+  const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [weights, setWeights] = useState<Weighed>({});
   const setWeight = (itemId: string, patch: Partial<Weighed[string]>) =>
     setWeights((w) => {
       const cur = w[itemId] ?? { qty: "", note: "" };
       return { ...w, [itemId]: { ...cur, ...patch } };
     });
+  const todo = reqs.filter((m) => !m.dispensed);
+  const chosen = todo.filter((m) => picked[m.itemId] !== false);
+  const giveNow = (m: (typeof reqs)[number]) => (weights[m.itemId]?.qty ? Number(weights[m.itemId]!.qty) : m.remainingQty);
+  // Only what is being dispensed now has to be available; a material left for later does not hold the others back.
+  const short = chosen.filter((m) => m.plantFreeQty + m.dayStoreQty < giveNow(m) - 1e-9);
+  async function generate() {
+    setError(null);
+    setGenerating(true);
+    try {
+      setGrn((await api<{ grnNo: string }>(`/api/production-batches/${row.id}/grn-preview`)).grnNo);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not generate the GRN");
+    } finally {
+      setGenerating(false);
+    }
+  }
   async function submit() {
     setError(null);
-    const lines = reqs
-      .filter((m) => weights[m.itemId]?.qty)
-      .map((m) => ({ itemId: m.itemId, actualQty: Number(weights[m.itemId]!.qty), note: weights[m.itemId]!.note.trim() || undefined }));
-    const unexplained = reqs.find((m) => deviates(m.requiredQty, weights[m.itemId]?.qty ?? "") && !weights[m.itemId]?.note.trim());
-    if (unexplained) return setError(`Write why ${unexplained.itemName} was weighed different from the plan.`);
+    if (!grn) return setError("Press Generate to make the GRN first.");
+    if (chosen.length === 0) return setError("Tick at least one material to dispense.");
+    const unexplained = chosen.find((m) => deviates(m.remainingQty, weights[m.itemId]?.qty ?? "") && !weights[m.itemId]?.note.trim());
+    if (unexplained) return setError(`Write why you are giving more than what is left of ${unexplained.itemName}.`);
+    const lines = chosen.map((m) => ({ itemId: m.itemId, actualQty: giveNow(m), note: weights[m.itemId]?.note.trim() || undefined }));
     try {
-      await act.mutateAsync({ id: row.id, rmDispensingDate: rmDate, pmIssuedDate: pmDate, dispensingRemarks: remarks || undefined, grnNo: grn || undefined, ...(lines.length ? { lines } : {}) });
-      toast.success(`${row.batchNo ?? "Batch"} dispensed.`);
+      await act.mutateAsync({ id: row.id, rmDispensingDate: rmDate, pmIssuedDate: pmDate, dispensingRemarks: remarks || undefined, grnNo: grn, partial: true, lines });
+      toast.success(`${row.batchNo ?? "Batch"} dispensed (GRN ${grn}).`);
       onDone();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not dispense this batch");
+      const message = err instanceof ApiError ? err.message : "Could not dispense this batch";
+      if (/GRN has changed/i.test(message)) setGrn(""); // another batch took the number: Generate gives the new one
+      setError(message);
     }
   }
   return (
@@ -582,24 +611,32 @@ function DispenseForm({ row, canAct, onDone }: { row: BatchPrepRow; canAct: bool
           </div>
         </div>
         <div>
-          <label className="mb-0.5 block text-micro text-slate-400">GRN no. (optional)</label>
-          <input className="field !py-1.5 text-xs" value={grn} disabled={!canAct} onChange={(e) => setGrn(e.target.value)} />
+          <label className="mb-0.5 block text-micro text-slate-400">GRN no.</label>
+          <div className="flex items-center gap-1.5">
+            <input className="field !py-1.5 text-xs" value={grn} placeholder="Press Generate" disabled readOnly />
+            {canAct && (
+              <button type="button" className="btn-ghost btn-sm shrink-0" disabled={generating} onClick={generate}>
+                <Hash className="h-3.5 w-3.5" strokeWidth={2.5} /> {generating ? "…" : grn ? "Again" : "Generate"}
+              </button>
+            )}
+          </div>
+          {row.grnNo && <p className="mt-0.5 text-micro text-slate-400">Earlier round: {row.grnNo}. This round gets the same number with a letter added.</p>}
         </div>
         <div>
           <label className="mb-0.5 block text-micro text-slate-400">Remarks</label>
           <input className="field !py-1.5 text-xs" value={remarks} disabled={!canAct} onChange={(e) => setRemarks(e.target.value)} />
         </div>
-        {short.length > 0 && <p className="text-xs font-bold text-amber-700">{short.length} material{short.length === 1 ? " is" : "s are"} short at the Plant and the Day Store together. Ask the Warehouse (Production Requests) before dispensing.</p>}
+        {short.length > 0 && <p className="text-xs font-bold text-amber-700">{short.map((m) => m.itemName).join(", ")} {short.length === 1 ? "is" : "are"} short at the Plant and the Store together. Untick {short.length === 1 ? "it" : "them"} to dispense the rest now, or ask the Warehouse (Production Requests).</p>}
         {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
         {canAct && (
-          <button type="button" className="btn-primary btn-sm w-full" disabled={act.isPending || short.length > 0} onClick={submit}>
-            <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {act.isPending ? "Dispensing…" : "Dispense this batch"}
+          <button type="button" className="btn-primary btn-sm w-full" disabled={act.isPending || short.length > 0 || !grn || chosen.length === 0} onClick={submit}>
+            <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> {act.isPending ? "Dispensing…" : chosen.length < todo.length || chosen.some((m) => giveNow(m) < m.remainingQty - 1e-9) ? "Dispense this part" : "Dispense this batch"}
           </button>
         )}
       </div>
       <div>
-        <RequirementsTable row={row} weighing={{ values: weights, onChange: setWeight, disabled: !canAct }} />
-        <p className="mt-1 text-micro text-slate-400">The Plant gives what it already holds; the Day Store issues the rest to the Plant when you dispense. If you weighed something different from the plan, enter it - leave it blank and the plan quantity is taken as given.</p>
+        <RequirementsTable row={row} weighing={{ values: weights, onChange: setWeight, disabled: !canAct, picked, onPick: (itemId, on) => setPicked((p) => ({ ...p, [itemId]: on })) }} />
+        <p className="mt-1 text-micro text-slate-400">Tick the materials to dispense now and, for any of them, type a smaller quantity to give a part: the rest stays to be dispensed later (the batch goes on once everything is given). Blank = all that is left. The Plant gives what it already holds; the Store issues the rest to the Plant.</p>
       </div>
     </div>
   );

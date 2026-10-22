@@ -60,7 +60,7 @@ export function IndentIssuePage() {
         Category: CATEGORY_LABEL[m.category],
         Unit: m.unit,
         "Required Qty": m.requiredQty,
-        "With Day Store": Math.round((m.receivedQty + m.atDayStoreQty) * 1000) / 1000,
+        "With Store": Math.round((m.receivedQty + m.atDayStoreQty) * 1000) / 1000,
         Short: m.shortQty,
         "Indent Slip": r.prodIndentSlipSign ?? "",
       })),
@@ -99,7 +99,7 @@ export function IndentIssuePage() {
       {isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : rows.length === 0 ? (
-        <EmptyState icon={ClipboardList} title={isFiltered ? "Nothing matches these filters" : "No indent waiting"} hint="A product shows up here once the Day Store has recorded its material (Material Received & GRN)." />
+        <EmptyState icon={ClipboardList} title={isFiltered ? "Nothing matches these filters" : "No indent waiting"} hint="A product shows up here once the Store has recorded its material (Material Received & GRN)." />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -140,7 +140,7 @@ export function IndentIssuePage() {
                         <td className="px-4 py-2.5">
                           <span className={`pill ${short === 0 ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
                             {r.materials.length} material{r.materials.length === 1 ? "" : "s"}
-                            {short > 0 ? ` · ${short} short` : " · all with Day Store"}
+                            {short > 0 ? ` · ${short} short` : " · all with Store"}
                           </span>
                         </td>
                         <td className="px-4 py-2.5 text-slate-600">{r.prodIndentSlipSign ? "Slip noted" : "Pending"}</td>
@@ -184,7 +184,7 @@ function IndentForm({ row, canAct, onDone }: { row: IndentBoardRow; canAct: bool
     if (!slip.trim()) return setError("Enter the indent slip sign / number.");
     try {
       await forward.mutateAsync({ id: row.id, prodIndentSlipSign: slip.trim(), productionPlanDate: planDate || undefined, dispatchPlanDate: dispatchDate || undefined, unit: unit.trim() || undefined });
-      toast.success(`Indent issued for ${row.productName}. It is now with the Day Store for Dispensing.`);
+      toast.success(`Indent issued for ${row.productName}. It is now with the Store for Dispensing.`);
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not forward this indent");
@@ -230,7 +230,7 @@ function IndentForm({ row, canAct, onDone }: { row: IndentBoardRow; canAct: bool
                 <th className="px-3 py-2 text-left">Material</th>
                 <th className="px-3 py-2 text-left">Type</th>
                 <th className="px-3 py-2 text-right">Required</th>
-                <th className="px-3 py-2 text-right">With Day Store</th>
+                <th className="px-3 py-2 text-right">With Store</th>
                 <th className="px-3 py-2 text-left">Status</th>
               </tr>
             </thead>
@@ -258,7 +258,7 @@ function IndentForm({ row, canAct, onDone }: { row: IndentBoardRow; canAct: bool
             </tbody>
           </table>
         </div>
-        <p className="mt-1 text-micro text-slate-400">These quantities come from the plan and are the same ones the Day Store dispenses.</p>
+        <p className="mt-1 text-micro text-slate-400">These quantities come from the plan and are the same ones the Store dispenses.</p>
       </div>
     </div>
   );

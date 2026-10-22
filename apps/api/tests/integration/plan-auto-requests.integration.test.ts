@@ -6,7 +6,7 @@ import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
-describe("A product's plan reaches its Plant's Day Store by itself", () => {
+describe("A product's plan reaches its Plant's Store by itself", () => {
   it("needs a Plant before Generate; both plans calculated raise the requests; a recalculation does not duplicate them; the old button is gone", async () => {
     const { token: bd } = await createUser(["BD"]);
     const { token: rnd } = await createUser(["RND"]);
@@ -28,7 +28,7 @@ describe("A product's plan reaches its Plant's Day Store by itself", () => {
     expect((await request(app).post("/api/rm-costing/plans").set(authHeader(ppic)).send({ name: "x", purchaseOrderItemId: itemId })).status).toBe(400);
 
     // The Plant, with its own Day Store (and a user assigned to it)
-    const store = await prisma.dayStore.create({ data: { name: `AR Day Store ${Date.now()}`, createdById: dayStoreUser.id } });
+    const store = await prisma.dayStore.create({ data: { name: `AR Store ${Date.now()}`, createdById: dayStoreUser.id } });
     const plant = await prisma.plant.create({ data: { name: `AR Plant ${Date.now()}`, createdById: dayStoreUser.id, dayStoreId: store.id } });
     await prisma.dayStoreAssignment.create({ data: { userId: dayStoreUser.id, dayStoreId: store.id } });
     expect((await request(app).patch(`/api/purchase-orders/${po.body.id}/items/${itemId}/planned-plant`).set(authHeader(ppic)).send({ plantId: plant.id })).status).toBe(200);
@@ -46,7 +46,7 @@ describe("A product's plan reaches its Plant's Day Store by itself", () => {
     const rows = await requestsOf();
     const expected = bom.body.result.lines.filter((l: { totalQty: number }) => l.totalQty > 0).length + rm.body.result.procurement.length;
     expect(rows).toHaveLength(expected);
-    expect(rows.every((r) => r.purpose === "ISSUED_PRODUCTION" && r.status === "PENDING" && r.plantId === plant.id && r.preProductionId === null)).toBe(true);
+    expect(rows.every((r) => r.purpose === "ISSUED_PRODUCTION" && r.status === "APPROVED" && r.plantId === plant.id && r.preProductionId === null)).toBe(true);
     const whey = rows.find((r) => r.item.name === "AR Whey Isolate");
     expect(whey?.requestedQty).toBeCloseTo((25 * 100 * 1000) / 30 / 1000, 3); // batch 100 Kg, 25 g of 30 g per serving
 
@@ -83,7 +83,7 @@ describe("A product's plan reaches its Plant's Day Store by itself", () => {
     expect(grnRows.find((r) => r.id === run.body.id)?.allCovered).toBe(false);
     const blocked = await stage(dayStore);
     expect(blocked.status).toBe(409);
-    expect(blocked.body.error).toContain("has not all reached the Day Store yet");
+    expect(blocked.body.error).toContain("has not all reached the Store yet");
 
     // Material on the Day Store's own shelf counts as covered: stock it for one material and only the rest is missing
     const first = (await requestsOf())[0]!;
@@ -138,7 +138,7 @@ describe("A product's plan reaches its Plant's Day Store by itself", () => {
     }
     const lacking = await dispense();
     expect(lacking.status).toBe(409);
-    expect(lacking.body.error).toContain("Day Store");
+    expect(lacking.body.error).toContain("Store");
     const last = required[required.length - 1]!;
     await prisma.inventoryTransaction.create({ data: { itemId: last.itemId, type: "ISSUED_DAY_STORE", date: new Date(), unit: last.unit, quantity: last.requiredQty * 2, createdById: dayStoreUser.id, dayStoreId: store.id, deliveredAt: new Date() } });
     const done = await dispense();
@@ -151,7 +151,7 @@ describe("A product's plan reaches its Plant's Day Store by itself", () => {
     expect(issued.length).toBeGreaterThan(0);
     expect(issued.every((x) => x.dayStoreId === store.id)).toBe(true);
     const closed = await prisma.inventoryRequest.findMany({ where: { purchaseOrderItemId: itemId, preProductionId: null, deletedAt: null } });
-    expect(closed.every((x) => x.status === "ISSUED" || x.status === "PARTIALLY_ISSUED" || x.status === "PENDING")).toBe(true);
+    expect(closed.every((x) => x.status === "ISSUED" || x.status === "PARTIALLY_ISSUED" || x.status === "PENDING" || x.status === "APPROVED")).toBe(true);
 
     // "Send to Pre-Inventory" no longer exists
     expect((await request(app).post(`/api/bom/plans/${bom.body.id}/send-to-pre-inventory`).set(authHeader(ppic))).status).toBe(404);

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type { Prisma } from "@prisma/client";
+import { inPipeline } from "../batches/batch-pipeline";
 import { prisma } from "../../common/lib/prisma";
 import { requireAuth, requireRole } from "../../common/middleware/auth";
 
@@ -139,9 +140,10 @@ function batchRow(b: BatchRow, stage: QcBoardStage): QcBoardRow {
   };
 }
 
-// A batch sits at a stage only once its run is COMPLETED (an in-progress one still shows the default first stage).
+// A batch sits at a stage once it is in the pipeline: completed, or (per-batch flow) started and still in production (one not started yet still
+// shows the default first stage but is not waiting for anyone).
 async function batchesAt(stage: QcBoardStage): Promise<QcBoardRow[]> {
-  const batches = await prisma.productionBatch.findMany({ where: { currentStageId: stage, status: "COMPLETED" }, select: batchSelect, orderBy: { updatedAt: "asc" } });
+  const batches = await prisma.productionBatch.findMany({ where: { AND: [{ currentStageId: stage }, inPipeline] }, select: batchSelect, orderBy: { updatedAt: "asc" } });
   return batches.map((b) => batchRow(b, stage));
 }
 

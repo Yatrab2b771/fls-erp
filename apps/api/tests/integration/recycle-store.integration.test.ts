@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, receiveAcceptedStock, sendPlanToProduction, advanceRunToDispensing, confirmPlantReceipts, issueToPlant } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -12,6 +13,7 @@ async function createApprovedPoItem(bdToken: string) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, poNumber: "PO-RECYCLE-1001", items: [{ productName: "Recycle Product", productCategory: "Powder", quantity: 100, unit: "Kg" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -50,10 +52,7 @@ describe("Recycle Store", () => {
     const runId = run.body.id;
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Recycle Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Recycle Plant" });
     await request(app).patch(`/api/pre-productions/${runId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
     const mr = await request(app)
@@ -61,17 +60,16 @@ describe("Recycle Store", () => {
       .set(authHeader(ppicToken))
       .send({ itemId: item.body.id, category: "RM", requestedQty: 50, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${mr.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${mr.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 50, dayStoreId: null });
+    await issueToPlant(storeToken, mr.body.id, { date: "2026-08-01", unit: "Kg", quantity: 50 });
 
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // -> INDENT_ISSUE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" }); // -> LINE_CLEARANCE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" }); // -> DISPENSING
+    await confirmPlantReceipts();
+    await advanceRunToDispensing(runId);
 
     // 40 Production, 10 Waste — the WASTE leg is the real RM/PM spill this
     // module should pick up.
     const dispensed = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminToken))
       .send({
         action: "FORWARD",
         consumption: [
@@ -87,7 +85,9 @@ describe("Recycle Store", () => {
     const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(productionToken)).send({ outputQty: 100 });
     const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
-    const lotId = completed.body.combinedLot.id as string;
+    expect(completed.status).toBe(200);
+    // A completed batch no longer combines into a lot by itself; the lot (which has its own stage routes) is made directly
+    const lotId = (await prisma.combinedLot.create({ data: { preProductionId: runId } })).id;
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "QA_GATE_MFG" });
 
     const mfgGate = await request(app)

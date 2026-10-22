@@ -28,7 +28,7 @@ export function RndProductionBomPage() {
         <div>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">In Production: BOM change</h1>
           <p className="text-sm text-slate-500">
-            Products with Production whose batches can still change. A new version applies to the batches not dispensed yet; a dispensed batch keeps its material and the Day Store is asked for what the new version still needs for it. PPIC is not told.
+            Products with Production whose batches can still change. A new version applies to the batches not dispensed yet; a dispensed batch keeps its material and the Store is asked for what the new version still needs for it. PPIC is not told.
           </p>
         </div>
       </div>

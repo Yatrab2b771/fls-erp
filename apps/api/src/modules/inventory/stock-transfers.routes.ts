@@ -105,18 +105,18 @@ stockTransfersRouter.post("/", requireRole("STORE", "PRODUCTION"), validateBody(
 
     if (input.sourceType === "DAY_STORE") {
       if (!req.user!.roles.includes("STORE") && !req.user!.roles.includes("ADMIN")) {
-        return res.status(403).json({ error: "Only Store can send from a Day Store" });
+        return res.status(403).json({ error: "Only Store can send from a Store" });
       }
       // A Day Store sends its own stock: the Warehouse does not (it issues stock out, and receives returns).
       if (!req.user!.roles.includes("ADMIN") && (await getScopedDayStoreIds(req.user!.id, req.user!.roles)) === null) {
-        return res.status(403).json({ error: "A Day Store sends its own stock - use that Day Store's login. The Warehouse issues stock out and confirms returns." });
+        return res.status(403).json({ error: "A Store sends its own stock - use that Store's login. The Warehouse issues stock out and confirms returns." });
       }
       await assertDayStoreAccess(req.user!.id, req.user!.roles, input.sourceDayStoreId!);
       // ...and only to the Warehouse or to its own Plant (never another store, never another store's Plant).
       if (input.destinationType === "PLANT") {
         const own = await prisma.plant.findUnique({ where: { dayStoreId: input.sourceDayStoreId! }, select: { id: true } });
-        if (!own) return res.status(400).json({ error: "That Day Store has no Plant of its own to send to." });
-        if (input.destPlantId !== own.id) return res.status(400).json({ error: "A Day Store can only send to its own Plant." });
+        if (!own) return res.status(400).json({ error: "That Store has no Plant of its own to send to." });
+        if (input.destPlantId !== own.id) return res.status(400).json({ error: "A Store can only send to its own Plant." });
       }
     } else {
       if (!req.user!.roles.includes("PRODUCTION") && !req.user!.roles.includes("ADMIN")) {
@@ -129,7 +129,7 @@ stockTransfersRouter.post("/", requireRole("STORE", "PRODUCTION"), validateBody(
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
     if (input.destDayStoreId) {
       const destStore = await prisma.dayStore.findUnique({ where: { id: input.destDayStoreId }, select: { id: true } });
-      if (!destStore) return res.status(400).json({ error: "Unknown destination Day Store" });
+      if (!destStore) return res.status(400).json({ error: "Unknown destination Store" });
     }
     if (input.destPlantId) {
       const destPlant = await prisma.plant.findUnique({ where: { id: input.destPlantId }, select: { id: true } });

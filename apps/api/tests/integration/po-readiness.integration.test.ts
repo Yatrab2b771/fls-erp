@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock } from "./helpers";
 
 const app = createApp();
 
@@ -120,10 +120,7 @@ describe("PO Material Readiness", () => {
       });
 
     // Only enough Creatine for one PO's worth, and it never gets the Scoops PO-READY-2002 needs.
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Creatine Monohydrate").id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 40, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Creatine Monohydrate").id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 40, isOpeningStock: true });
 
     const all = await request(app).get("/api/po-readiness").set(authHeader(ppicToken));
     expect(all.status).toBe(200);
@@ -154,19 +151,19 @@ describe("PO Material Readiness", () => {
     const item = (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Sucralose");
 
     // Partial receipt — not enough yet, no notification expected.
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 4, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 4, isOpeningStock: true });
     const before = await request(app).get("/api/notifications").set(authHeader(ppicToken2));
     expect(before.body.notifications.some((n: { link: string }) => n.link === "/po-readiness")).toBe(false);
 
     // The rest arrives — crosses into ready, PPIC gets notified.
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 6, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 6, isOpeningStock: true });
     const after = await request(app).get("/api/notifications").set(authHeader(ppicToken2));
     const readyNotif = after.body.notifications.find((n: { link: string }) => n.link === "/po-readiness");
     expect(readyNotif).toBeTruthy();
     expect(readyNotif.title).toMatch(/PO-READY-3001/);
 
     // A further top-up of the same item shouldn't re-notify — it was already ready.
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 5, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 5, isOpeningStock: true });
     const afterTopUp = await request(app).get("/api/notifications").set(authHeader(ppicToken2));
     const readyNotifs = afterTopUp.body.notifications.filter((n: { link: string }) => n.link === "/po-readiness");
     expect(readyNotifs).toHaveLength(1);
@@ -190,7 +187,7 @@ describe("PO Material Readiness", () => {
       .send({ rows: [{ poNumber: "PO-CONTEND-1002", category: "RM", itemName: "Contended Item", requiredQty: 10, unit: "Kg" }] });
 
     const item = (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Contended Item");
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 10, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.id, type: "RECEIVED", date: "2026-08-25", unit: "Kg", quantity: 10, isOpeningStock: true });
 
     const all = await request(app).get("/api/po-readiness?pageSize=200").set(authHeader(ppicToken));
     const rowFirst = all.body.find((r: { purchaseOrder: { id: string } }) => r.purchaseOrder.id === poFirst.id);
@@ -209,7 +206,7 @@ describe("PO Material Readiness", () => {
     expect(detailSecond.body.isReady).toBe(false);
   });
 
-  it("counts material already moved to a Day Store or a Plant, not just what's still sitting in the Warehouse — per the 2026-08-26 PO-execution cascade call", async () => {
+  it("counts material already moved to a Store or a Plant, not just what's still sitting in the Warehouse — per the 2026-08-26 PO-execution cascade call", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: storeToken } = await createUser(["STORE"]);
@@ -219,10 +216,10 @@ describe("PO Material Readiness", () => {
     await request(app)
       .post("/api/po-readiness/import")
       .set(authHeader(ppicToken))
-      .send({ rows: [{ poNumber: "PO-LOCATION-1001", category: "RM", itemName: "Staged At Day Store Item", requiredQty: 10, unit: "Kg" }] });
-    const dsItem = (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Staged At Day Store Item");
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: dsItem.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 10, isOpeningStock: true });
-    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Reco Test Day Store" });
+      .send({ rows: [{ poNumber: "PO-LOCATION-1001", category: "RM", itemName: "Staged At Store Item", requiredQty: 10, unit: "Kg" }] });
+    const dsItem = (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Staged At Store Item");
+    await receiveAcceptedStock(storeToken, { itemId: dsItem.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 10, isOpeningStock: true });
+    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Reco Test Store" });
     // Move the entire 10 Kg out of the Warehouse into a Day Store —
     // Warehouse-only on-hand drops to 0, but the material still
     // physically exists and is still usable for this PO.
@@ -243,7 +240,7 @@ describe("PO Material Readiness", () => {
       .set(authHeader(ppicToken))
       .send({ rows: [{ poNumber: "PO-LOCATION-1002", category: "RM", itemName: "Staged At Plant Item", requiredQty: 8, unit: "Kg" }] });
     const plantItem = (await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken))).body.find((i: { name: string }) => i.name === "Staged At Plant Item");
-    await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: plantItem.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 8, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: plantItem.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 8, isOpeningStock: true });
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Reco Test Plant" });
     // Plant-tagged stock only exists via the real Material Request path —
     // POST /transactions has no plantId field at all (it's carried off

@@ -10,7 +10,7 @@ import { useClientPaging } from "../lib/useClientPaging";
 import { ClientPager } from "../components/Pagination";
 
 const STATUS_LABEL: Record<RndSampleRequestStatus, string> = {
-  PENDING: "Awaiting Store",
+  PENDING: "Awaiting Warehouse",
   FULFILLED: "Sent",
   REJECTED: "Rejected",
   CANCELLED: "Withdrawn",
@@ -77,7 +77,7 @@ export function RndSampleRequestsPage() {
           Status
           <select value={status} onChange={(e) => setStatus(e.target.value as RndSampleRequestStatus | "")} className="field text-xs">
             <option value="">All</option>
-            <option value="PENDING">Awaiting Store</option>
+            <option value="PENDING">Awaiting Warehouse</option>
             <option value="FULFILLED">Sent</option>
             <option value="REJECTED">Rejected</option>
             <option value="CANCELLED">Withdrawn</option>

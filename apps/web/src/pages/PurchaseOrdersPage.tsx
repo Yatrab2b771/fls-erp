@@ -21,6 +21,9 @@ import { exportBdPpicReport } from "../lib/purchaseOrdersExport";
 import { downloadPurchaseOrderImportTemplate, parsePurchaseOrderWorkbook } from "../lib/purchaseOrdersImport";
 import { findSimilarName } from "../lib/similarName";
 import { usePagedList } from "../lib/usePagedList";
+import { useTileFilters } from "../lib/tileFilters";
+import { AGING_FIELD, TileFilterBar, type FilterField } from "../components/TileFilterBar";
+import { AgingCell } from "../components/AgingCell";
 import { Pagination } from "../components/Pagination";
 import { ItemPicker } from "../components/ItemPicker";
 import { ProductCategoryPicker } from "../components/ProductCategoryPicker";
@@ -119,7 +122,12 @@ export function PurchaseOrdersPage() {
   const { hasRole } = useAuth();
   // Server-side paginated + searched list; the tiles come from a summary call
   // over every PO, so neither depends on how many POs exist.
-  const paged = usePagedList<PurchaseOrder>({ key: ["purchase-orders", "paged"], path: "/api/purchase-orders" });
+  // The filter bar (customer, order date, Aging) is applied on the server too, so it works across every page of POs, not just the one on screen.
+  const filters = useTileFilters();
+  const { data: customerList } = useCustomers();
+  const filterFields: FilterField[] = [{ key: "customer", label: "Customer", options: [...new Set((customerList ?? []).map((c) => c.companyName))].sort((a, b) => a.localeCompare(b)) }, AGING_FIELD];
+  const paged = usePagedList<PurchaseOrder>({ key: ["purchase-orders", "paged"], path: "/api/purchase-orders", params: filters.params });
+  const isFiltered = paged.isFiltered || filters.activeCount > 0;
   const { data: poSummary } = usePoSummary();
   const orders = paged.rows;
   const isLoading = paged.isLoading;
@@ -236,14 +244,15 @@ export function PurchaseOrdersPage() {
 
       {showForm && <NewPurchaseOrderForm initialCustomerId={newFor} onDone={() => setShowForm(false)} />}
 
-      {(paged.total > 0 || paged.isFiltered) && <SearchBar value={paged.search} onChange={paged.setSearch} placeholder="Search by PO number, customer or product…" />}
+      {(paged.total > 0 || isFiltered) && <SearchBar value={paged.search} onChange={paged.setSearch} placeholder="Search by PO number, customer or product…" />}
+      {(paged.total > 0 || isFiltered) && <TileFilterBar filters={filters} tileKey="purchase-orders" fields={filterFields} dateLabel="Order date" />}
 
       {isLoading ? (
         <SkeletonRows rows={4} cols={5} />
-      ) : paged.total === 0 && !paged.isFiltered ? (
+      ) : paged.total === 0 && !isFiltered ? (
         <EmptyState icon={ShoppingCart} title="No purchase orders yet" hint={canCreate ? "Create one above to get started." : "Ask BD to create the first one."} accent="rose" />
       ) : !filteredOrders.length ? (
-        <EmptyState icon={ShoppingCart} title="No matching purchase orders" hint="Try a different search." accent="slate" />
+        <EmptyState icon={ShoppingCart} title="No matching purchase orders" hint="Try a different search or clear a filter." accent="slate" />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -255,6 +264,7 @@ export function PurchaseOrdersPage() {
                   <th className="text-center">Products</th>
                   <th className="text-center" title="Calculated Packaging BOM / RM BOM plans, out of this PO's product count">BOM / Recipe</th>
                   <th>Order Date</th>
+                  <th title="Days since the order date. A completed PO stops counting.">Aging</th>
                   {showStatus && <th>Status</th>}
                   <th>Completion</th>
                   <th />
@@ -274,6 +284,7 @@ export function PurchaseOrdersPage() {
                       <PoBomRecipeStatus items={po.items} />
                     </td>
                     <td className="text-slate-500">{po.orderDate ? new Date(po.orderDate).toLocaleDateString() : "—"}</td>
+                    <td>{po.completion.isCompleted ? <span className="text-slate-300">—</span> : <AgingCell since={po.orderDate ?? po.createdAt} />}</td>
                     {showStatus && (
                       <td>
                         <PoStatusBadge status={po.status} />

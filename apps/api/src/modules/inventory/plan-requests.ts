@@ -84,17 +84,18 @@ export async function raiseRequestsForPlannedItem(poItemId: string, actorId: str
     const cur = byItem.get(itemId);
     if (!cur) {
       await prisma.inventoryRequest.create({
-        data: { itemId, category: n.category, requestedQty: qty, purpose: "ISSUED_PRODUCTION", note, requestedById: actorId, purchaseOrderItemId: item.id, plantId: item.plannedPlantId },
+        // The Store does not approve what a plan needs (it only sees whether it has it and asks the Warehouse for the rest): approved from the start
+        data: { itemId, category: n.category, requestedQty: qty, purpose: "ISSUED_PRODUCTION", status: "APPROVED", note, requestedById: actorId, purchaseOrderItemId: item.id, plantId: item.plannedPlantId },
       });
       out.created += 1;
-    } else if (cur.status === "PENDING" && cur.fulfillments.length === 0 && (Math.abs(cur.requestedQty - qty) > 1e-6 || cur.plantId !== item.plannedPlantId)) {
+    } else if ((cur.status === "PENDING" || cur.status === "APPROVED") && cur.fulfillments.length === 0 && (Math.abs(cur.requestedQty - qty) > 1e-6 || cur.plantId !== item.plannedPlantId)) {
       await prisma.inventoryRequest.update({ where: { id: cur.id }, data: { requestedQty: qty, plantId: item.plannedPlantId, note } });
       out.updated += 1;
     }
   }
   for (const r of existing) {
     if (wantedItemIds.has(r.itemId)) continue;
-    if (r.status === "PENDING" && r.fulfillments.length === 0) {
+    if ((r.status === "PENDING" || r.status === "APPROVED") && r.fulfillments.length === 0) {
       await prisma.inventoryRequest.update({ where: { id: r.id }, data: { deletedAt: new Date() } });
       out.removed += 1;
     }

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { API_BASE, api, getToken } from "./api";
 
-// BD's visiting-card book (apps/api/src/modules/business-cards).
+// The visiting-card book (apps/api/src/modules/business-cards): every department collects cards, BD follows them up.
 export interface BusinessCard {
   id: string;
   name: string;
@@ -15,7 +15,8 @@ export interface BusinessCard {
   gstNo: string;
   categories: string[];
   notes: string;
-  status: "NEEDS_VERIFY" | "VERIFIED";
+  /** READING: a scan whose photo is still being read in the background (its fields fill in a few seconds later). */
+  status: "READING" | "NEEDS_VERIFY" | "VERIFIED";
   source: "SCAN" | "MANUAL";
   hasPhoto: boolean;
   /** 0..1 per field, how sure the OCR was (name, designation, company, phone, email, website, address, gstNo). */
@@ -23,13 +24,20 @@ export interface BusinessCard {
   /** The raw lines the OCR read, to tap into a field. */
   ocrLines: string[] | null;
   customerId: string | null;
+  /** The event it was collected at ("" = none). */
+  event: string;
+  /** Why the photo could not be read, if it could not (the details are then typed in). */
+  readError: string | null;
+  /** The earlier card (same email or phone) this may repeat: flagged, never blocked. */
+  duplicateOf: { id: string; name: string; company: string; addedBy: string } | null;
+  collectedBy: { id: string; name: string; department: string };
   createdByName: string;
   verifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-export type CardFields = Pick<BusinessCard, "name" | "designation" | "company" | "phones" | "email" | "website" | "address" | "gstNo" | "categories" | "notes">;
+export type CardFields = Pick<BusinessCard, "name" | "designation" | "company" | "phones" | "email" | "website" | "address" | "gstNo" | "categories" | "notes" | "event">;
 
 export const CARD_CATEGORIES = ["Bar", "Gummy", "Powder", "Liquid", "Tablet", "Capsule"] as const;
 /** Under this a field is flagged "please check". */
@@ -37,16 +45,61 @@ export const SURE_ENOUGH = 0.75;
 
 const KEY = ["business-cards"];
 
-export function useBusinessCards() {
-  return useQuery({ queryKey: KEY, queryFn: () => api<BusinessCard[]>("/api/business-cards") });
+// While a scan is being read in the background the list refreshes by itself, so its fields appear without a reload.
+export function useBusinessCards(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: KEY,
+    enabled: options?.enabled,
+    queryFn: () => api<BusinessCard[]>("/api/business-cards"),
+    refetchInterval: (q) => (q.state.data?.some((c) => c.status === "READING") ? 2500 : false),
+  });
+}
+
+/** The events cards were collected at (for the event picker). */
+export function useCardEvents() {
+  return useQuery({ queryKey: [...KEY, "events"], queryFn: () => api<string[]>("/api/business-cards/events"), staleTime: 30_000 });
+}
+
+/** The event the person is collecting for: asked once, remembered on this device. */
+export function useCardEvent(): [string, (v: string) => void] {
+  const [event, setEvent] = useState(() => {
+    try {
+      return localStorage.getItem("fls.cards.event") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  return [
+    event,
+    (v: string) => {
+      setEvent(v);
+      try {
+        localStorage.setItem("fls.cards.event", v);
+      } catch {
+        /* a private window: it is just not remembered */
+      }
+    },
+  ];
+}
+
+/** Waits until a scanned card has been read (the reading runs in the background), then returns it. */
+export async function waitUntilCardRead(id: string, timeoutMs = 180_000): Promise<BusinessCard> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const card = await api<BusinessCard>(`/api/business-cards/${id}`);
+    if (card.status !== "READING") return card;
+    if (Date.now() > until) throw new Error("The card is taking long to read. It is saved: open it from your cards in a minute.");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
 }
 
 export function useScanCard() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ photo, categories }: { photo: File; categories: string[] }) => {
+    mutationFn: ({ photo, categories, event }: { photo: File; categories: string[]; event?: string }) => {
       const body = new FormData();
       body.append("categories", JSON.stringify(categories));
+      if (event) body.append("event", event);
       body.append("photo", photo, photo.name || "card.jpg");
       return api<BusinessCard>("/api/business-cards/scan", { method: "POST", body, isFormData: true });
     },
@@ -66,6 +119,15 @@ export function useUpdateCard() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string; verify?: boolean } & Partial<CardFields>) => api<BusinessCard>(`/api/business-cards/${id}`, { method: "PATCH", body }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+  });
+}
+
+/** BD / Admin: "these are two different people": take the duplicate flag off. */
+export function useClearDuplicate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api<BusinessCard>(`/api/business-cards/${id}/clear-duplicate`, { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
   });
 }

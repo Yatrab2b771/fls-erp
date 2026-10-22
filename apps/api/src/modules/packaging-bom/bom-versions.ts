@@ -109,7 +109,7 @@ bomVersionsRouter.post("/:kind/:entityId/:version/restore", requireRole("RND"), 
       const sku = await prisma.sku.findUnique({ where: { id: req.params.entityId }, select: { id: true } });
       if (!sku) return res.status(404).json({ error: "Product not found" });
       const snap = row.snapshot as unknown as PmSnapshot;
-      // A Store item deleted since the snapshot was taken is dropped from the link, the row stays.
+      // A Warehouse item deleted since the snapshot was taken is dropped from the link, the row stays.
       const ids = [...new Set(snap.components.map((c) => c.pmItemId).filter((x): x is string => !!x))];
       const alive = new Set((await prisma.inventoryItem.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((i) => i.id));
       version = await savePmBom(sku.id, { header: snap.header, components: snap.components.map((c) => ({ ...c, pmItemId: c.pmItemId && alive.has(c.pmItemId) ? c.pmItemId : null })) }, note, req.user!.id);

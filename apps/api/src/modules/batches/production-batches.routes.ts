@@ -19,6 +19,12 @@ import {
 } from "./batch.schemas";
 import { transitionProductionBatchStage } from "./production-batch-transition";
 import { utilizationGapMessage, utilizationOfBatches } from "./batch-utilization";
+import { inPipeline, stageDepartment } from "./batch-pipeline";
+import { notifyRoles } from "../../common/lib/notify";
+import { notifyPlantDayStore } from "../inventory/plan-requests";
+import { logger } from "../../common/lib/logger";
+import { goodQtyOf } from "./good-qty";
+import { COMBINED_LOT_STAGE_LABEL } from "./combined-lot-stage";
 import type { Prisma } from "@prisma/client";
 
 // --- Tier 2 of the three-tier pipeline (see schema.prisma's own comment
@@ -50,9 +56,9 @@ productionBatchesRouter.get("/production-batches", async (req: AuthedRequest, re
     // A Plant-limited Production login sees only its own Plant's batches.
     const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const batches = await prisma.productionBatch.findMany({
-      where: { status: "COMPLETED", ...(plantScope ? { preProduction: { plantId: { in: plantScope } } } : {}) },
+      where: { AND: [inPipeline, plantScope ? { preProduction: { plantId: { in: plantScope } } } : {}] },
       include: productionBatchInclude,
-      orderBy: { completedAt: "desc" },
+      orderBy: [{ completedAt: { sort: "desc", nulls: "first" } }, { createdAt: "desc" }],
     });
     res.json(batches.map(serializeProductionBatch));
   } catch (err) {
@@ -62,9 +68,19 @@ productionBatchesRouter.get("/production-batches", async (req: AuthedRequest, re
 
 const PREP_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing", RECEIVE: "Receive (Production)", LINE_CLEARANCE: "Line Clearance", READY: "ready" };
 
-// A batch as the screens read it, plus where its Utilization stands: the RM sheet (`utilization`, filled after Bulk QC: it opens Packaging),
+// A batch as the screens read it, plus where its Utilization stands: the RM sheet (`utilization`, filled while the batch is in production: it opens the end time and Mark Completed),
 // the PM sheet (`utilization.pm`, which gates the end of Packaging) and the plan's materials with what was dispensed for the batch.
 const NO_PART = { required: 0, logged: 0, missing: [] as string[], complete: true };
+
+/**
+ * What stops a per-batch-flow batch from finishing: its RM Utilization has to be filled (every plan material has its Used quantity AND the four
+ * numbers of the whole batch are saved: Produced is the batch's output). Null once it is.
+ */
+function rmUtilizationGap(u: Awaited<ReturnType<typeof utilizationOfBatches>> extends Map<string, infer U> ? U : never, what: string): string | null {
+  if (!u.complete) return utilizationGapMessage(u, what);
+  if (!u.sheets.RM) return `Fill the RM Utilization first: enter what the whole batch produced, wasted, rejected and gave as sample. Then ${what}.`;
+  return null;
+}
 export async function withUtilization(batches: ProductionBatchWithRelations[]) {
   const byRun = new Map<string, ProductionBatchWithRelations[]>();
   for (const b of batches) byRun.set(b.preProductionId, [...(byRun.get(b.preProductionId) ?? []), b]);
@@ -177,18 +193,18 @@ async function requireBatch(id: string): Promise<ProductionBatchWithRelations | 
 // Single-run detail fetch — its own Tier-3 pipeline detail page needs a
 // clean GET /:id the same shape every other tier in this module has,
 // rather than making the frontend dig a batch out of its parent's list.
-// The Handover page's list (Production's tile): every batch whose manufacturing is complete and that is still in Production's hands or
-// waiting at QA's packaging gate, with where it is now. Once QA passes it, the finished goods are with the Day Store and leave this
-// list. Production sees its own Plant's.
+// The Handover page's list (Production's tile): every batch whose manufacturing is complete and that is still in Production's hands, waiting at
+// QA's packaging gate, or approved by QA and waiting for Production to hand it over to the Day Store, with where it is now. Once handed over,
+// the finished goods are the Day Store's and leave this list. Production sees its own Plant's.
 productionBatchesRouter.get("/production-batches/handover-board", requireRole("PRODUCTION", "PPIC"), async (req: AuthedRequest, res, next) => {
   try {
     const plantScope = await getScopedPlantIds(req.user!.id, req.user!.roles);
     const batches = await prisma.productionBatch.findMany({
       where: {
         status: "COMPLETED",
-        // Only batches that have reached Packaging: at Packaging itself (running, or Completed and ready to hand over) or already handed to QA.
-        // A batch still at IPQC / the manufacturing QA gate / Bulk QC has not been packed, so it is not Production's to hand over yet.
-        currentStageId: { in: ["PACKAGING", "QA_GATE_PACKAGING"] },
+        // Only batches that have reached Packaging: at Packaging itself, waiting at QA's packaging gate, or approved by QA and waiting for Production's
+        // hand-over to the Day Store. A batch still at IPQC / the manufacturing QA gate / Bulk QC has not been packed, so it is not here yet.
+        OR: [{ currentStageId: { in: ["PACKAGING", "QA_GATE_PACKAGING"] } }, { currentStageId: "FG_STORE", handedToStoreAt: null }],
         preProduction: { ...(plantScope ? { plantId: { in: plantScope } } : {}) },
       },
       orderBy: { completedAt: "asc" },
@@ -237,8 +253,11 @@ productionBatchesRouter.get("/production-batches/handover-board", requireRole("P
             dispatchedQty: b.dispatchedQty ?? 0,
             completedAt: b.completedAt,
             fgStoreAt: b.fgStoreReceivedDate,
-            // Handed over to QA once it has left Packaging (it then waits at QA's packaging gate).
-            handedOverAt: b.currentStageId === "QA_GATE_PACKAGING" ? (b.packagingEndDate ?? b.updatedAt) : null,
+            // Waiting for QA's approval at the packaging gate (Production's Packaging save sent it there); and, once QA has approved, waiting for
+            // Production to hand it over to the Day Store.
+            waitingForQa: b.currentStageId === "QA_GATE_PACKAGING",
+            awaitingStoreHandover: b.currentStageId === "FG_STORE",
+            sentForQaAt: b.currentStageId === "QA_GATE_PACKAGING" ? (b.packagingEndDate ?? b.updatedAt) : null,
           };
         }),
     );
@@ -301,6 +320,7 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
         packWastageQty: true,
         fgStoreReceivedDate: true,
         fgQaStatus: true,
+        handedToStoreAt: true,
         handedOverToDispatchAt: true,
         invoiceDate: true,
         dispatchDate: true,
@@ -331,18 +351,20 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
     // Usage on materials outside the plan: name them, and add what was dispensed for them.
     const given = await prisma.batchDispensingLine.groupBy({ by: ["productionBatchId", "itemId"], where: { productionBatchId: { in: ids }, deliveryStatus: { not: "REFUSED" } }, _sum: { quantity: true } });
     const touched = new Set<string>([...consumed.map((c) => c.itemId), ...returned.map((r) => r.itemId), ...leftovers.map((l) => l.itemId), ...given.map((g) => g.itemId)]);
+    const askedForExtra = await prisma.inventoryRequest.findMany({ where: { isExtra: true, deletedAt: null, productionBatchId: { in: ids } }, select: { itemId: true } });
+    for (const x of askedForExtra) touched.add(x.itemId);
     const itemInfo = new Map((await prisma.inventoryItem.findMany({ where: { id: { in: [...touched] } }, select: { id: true, name: true, category: true, unit: true } })).map((i) => [i.id, i]));
     const q3 = (n: number) => Math.round(n * 1000) / 1000;
 
-    // Extra material (asked from the Day Store outside any plan) is raised for a product, not for a batch: show what was asked and what was
-    // issued per product and material next to the batch's own usage of it.
+    // Extra material (asked from the Store outside the plan) is raised for a batch: show what was asked and what was issued for the batch next to its
+    // own usage of it. Older requests were raised for a product only: those show against every batch of that product, as before.
     const extraRequests = await prisma.inventoryRequest.findMany({
-      where: { isExtra: true, deletedAt: null, extraForPoItemId: { in: [...byItem.keys()] } },
-      select: { itemId: true, extraForPoItemId: true, requestedQty: true, fulfillments: { where: { deletedAt: null }, select: { quantity: true } } },
+      where: { isExtra: true, deletedAt: null, OR: [{ productionBatchId: { in: ids } }, { productionBatchId: null, extraForPoItemId: { in: [...byItem.keys()] } }] },
+      select: { itemId: true, extraForPoItemId: true, productionBatchId: true, requestedQty: true, fulfillments: { where: { deletedAt: null }, select: { quantity: true } } },
     });
     const extraBy = new Map<string, { requested: number; issued: number }>();
     for (const r of extraRequests) {
-      const key = `${r.extraForPoItemId}::${r.itemId}`;
+      const key = r.productionBatchId ? `b:${r.productionBatchId}::${r.itemId}` : `p:${r.extraForPoItemId}::${r.itemId}`;
       const cur = extraBy.get(key) ?? { requested: 0, issued: 0 };
       cur.requested += r.requestedQty;
       cur.issued += r.fulfillments.reduce((sum, f) => sum + f.quantity, 0);
@@ -352,14 +374,14 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
     res.json(
       batches.map((b) => {
         const u = util.get(b.id);
-        type Row = { itemId: string; itemName: string; category: "RM" | "PM"; unit: string; inPlan: boolean; requiredQty: number; givenQty: number; consumedQty: number; wastedQty: number; rejectedQty: number; sampleQty: number; returnedQty: number };
+        type Row = { itemId: string; itemName: string; category: "RM" | "PM" | "OTHER"; unit: string; inPlan: boolean; requiredQty: number; givenQty: number; consumedQty: number; wastedQty: number; rejectedQty: number; sampleQty: number; returnedQty: number };
         const rows = new Map<string, Row>();
         const row = (itemId: string): Row | null => {
           const existing = rows.get(itemId);
           if (existing) return existing;
           const info = itemInfo.get(itemId);
           if (!info) return null;
-          const created: Row = { itemId, itemName: info.name, category: info.category === "PM" ? "PM" : "RM", unit: info.unit ?? "", inPlan: false, requiredQty: 0, givenQty: 0, consumedQty: 0, wastedQty: 0, rejectedQty: 0, sampleQty: 0, returnedQty: 0 };
+          const created: Row = { itemId, itemName: info.name, category: info.category, unit: info.unit ?? "", inPlan: false, requiredQty: 0, givenQty: 0, consumedQty: 0, wastedQty: 0, rejectedQty: 0, sampleQty: 0, returnedQty: 0 };
           rows.set(itemId, created);
           return created;
         };
@@ -377,8 +399,10 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
         }
         for (const t of returned) if (t.productionBatchId === b.id) { const r = row(t.itemId); if (r) r.returnedQty += t._sum.quantity ?? 0; }
         for (const l of leftovers) if (l.productionBatchId === b.id) { const r = row(l.itemId); if (r) r.returnedQty += l._sum.quantity ?? 0; }
+        // Material asked for this batch as an extra shows even when none of it was used (asked, issued, used 0)
+        for (const x of extraRequests) if (x.productionBatchId === b.id) row(x.itemId);
         const materials = [...rows.values()].map((r) => {
-          const extra = extraBy.get(`${b.preProduction.purchaseOrderItem.id}::${r.itemId}`);
+          const extra = extraBy.get(`b:${b.id}::${r.itemId}`) ?? extraBy.get(`p:${b.preProduction.purchaseOrderItem.id}::${r.itemId}`);
           return { ...r, requiredQty: q3(r.requiredQty), givenQty: q3(r.givenQty), consumedQty: q3(r.consumedQty), wastedQty: q3(r.wastedQty), rejectedQty: q3(r.rejectedQty), sampleQty: q3(r.sampleQty), returnedQty: q3(r.returnedQty), extraRequestedQty: q3(extra?.requested ?? 0), extraIssuedQty: q3(extra?.issued ?? 0) };
         });
         const { preProduction: _run, fgShipments, bomSlot: _slot, ...rest } = b;
@@ -395,28 +419,27 @@ productionBatchesRouter.get("/production-batches/report-board", requireRole("PRO
   }
 });
 
-// Production hands a packed batch on to QA: this closes Packaging (the same forward the batch's own page does, so Packaging must read
-// Completed) and puts the batch at QA's packaging gate. After QA approves, the finished goods are with the Day Store of the Plant, which
-// hands them to Dispatch once QA has approved them as finished goods.
-productionBatchesRouter.post("/production-batches/:id/handover", requireRole("PRODUCTION"), async (req: AuthedRequest<{ id: string }>, res, next) => {
+// Production hands QA-approved packed goods over to the Day Store: they are then the Day Store's finished goods (to receive, then QA's release and the
+// Day Store's hand-over to Dispatch as before). Packaging itself reaches QA by itself: saving its sheet with the start and end time and the PM
+// Utilization done sends the batch to QA's packaging gate (see PATCH /production-batches/:id/packaging), where it waits for approval.
+productionBatchesRouter.post("/production-batches/:id/handover-to-store", requireRole("PRODUCTION"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
-    const batch = await prisma.productionBatch.findUnique({ where: { id: req.params.id } });
+    const batch = await prisma.productionBatch.findUnique({ where: { id: req.params.id }, include: productionBatchInclude });
     if (!batch) return res.status(404).json({ error: "Batch not found" });
-    const preProduction = await prisma.preProduction.findUnique({ where: { id: batch.preProductionId }, select: { plantId: true } });
-    await assertPlantAccess(req.user!.id, req.user!.roles, preProduction?.plantId);
-    if (batch.status !== "COMPLETED") return res.status(409).json({ error: "Complete the batch's manufacturing first." });
+    await assertPlantAccess(req.user!.id, req.user!.roles, batch.preProduction?.plantId);
+    if (batch.currentStageId === "QA_GATE_PACKAGING") return res.status(409).json({ error: "QA has not approved this batch's packed goods yet." });
+    if (batch.currentStageId !== "FG_STORE") return res.status(409).json({ error: batch.currentStageId === "PACKAGING" ? "This batch has not been through QA's packaging gate yet." : "This batch is not waiting to be handed over to the store." });
+    if (batch.handedToStoreAt) return res.status(409).json({ error: "These finished goods have already been handed over to the store." });
 
-    if (batch.currentStageId !== "PACKAGING") {
-      if (["IPQC", "QA_GATE_MFG", "BULK_QC"].includes(batch.currentStageId)) return res.status(409).json({ error: "This batch has not reached Packaging yet." });
-      return res.status(409).json({ error: "This batch has already been handed over to QA." });
-    }
-    const done = String(batch.packagingStatus ?? "").trim().toLowerCase() === "completed";
-    if (!done) return res.status(409).json({ error: 'Packaging must be marked "Completed" before the batch can be handed over.' });
-
-    const moved = await transitionProductionBatchStage({ batch, action: "FORWARD", rawBody: {}, actorId: req.user!.id, actorRoles: req.user!.roles });
-    if (!moved.ok) return res.status(moved.status).json({ error: moved.error });
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.handed_over_to_qa", entityType: "ProductionBatch", entityId: batch.id });
-    res.json(serializeProductionBatch(moved.updated));
+    const updated = await prisma.productionBatch.update({ where: { id: batch.id }, data: { handedToStoreAt: new Date() }, include: productionBatchInclude });
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.handed_over_to_store", entityType: "ProductionBatch", entityId: batch.id });
+    const plant = updated.preProduction.plantId ? await prisma.plant.findUnique({ where: { id: updated.preProduction.plantId }, select: { dayStoreId: true } }) : null;
+    await notifyPlantDayStore(
+      plant?.dayStoreId,
+      { title: `${updated.preProduction.purchaseOrderItem.productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}) finished goods handed over to the store`, body: "QA approved the packed goods: receive them in finished goods.", link: "/my-store/finished-goods" },
+      req.user!.id,
+    ).catch((err) => logger.error({ err }, "notify failed: production_batch.handed_over_to_store"));
+    res.json(serializeProductionBatch(updated));
   } catch (err) {
     next(err);
   }
@@ -452,17 +475,22 @@ productionBatchesRouter.patch("/production-batches/:id", requireRole("PRODUCTION
     const poItemId = existing.preProduction?.purchaseOrderItem.id;
     const batchFlow = !!existing.preProduction?.batchFlow;
     if (batchFlow) {
-      // Production starts only once the batch is READY (indent, batch number, Dispensing, material received). The output typed here is the
-      // bulk made (QA's gates work on it); the RM Utilization, filled after Bulk QC, gives the batch its final input and output.
+      // Production starts only once the batch is READY (indent, batch number, Dispensing, material received). Its output and input come from
+      // the RM Utilization (Produced, and everything the batch accounted for), which is filled before the end time: they are not typed here.
       if (existing.prepStageId !== "READY") return res.status(409).json({ error: `This batch is not cleared for production yet: it is at ${PREP_LABEL[existing.prepStageId]}.` });
       delete data.inputQty;
+      delete data.outputQty;
     }
-    // What Production fills when the batch FINISHES (output, end time, status, remarks) opens only once the Utilization is complete.
+    // What Production fills when the batch FINISHES (end time, status, remarks) opens only once the RM Utilization is filled.
     const finishing = data.outputQty !== undefined || data.shiftEndAt !== undefined || data.manufacturingEndDate !== undefined || data.manufacturingStatus !== undefined || data.manufacturingRemarks !== undefined;
-    // A per-batch-flow batch is completed without the Utilization: that is filled after Bulk QC, at Packaging.
-    if (finishing && poItemId && !batchFlow) {
+    // Per-batch flow: the end time (and the RM Utilization before it) opens only once the batch is back from Bulk QC.
+    if (finishing && batchFlow && existing.currentStageId !== "PACKAGING") {
+      return res.status(409).json({ error: `The end time opens once Bulk QC has passed: this batch is at ${COMBINED_LOT_STAGE_LABEL[existing.currentStageId]} (with ${stageDepartment(existing.currentStageId)}).` });
+    }
+    if (finishing && poItemId) {
       const u = (await utilizationOfBatches(poItemId, [{ id: existing.id, plannedQty: existing.plannedQty }])).get(existing.id)!;
-      if (!u.complete) return res.status(409).json({ error: utilizationGapMessage(u, "record the end time, status and remarks") });
+      const gap = batchFlow ? rmUtilizationGap(u, "record the end time, status and remarks") : u.complete ? null : utilizationGapMessage(u, "record the end time, status and remarks");
+      if (gap) return res.status(409).json({ error: gap });
     }
     if (finishing && batchFlow) {
       const shift = data.shift ?? existing.shift;
@@ -477,6 +505,10 @@ productionBatchesRouter.patch("/production-batches/:id", requireRole("PRODUCTION
 
     const updated = await prisma.productionBatch.update({ where: { id: existing.id }, data: patch, include: productionBatchInclude });
     await recordAudit({ actorId: req.user!.id, action: "production_batch.updated", entityType: "ProductionBatch", entityId: updated.id });
+    // Per-batch flow: saving the start fields puts the batch at In-Process QA, so QA is told.
+    if (batchFlow && !existing.shiftStartAt && updated.shiftStartAt && updated.shift && updated.manpowerCount) {
+      await notifyRoles(["QA_QC"], { title: `${updated.preProduction.purchaseOrderItem.productName} (batch${updated.batchNo ? ` ${updated.batchNo}` : ""}) has started: In-Process QA`, body: "Production has started this batch.", link: `/production-batches/${updated.id}` }, req.user!.id).catch((err) => logger.error({ err }, "notify failed: production_batch.started"));
+    }
 
     res.json((await withUtilization([updated]))[0]);
   } catch (err) {
@@ -511,25 +543,32 @@ productionBatchesRouter.post("/production-batches/:id/complete", requireRole("PR
       const u = (await utilizationOfBatches(existing.preProduction.purchaseOrderItem.id, [{ id: existing.id, plannedQty: existing.plannedQty }])).get(existing.id)!;
       if (!u.complete) return res.status(409).json({ error: utilizationGapMessage(u, "complete the batch") });
     }
-    // Per-batch flow: the batch must be cleared and have its production sheet filled, with the bulk output typed. The RM Utilization comes
-    // later (after Bulk QC, at Packaging) and then gives the batch its final input and output.
+    // Per-batch flow: the batch must be cleared and have its production sheet filled (start fields, RM Utilization, end time). The RM
+    // Utilization gives the batch its output (Produced) and input.
     if (batchFlow) {
       if (existing.prepStageId !== "READY") return res.status(409).json({ error: `This batch is not cleared for production yet: it is at ${PREP_LABEL[existing.prepStageId]}.` });
       if (!existing.shift || !existing.manpowerCount || !existing.shiftStartAt) return res.status(409).json({ error: "Fill the start fields first: shift, manpower and the start date and time." });
+      if (existing.currentStageId !== "PACKAGING") return res.status(409).json({ error: `Bulk QC has to pass before the batch goes to Packaging: it is at ${COMBINED_LOT_STAGE_LABEL[existing.currentStageId]} (with ${stageDepartment(existing.currentStageId)}).` });
+      const u = (await utilizationOfBatches(existing.preProduction!.purchaseOrderItem.id, [{ id: existing.id, plannedQty: existing.plannedQty }])).get(existing.id)!;
+      const gap = rmUtilizationGap(u, "complete the batch");
+      if (gap) return res.status(409).json({ error: gap });
       if (!existing.shiftEndAt) return res.status(409).json({ error: "Record the end date and time before completing the batch." });
-      if (!(existing.outputQty != null && existing.outputQty > 0)) return res.status(409).json({ error: "Record the bulk output (how much was made) before completing the batch." });
+      if (!(existing.outputQty != null && existing.outputQty > 0)) return res.status(409).json({ error: "Record what the batch produced (RM Utilization) before completing it." });
     } else if (existing.outputQty == null) {
       return res.status(400).json({ error: "Record this run's output quantity before completing it." });
     }
 
     const outputQty = existing.outputQty!;
+    // What the batch counts for in "made so far": its output, less what QA has already taken out at the gates it has passed (a per-batch-flow
+    // batch goes through In-Process QA, the QA Gate and Bulk QC before it is sent to Packaging).
+    const counted = goodQtyOf(existing);
     const batch = await prisma.$transaction(async (tx) => {
       await tx.productionBatch.update({ where: { id: existing.id }, data: { status: "COMPLETED", completedById: req.user!.id, completedAt: new Date() } });
-      await tx.preProduction.update({ where: { id: existing.preProductionId }, data: { combinedQty: { increment: outputQty } } });
+      await tx.preProduction.update({ where: { id: existing.preProductionId }, data: { combinedQty: { increment: counted } } });
       return tx.productionBatch.findUniqueOrThrow({ where: { id: existing.id }, include: productionBatchInclude });
     });
 
-    await recordAudit({ actorId: req.user!.id, action: "production_batch.completed", entityType: "ProductionBatch", entityId: existing.id, metadata: { outputQty } });
+    await recordAudit({ actorId: req.user!.id, action: "production_batch.completed", entityType: "ProductionBatch", entityId: existing.id, metadata: { outputQty, counted } });
 
     res.json({ productionBatch: (await withUtilization([batch]))[0] });
   } catch (err) {

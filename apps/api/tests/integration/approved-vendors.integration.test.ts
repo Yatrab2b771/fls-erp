@@ -125,7 +125,7 @@ describe("Approved vendors - dispensing", () => {
     expect(m.lots.map((l: { vendorName: string; usedQty: number }) => [l.vendorName, l.usedQty])).toEqual([[GOOD, 40]]);
   });
 
-  it("is blocked when the Day Store holds only another vendor's material, and goes through once R&D allows it", async () => {
+  it("is blocked when the Store holds only another vendor's material, and goes through once R&D allows it", async () => {
     const s = await setup([{ vendor: OTHER, qty: 100, days: 300 }], 60);
     const blocked = await dispenseBatch(s);
     expect(blocked.status).toBe(409);

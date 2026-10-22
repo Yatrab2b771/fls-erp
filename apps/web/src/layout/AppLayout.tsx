@@ -24,7 +24,6 @@ import {
   Menu,
   Microscope,
   Package,
-  PackageMinus,
   PackageX,
   Boxes,
   PauseCircle,
@@ -69,6 +68,8 @@ interface NavItem {
   deptAdminOnly?: boolean;
   /** When set, the sidebar lists this entry only for these roles; the other `roles` can still open the page (from a tile). */
   sidebarRoles?: RoleName[];
+  /** The Warehouse's own tool: a Store login (one tied to a Store, like Store 22) does not get it, though both are the STORE role. */
+  warehouseSeatOnly?: boolean;
 }
 
 // Grouped by the department flow the business actually runs, not
@@ -99,14 +100,15 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // specific run, never the PO list. Both hidden from nav only (not
       // the underlying page/API, which stays open to any authenticated
       // user) so it's a one-line change to bring either back.
-      { to: "/purchase-orders", label: "Order Tracking", icon: Truck, roles: ["BD", "PPIC", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
+      { to: "/purchase-orders", label: "Order Tracking", icon: Truck, roles: ["BD", "PPIC", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
   { to: "/accounts-dispatch", label: "Dispatch Invoices", icon: FileText, roles: ["ACCOUNTS"] },
       // Goods a customer sent back: Dispatch decides what to do with what QA passed, Accounts makes the credit note
       { to: "/returned-goods-dispatch", label: "Returned Goods", icon: RotateCcw, roles: ["DISPATCH"] },
       { to: "/credit-notes", label: "Credit Notes", icon: FileText, roles: ["ACCOUNTS"] },
       { to: "/customers", label: "Customers", icon: Building2, roles: ["BD"] },
-      { to: "/leads", label: "Leads", icon: Users, roles: ["BD"] },
-      { to: "/visiting-cards", label: "Visiting Cards", icon: ScanLine, roles: ["BD"] },
+      // Every department collects visiting cards (at an event) and works the leads BD hands to it; adding leads and the customer stay BD's
+      { to: "/leads", label: "Leads", icon: Users, roles: ["BD", "PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
+      { to: "/visiting-cards", label: "Visiting Cards", icon: ScanLine, roles: ["BD", "PPIC", "STORE", "PURCHASE", "ACCOUNTS", "PRODUCTION", "QA_QC", "DISPATCH", "RND", "REGULATORY"] },
       // BD asks PPIC to hold / cancel a product here; PPIC decides on the same page but opens it from its "BD Requests" tile, not the sidebar
       { to: "/bd-requests", label: "Hold / Cancel Requests", icon: PauseCircle, roles: ["BD", "PPIC"], sidebarRoles: ["BD"] },
     ],
@@ -114,12 +116,12 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
   {
     heading: "Planning & Procurement",
     items: [
-      { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE", "ACCOUNTS"] },
+      { to: "/pre-inventory", label: "Pre-Inventory", icon: ClipboardList, roles: ["PPIC", "STORE", "PURCHASE"], warehouseSeatOnly: true },
   { to: "/vendor-payments", label: "Vendor Payments", icon: Wallet, roles: ["ACCOUNTS", "PURCHASE"] },
       // The supplier directory (contact, GST, address): Purchase keeps it, Store and Accounts use it. PPIC and Production see what is ordered and its ETA in Pre-Inventory / Vendor POs instead.
-      { to: "/vendors", label: "Vendors", icon: Factory, roles: ["STORE", "PURCHASE", "ACCOUNTS"] },
+      { to: "/vendors", label: "Vendors", icon: Factory, roles: ["STORE", "PURCHASE"], warehouseSeatOnly: true },
       // Rates, GST and amounts: not for PPIC (it follows what is ordered, its ETA and what arrived in Pre-Inventory)
-      { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["STORE", "PURCHASE", "ACCOUNTS"] },
+      { to: "/vendor-purchase-orders", label: "Vendor POs", icon: ShoppingBag, roles: ["STORE", "PURCHASE"], warehouseSeatOnly: true },
       { to: "/po-readiness", label: "PO Readiness", icon: CheckCircle2, roles: ["PPIC"] },
       // PO-independent — search an existing catalog product (Sku/Recipe)
       // whose BOM/RM Plan is already calculated and check its RM/PM
@@ -134,20 +136,19 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
     heading: "Warehouse & Quality",
     items: [
       // Not for PPIC or Purchase: they follow stock and what is short in Material Planning / PO Readiness / Pre-Inventory (Purchase logs its PIs there)
-      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "QA_QC", "RND", "DISPATCH", "ACCOUNTS"] },
+      { to: "/inventory", label: "Inventory", icon: Warehouse, roles: ["STORE", "QA_QC", "RND", "DISPATCH"], warehouseSeatOnly: true },
       // Not for PPIC (it could only look): stock moves, plant usage, material usage and the Recycle Store belong to Store, Production and QA
       { to: "/stock-transfers", label: "Stock Transfers", icon: ArrowRightLeft, roles: ["STORE"] },
-      { to: "/plant-consumption", label: "Plant Consumption", icon: PackageMinus, roles: ["STORE"] },
-      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["STORE", "QA_QC"] },
-      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "QA_QC"] },
+      { to: "/material-consumption", label: "Material Usage", icon: FlaskConical, roles: ["STORE", "QA_QC"], warehouseSeatOnly: true },
+      { to: "/recycle-store", label: "Recycle Store", icon: Recycle, roles: ["STORE", "QA_QC"], warehouseSeatOnly: true },
       // Fix a balance that does not match the shelf (a second person approves it), deal with what QC rejected, and trace a delivery.
       // Stock Corrections is hidden from the menu for now (the page and its API are still there; the route redirects to the Dashboard)
-      { to: "/rejected-stock", label: "Rejected Stock", icon: PackageX, roles: ["STORE", "QA_QC", "ACCOUNTS"] },
+      { to: "/rejected-stock", label: "Rejected Stock", icon: PackageX, roles: ["STORE", "QA_QC", "ACCOUNTS"], warehouseSeatOnly: true },
       // Customer returns: the Warehouse records them, QA decides, Production reworks what can be fixed
-      { to: "/customer-returns", label: "Customer Returns", icon: Undo2, roles: ["STORE"] },
+      { to: "/customer-returns", label: "Customer Returns", icon: Undo2, roles: ["STORE"], warehouseSeatOnly: true },
       { to: "/returned-goods", label: "Returned Goods", icon: ShieldCheck, roles: ["QA_QC"] },
       { to: "/rework", label: "Rework", icon: Wrench, roles: ["PRODUCTION"] },
-      { to: "/lots", label: "Lots & Recall", icon: Boxes, roles: ["STORE", "QA_QC", "RND", "PPIC", "ACCOUNTS"] },
+      { to: "/lots", label: "Lots & Recall", icon: Boxes, roles: ["RND"] },
     ],
   },
   {
@@ -178,10 +179,10 @@ const NAV_GROUPS: { heading: string; items: NavItem[] }[] = [
       // Pre-Inventory), same reasoning as PURCHASE's Packaging BOM above.
       { to: "/rm-costing", label: "RM BOM", icon: FlaskConical, roles: ["RND"] },
       // Which vendors a product may take a material from (R&D decides; Purchase and Store see it so they order and issue the right one)
-      { to: "/approved-vendors", label: "Approved Vendors", icon: ShieldCheck, roles: ["RND", "PURCHASE", "PPIC", "STORE"] },
+      { to: "/approved-vendors", label: "Approved Vendors", icon: ShieldCheck, roles: ["RND", "PURCHASE", "STORE"], warehouseSeatOnly: true },
       { to: "/sample-requests", label: "Sample Request", icon: Beaker, roles: ["RND", "BD", "REGULATORY"] },
       { to: "/rnd", label: "R&D Requests", icon: Beaker, roles: ["RND"] },
-      { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"] },
+      { to: "/rnd-store", label: "R&D Store", icon: FlaskConical, roles: ["STORE", "RND"], warehouseSeatOnly: true },
     ],
   },
   {
@@ -225,7 +226,7 @@ const VIEW_AS_OPTIONS: { role: RoleName; label: string }[] = [
   { role: "RND", label: "R&D" },
   { role: "REGULATORY", label: "Regulatory" },
   { role: "PURCHASE", label: "Purchase" },
-  { role: "STORE", label: "Warehouse (Store)" },
+  { role: "STORE", label: "Warehouse" },
   { role: "PRODUCTION", label: "Production (all plants)" },
   { role: "QA_QC", label: "QA / QC" },
   { role: "ACCOUNTS", label: "Accounts" },
@@ -244,9 +245,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { data: myStore } = useMyStoreInfo({ enabled: hasRole("STORE") });
   const transfersLabel = myStore?.scoped ? "Send / Return Stock" : myStore && hasRole("STORE") && !hasRole("ADMIN") ? "Stock Returns" : "Stock Transfers";
 
+  // A Store login (tied to one Store) does not get the Warehouse's tools, unless another of its roles gives it the page
+  const storeLogin = !!myStore?.scoped;
+  const hiddenFromStore = (item: NavItem) => !!item.warehouseSeatOnly && storeLogin && !hasRole(...(item.roles ?? []).filter((r) => r !== "STORE"));
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => (item.deptAdminOnly ? !isAdmin && !!user?.deptAdminOf.length : !item.roles || hasRole(...item.roles))).map((item) => (item.to === "/stock-transfers" ? { ...item, label: transfersLabel } : item)),
+    items: group.items.filter((item) => (item.deptAdminOnly ? !isAdmin && !!user?.deptAdminOf.length : !item.roles || (hasRole(...item.roles) && !hiddenFromStore(item)))).map((item) => (item.to === "/stock-transfers" ? { ...item, label: transfersLabel } : item)),
   })).filter((group) => group.items.length > 0);
   // What the sidebar lists: an entry with `sidebarRoles` shows there only for those roles (the others still may open its page)
   const sidebarGroups = visibleGroups.map((group) => ({ ...group, items: group.items.filter((item) => !item.sidebarRoles || hasRole(...item.sidebarRoles)) })).filter((group) => group.items.length > 0);
@@ -509,7 +513,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
                       else {
                         const [kind, id] = v.split(":") as ["DAYSTORE" | "PLANT", string];
                         const store = (viewDayStores ?? []).find((s) => (kind === "DAYSTORE" ? s.id === id : s.pairedPlant?.id === id));
-                        setViewAs(kind === "DAYSTORE" ? "STORE" : "PRODUCTION", { kind, id, label: kind === "DAYSTORE" ? `Day Store: ${store?.name ?? ""}` : `Production: ${store?.pairedPlant?.name ?? store?.name ?? ""}` });
+                        setViewAs(kind === "DAYSTORE" ? "STORE" : "PRODUCTION", { kind, id, label: kind === "DAYSTORE" ? `Store: ${store?.name ?? ""}` : `Production: ${store?.pairedPlant?.name ?? store?.name ?? ""}` });
                       }
                       navigate("/");
                     }}
@@ -523,10 +527,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
                       ))}
                     </optgroup>
                     {(viewDayStores ?? []).length > 0 && (
-                      <optgroup label="One Day Store">
+                      <optgroup label="One Store">
                         {(viewDayStores ?? []).map((s) => (
                           <option key={s.id} value={`DAYSTORE:${s.id}`}>
-                            Day Store: {s.name}
+                            Store: {s.name}
                           </option>
                         ))}
                       </optgroup>
@@ -664,7 +668,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
             {isRestricted ? (
               <EmptyState
                 icon={Lock}
-                title={`${matchedAnyNav?.label} is restricted to ${matchedAnyNav?.roles?.join(" / ") ?? "the department admin"}`}
+                title={`${matchedAnyNav?.label} is restricted to ${matchedAnyNav && hiddenFromStore(matchedAnyNav) ? "the Warehouse" : (matchedAnyNav?.roles?.join(" / ") ?? "the department admin")}`}
                 hint="Your account doesn't have that role, so this screen isn't in your sidebar. Pick a module from the left, or ask an administrator if you need access."
                 accent="slate"
               />

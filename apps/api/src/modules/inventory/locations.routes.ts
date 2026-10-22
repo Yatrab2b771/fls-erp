@@ -52,7 +52,7 @@ dayStoresRouter.post("/", requireRole("STORE"), validateBody(createLocationSchem
   try {
     const { name } = req.body as CreateLocationInput;
     const [existingStore, existingPlant] = await Promise.all([prisma.dayStore.findUnique({ where: { name } }), prisma.plant.findUnique({ where: { name } })]);
-    if (existingStore) return res.status(409).json({ error: "A day store with this name already exists" });
+    if (existingStore) return res.status(409).json({ error: "A store with this name already exists" });
     if (existingPlant) return res.status(409).json({ error: "A plant with this name already exists — pick a different Store name." });
 
     const dayStore = await prisma.$transaction(async (tx) => {
@@ -72,11 +72,11 @@ dayStoresRouter.patch("/:id", requireRole("STORE"), validateBody(renameLocationS
   try {
     const { name } = req.body as RenameLocationInput;
     const existing = await prisma.dayStore.findUnique({ where: { id: req.params.id } });
-    if (!existing) return res.status(404).json({ error: "Day Store not found" });
+    if (!existing) return res.status(404).json({ error: "Store not found" });
     await assertDayStoreAccess(req.user!.id, req.user!.roles, existing.id);
 
     const clash = await prisma.dayStore.findUnique({ where: { name } });
-    if (clash && clash.id !== existing.id) return res.status(409).json({ error: "A day store with this name already exists" });
+    if (clash && clash.id !== existing.id) return res.status(409).json({ error: "A store with this name already exists" });
 
     const dayStore = await prisma.dayStore.update({ where: { id: existing.id }, data: { name } });
     await recordAudit({ actorId: req.user!.id, action: "day_store.renamed", entityType: "DayStore", entityId: dayStore.id, metadata: { from: existing.name, to: name } });
@@ -94,7 +94,7 @@ dayStoresRouter.patch("/:id", requireRole("STORE"), validateBody(renameLocationS
 dayStoresRouter.get("/:id/stock", requireRole("STORE", "PPIC"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const dayStore = await prisma.dayStore.findUnique({ where: { id: req.params.id } });
-    if (!dayStore) return res.status(404).json({ error: "Day Store not found" });
+    if (!dayStore) return res.status(404).json({ error: "Store not found" });
     await assertDayStoreAccess(req.user!.id, req.user!.roles, dayStore.id);
 
     // No itemIds filter here on purpose — that's what keeps this to only
@@ -134,7 +134,7 @@ const assignmentInclude = {
 dayStoresRouter.get("/:id/assignments", requireRole("STORE"), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const dayStore = await prisma.dayStore.findUnique({ where: { id: req.params.id } });
-    if (!dayStore) return res.status(404).json({ error: "Day Store not found" });
+    if (!dayStore) return res.status(404).json({ error: "Store not found" });
 
     const assignments = await prisma.dayStoreAssignment.findMany({
       where: { dayStoreId: dayStore.id },
@@ -152,7 +152,7 @@ const assignUserSchema = z.object({ userId: z.string().uuid() });
 dayStoresRouter.post("/:id/assignments", requireRole("STORE"), validateBody(assignUserSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const dayStore = await prisma.dayStore.findUnique({ where: { id: req.params.id } });
-    if (!dayStore) return res.status(404).json({ error: "Day Store not found" });
+    if (!dayStore) return res.status(404).json({ error: "Store not found" });
 
     const { userId } = req.body as z.infer<typeof assignUserSchema>;
     const targetUser = await prisma.user.findUnique({ where: { id: userId }, include: { roles: { include: { role: true } } } });

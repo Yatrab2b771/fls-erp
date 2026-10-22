@@ -131,7 +131,7 @@ export function InventoryItemDetailPage() {
             </div>
           ))}
           {!location.dayStores.length && !location.plants.length && (
-            <p className="text-xs text-slate-400 sm:col-span-2">No activity yet at any Day Store or Plant for this item.</p>
+            <p className="text-xs text-slate-400 sm:col-span-2">No activity yet at any Store or Plant for this item.</p>
           )}
         </div>
       </div>

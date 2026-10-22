@@ -40,8 +40,8 @@ async function setup() {
   return { warehouse, storeA, storeB, cocoa, a, plantA, production };
 }
 
-describe("Plan requests - production request -> Plant's Day Store -> Warehouse (urgent) -> Plant", () => {
-  it("goes to the Plant's Day Store, which fills what it has and asks the Warehouse for the rest", async () => {
+describe("Plan requests - production request -> Plant's Store -> Warehouse (urgent) -> Plant", () => {
+  it("goes to the Plant's Store, which fills what it has and asks the Warehouse for the rest", async () => {
     const { warehouse, storeA, storeB, production } = await setup();
     const mine = () => request(app).get("/api/inventory/my-store/production-requests").set(authHeader(storeA));
 
@@ -95,7 +95,7 @@ describe("Plan requests - production request -> Plant's Day Store -> Warehouse (
     expect(second).toMatchObject({ storeStock: 10, storeShare: 0, toAsk: 30, short: true }); // the same 10 are not counted twice
   });
 
-  it("filters the Day Store's production requests and the Warehouse's plan list", async () => {
+  it("filters the Store's production requests and the Warehouse's plan list", async () => {
     const { warehouse, storeA } = await setup();
     const count = async (qs: string) => (await request(app).get(`/api/inventory/my-store/production-requests?${qs}`).set(authHeader(storeA))).headers["x-total-count"];
     expect(await count("product=PLN%20Protein%20Bar")).toBe("1");

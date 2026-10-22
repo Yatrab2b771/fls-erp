@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, ensurePlant } from "./helpers";
+import { authHeader, createUser, ensurePlant, sendPlanToProduction } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
@@ -14,6 +14,7 @@ async function createApprovedPoItem(bdToken: string) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -41,7 +42,7 @@ describe("Dispensing requires the run's full linked recipe/BOM, not just one ite
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: bdToken } = await createUser(["BD"]);
     const { token: storeToken } = await createUser(["STORE"]);
-    const { token: adminToken } = await createUser(["ADMIN"]); // run steps belong to the plant's Day Store; ADMIN may step in
+    const { token: adminToken } = await createUser(["ADMIN"]); // run steps belong to the plant's Store; ADMIN may step in
     const { token: qaToken } = await createUser(["QA_QC"]);
 
     const { token: rndToken } = await createUser(["RND"]);

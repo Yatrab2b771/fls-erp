@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, ensurePlant } from "./helpers";
+import { authHeader, createUser, createDayStoreLogin, sendPlanToProduction } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
-async function createApprovedPo(bdToken: string, poNumber: string, items: { productName: string; productCategory?: string; quantity: number; unit: string }[]) {
+async function createApprovedPo(bdToken: string, poNumber: string, items: { productName: string; productCategory?: string; quantity: number; unit: string }[], plantId?: string) {
   const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: `Customer for ${poNumber}` });
   const po = await request(app).post("/api/purchase-orders").set(authHeader(bdToken)).send({ customerId: customer.body.id, poNumber, items: items.map((i) => ({ productCategory: "Powder", ...i })) });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  for (const item of po.body.items as { id: string }[]) await sendPlanToProduction(item.id, plantId);
   return po.body as { id: string; items: { id: string; productName: string }[] };
 }
 
@@ -23,10 +25,11 @@ describe("POST /api/pre-productions/import", () => {
   it("forwards multiple runs at different stages in one call, each through its own department's gate", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const ds = await createDayStoreLogin();
+    const storeToken = ds.token;
 
-    const poA = await createApprovedPo(bdToken, "PO-IMPORT-A", [{ productName: "Import Product A", productCategory: "Powder", quantity: 50, unit: "KG" }]);
-    const poB = await createApprovedPo(bdToken, "PO-IMPORT-B", [{ productName: "Import Product B", productCategory: "Powder", quantity: 50, unit: "KG" }]);
+    const poA = await createApprovedPo(bdToken, "PO-IMPORT-A", [{ productName: "Import Product A", productCategory: "Powder", quantity: 50, unit: "KG" }], ds.plant.id);
+    const poB = await createApprovedPo(bdToken, "PO-IMPORT-B", [{ productName: "Import Product B", productCategory: "Powder", quantity: 50, unit: "KG" }], ds.plant.id);
     const runA = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poA.items[0]!.id })).body;
     const runB = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poB.items[0]!.id })).body;
     expect(runA.currentStageId).toBe("MATERIAL_RECEIVED");
@@ -83,13 +86,14 @@ describe("POST /api/pre-productions/import", () => {
   it("a caller lacking the role for one row's stage: that row fails, others in the same call still succeed", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const ds = await createDayStoreLogin();
+    const storeToken = ds.token;
 
     // One run still at MATERIAL_RECEIVED (Store-owned), one already
     // walked to INDENT_ISSUE (PPIC-owned) — a Store-only caller can
     // forward the first but not the second.
-    const poA = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-A", [{ productName: "RBAC Product A", productCategory: "Powder", quantity: 10, unit: "KG" }]);
-    const poB = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-B", [{ productName: "RBAC Product B", productCategory: "Powder", quantity: 10, unit: "KG" }]);
+    const poA = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-A", [{ productName: "RBAC Product A", productCategory: "Powder", quantity: 10, unit: "KG" }], ds.plant.id);
+    const poB = await createApprovedPo(bdToken, "PO-IMPORT-RBAC-B", [{ productName: "RBAC Product B", productCategory: "Powder", quantity: 10, unit: "KG" }], ds.plant.id);
     const runA = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poA.items[0]!.id })).body;
     const runB = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: poB.items[0]!.id })).body;
     await request(app).patch(`/api/pre-productions/${runB.id}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // now at INDENT_ISSUE
@@ -120,7 +124,8 @@ describe("POST /api/pre-productions/import", () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: bdToken } = await createUser(["BD"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const ds = await createDayStoreLogin();
+    const storeToken = ds.token;
 
     const { token: rndToken } = await createUser(["RND"]);
     await request(app)
@@ -128,16 +133,16 @@ describe("POST /api/pre-productions/import", () => {
       .set(authHeader(rndToken))
       .send({ recipes: [{ name: "Import Gate Product", ingredients: [{ name: "Import Gate Protein", brand: "TestBrand", costPerKg: 300, gPerServing: 10, proteinPct: 0.5 }] }] });
 
-    const po = await createApprovedPo(bdToken, "PO-IMPORT-GATE", [{ productName: "Import Gate Product", productCategory: "Powder", quantity: 10, unit: "Kg" }]);
-    await ensurePlant(po.items[0]!.id);
-    const rmPlan = await request(app).post("/api/rm-costing/plans").set(authHeader(bdToken)).send({ name: "Import Gate — RM", purchaseOrderItemId: po.items[0]!.id });
-    expect(rmPlan.body.status).toBe("CALCULATED");
+    const po = await createApprovedPo(bdToken, "PO-IMPORT-GATE", [{ productName: "Import Gate Product", productCategory: "Powder", quantity: 10, unit: "Kg" }], ds.plant.id);
+    // The product's calculated RM plan (what dispensing has to cover): 10 Kg of one material
+    await prisma.inventoryItem.create({ data: { category: "RM", name: "Import Gate Protein", unit: "Kg" } });
+    await prisma.rmPlan.create({
+      data: { name: "Import Gate — RM", status: "CALCULATED", calculatedAt: new Date(), costingParams: {}, createdById: ds.user.id, purchaseOrderItemId: po.items[0]!.id, resultSnapshot: { procurement: [{ name: "Import Gate Protein", totalKg: 10 }] } },
+    });
 
     const run = (await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: po.items[0]!.id })).body;
-    const { token: qaToken } = await createUser(["QA_QC"]);
     await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // MATERIAL_RECEIVED -> INDENT_ISSUE
-    await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" }); // -> LINE_CLEARANCE
-    await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" }); // -> DISPENSING
+    await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(productionToken)).send({ action: "FORWARD" }); // -> DISPENSING (the indent is Production's)
 
     // No consumption columns in a flat import row — the gate correctly
     // blocks, same as a manual Forward with nothing logged would.

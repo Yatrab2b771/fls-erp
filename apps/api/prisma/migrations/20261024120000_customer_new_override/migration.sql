@@ -1,1 +1,1 @@
-﻿ALTER TABLE "customers" ADD COLUMN "newOverride" BOOLEAN;
+ALTER TABLE "customers" ADD COLUMN "newOverride" BOOLEAN;

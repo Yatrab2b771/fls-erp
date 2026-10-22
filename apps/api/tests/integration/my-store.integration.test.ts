@@ -28,7 +28,7 @@ async function setup() {
   return { warehouse, storeA, a, b, plantA };
 }
 
-describe("Day Store login - works like a Warehouse for its own store only", () => {
+describe("Store login - works like a Warehouse for its own store only", () => {
   it("info lists only the assigned store and its Plant; the Warehouse seat is unscoped", async () => {
     const { warehouse, storeA } = await setup();
     const mine = await request(app).get("/api/inventory/my-store/info").set(authHeader(storeA));

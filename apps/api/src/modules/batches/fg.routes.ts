@@ -147,6 +147,8 @@ fgRouter.get("/store-board", requireRole("STORE", "QA_QC", "PPIC"), async (req: 
       where: {
         currentStageId: stage,
         ...(stage === "FG_HANDOVER" ? { handedOverToDispatchAt: null } : {}),
+        // QA-approved packed goods are the Day Store's finished goods only once Production has handed them over to the store
+        ...(stage === "FG_STORE" ? { handedToStoreAt: { not: null } } : {}),
         ...(scope ? { preProduction: { plant: { dayStoreId: { in: scope } } } } : {}),
       },
       select: batchSelect,

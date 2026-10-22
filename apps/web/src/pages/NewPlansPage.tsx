@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ClipboardCheck, Download, Layers, PackageOpen, PauseCircle, XCircle } from "lucide-react";
@@ -72,7 +73,9 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
   const cancelProduct = useCancelProduct();
   const [asking, setAsking] = useState<{ row: PlanBoardRow; kind: "hold" | "cancel" } | null>(null);
   const picked = (key: string) => filters.applied.picks[key] ?? [];
-  const all = (data ?? []).filter(mode === "batch" ? isBatchStage : isNewPlan);
+  // New Plan keeps one fixed order (oldest sent first), so a row stays where it is when its run starts instead of jumping below the unstarted ones.
+  const byAge = (a: PlanBoardRow, b: PlanBoardRow) => a.sentAt.localeCompare(b.sentAt) || a.itemId.localeCompare(b.itemId);
+  const all = (data ?? []).filter(mode === "batch" ? isBatchStage : isNewPlan).sort(mode === "batch" ? undefined : byAge);
   const distinctMany = (pick: (r: PlanBoardRow) => (string | null | undefined)[]) => [...new Set(all.flatMap(pick).filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const distinct = (pick: (r: PlanBoardRow) => string | null | undefined) => distinctMany((r) => [pick(r)]);
 
@@ -113,7 +116,7 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
     (!picked("bstatus").length || picked("bstatus").includes(b.status === "COMPLETED" ? "Completed" : "In progress"));
   const matOk = (m: PlanBoardRow["batches"][number]["materials"][number]) =>
     (!picked("matname").length || picked("matname").includes(m.itemName)) &&
-    (!picked("matcat").length || picked("matcat").includes(m.category === "RM" ? "Raw Material" : "Packaging Material")) &&
+    (!picked("matcat").length || picked("matcat").includes(materialKindName(m.category))) &&
     (!picked("hasqty").length || QTY_FIELDS.some((f) => picked("hasqty").includes(f.label) && f.has(m))) &&
     (!picked("yieldb").length || YIELD_BUCKETS.some((b) => picked("yieldb").includes(b.label) && b.ok(yieldPct(m))));
   const matFilterActive = ["matname", "matcat", "hasqty", "yieldb"].some((k) => picked(k).length > 0);
@@ -234,7 +237,7 @@ export function NewPlansPage({ mode = "plan" }: { mode?: "plan" | "batch" }) {
             <p className="text-sm text-slate-500">
               {rows.length.toLocaleString()} plan{rows.length === 1 ? "" : "s"}
               {isFiltered ? ` of ${all.length}` : ""}
-              {mode === "batch" ? " with a batch cleared for production. Open Batch on a row: start the batch, fill its RM Utilization, then its end time." : notStarted > 0 ? ` from PPIC · ${notStarted} not started. Start the run and divide it into batches: each batch then goes through Indent Issue, Batch No, Dispensing and Line Clearance.` : " from PPIC. Divide each into batches: each batch then goes through Indent Issue, Batch No, Dispensing and Line Clearance."}
+              {mode === "batch" ? " with a batch cleared for production. Open Batch on a row: save the start fields (the batch then goes through In-Process QA, the QA Gate and Bulk QC); once Bulk QC has passed, fill its RM Utilization and end time, then Send to Packaging." : notStarted > 0 ? ` from PPIC · ${notStarted} not started. Start the run and divide it into batches: each batch then goes through Indent Issue, Batch No, Dispensing and Line Clearance.` : " from PPIC. Divide each into batches: each batch then goes through Indent Issue, Batch No, Dispensing and Line Clearance."}
             </p>
           </div>
         </div>

@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
@@ -104,7 +105,7 @@ export function VendorPaymentsPage() {
       "PO / PI Number": r.piNumber,
       Status: STATUS_LABEL[r.status],
       "RM / PM": r.itemName,
-      Category: r.category === "RM" ? "Raw Material" : "Packaging Material",
+      Category: materialKindName(r.category),
       Unit: r.unit,
       "Short Qty": r.shortQty,
       Vendor: r.vendorName,
@@ -191,7 +192,7 @@ export function VendorPaymentsPage() {
                       </td>
                       <td className="px-3 py-2.5 font-bold text-slate-800">
                         {r.itemName}
-                        <span className="block text-micro font-normal text-slate-400">{[r.category === "RM" ? "Raw Material" : "Packaging Material", r.customerPo ? `for ${r.customerPo.poNumber ?? "PO"} · ${r.customerPo.productName}` : null].filter(Boolean).join(" · ")}</span>
+                        <span className="block text-micro font-normal text-slate-400">{[materialKindName(r.category), r.customerPo ? `for ${r.customerPo.poNumber ?? "PO"} · ${r.customerPo.productName}` : null].filter(Boolean).join(" · ")}</span>
                       </td>
                       <td className="whitespace-nowrap px-3 py-2.5 text-right font-mono font-bold text-slate-800">
                         {fmtQty(r.shortQty)} {r.unit}

@@ -125,7 +125,7 @@ async function collectAll(): Promise<BinRow[]> {
       entityType: "inventory-request" as const,
       id: r.id,
       label: `Material Request — ${r.item.name}`,
-      detail: `${r.requestedQty} — ${r.purpose === "ISSUED_PRODUCTION" ? "for Production" : "for Day Store"}`,
+      detail: `${r.requestedQty} — ${r.purpose === "ISSUED_PRODUCTION" ? "for Production" : "for Store"}`,
       deletedAt: r.deletedAt!.toISOString(),
       deletedBy: r.deletedBy,
     })),
@@ -206,7 +206,7 @@ const RESTORE_HANDLERS: Record<BinEntityType, (id: string) => Promise<{ found: b
         if (txn.quantity > onHand + 1e-9) throw new RouteError(409, `Can't restore this: it issues ${txn.quantity} ${txn.unit} but only ${onHand} ${txn.unit} is on hand in the Warehouse now.`);
       } else if (txn.type === "ISSUED_PRODUCTION" && txn.dayStoreId) {
         const onHand = (await getOnHandByDayStoreAndItem(txn.dayStoreId, [txn.itemId], tx)).get(txn.itemId)?.onHand ?? 0;
-        if (txn.quantity > onHand + 1e-9) throw new RouteError(409, `Can't restore this: it issues ${txn.quantity} ${txn.unit} from a Day Store that has only ${onHand} ${txn.unit} now.`);
+        if (txn.quantity > onHand + 1e-9) throw new RouteError(409, `Can't restore this: it issues ${txn.quantity} ${txn.unit} from a Store that has only ${onHand} ${txn.unit} now.`);
       }
       await tx.inventoryTransaction.update({ where: { id }, data: { deletedAt: null, deletedById: null } });
       return { found: true };

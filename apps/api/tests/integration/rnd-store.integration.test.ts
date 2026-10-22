@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock } from "./helpers";
 
 const app = createApp();
 
 async function createItemWithStock(storeToken: string, quantity: number, unit = "Kg") {
   const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: `RND Sample Item ${Math.random().toString(36).slice(2)}` });
-  await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "RECEIVED", date: "2026-09-01", unit, quantity, isOpeningStock: true });
+  await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-09-01", unit, quantity, isOpeningStock: true });
   return item.body.id as string;
 }
 

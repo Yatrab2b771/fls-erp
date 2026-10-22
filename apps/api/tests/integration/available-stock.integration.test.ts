@@ -16,7 +16,7 @@ async function setup() {
   const cocoa = await prisma.inventoryItem.create({ data: { category: "RM", name: "AVL Cocoa", unit: "Kg" } });
   const jar = await prisma.inventoryItem.create({ data: { category: "PM", name: "AVL Jar", unit: "Nos" } });
   const ghost = await prisma.inventoryItem.create({ data: { category: "RM", name: "AVL Ghost", unit: "Kg" } });
-  const dayStore = await prisma.dayStore.create({ data: { name: "AVL Day Store A", createdById: user.id } });
+  const dayStore = await prisma.dayStore.create({ data: { name: "AVL Store A", createdById: user.id } });
   const plant = await prisma.plant.create({ data: { name: "AVL Plant P", createdById: user.id, dayStoreId: dayStore.id } });
 
   const base = { date: new Date(), createdById: user.id };
@@ -28,7 +28,7 @@ async function setup() {
   return { token, cocoa, jar, ghost, dayStore, plant };
 }
 
-describe("Available Stock - every RM / PM on hand across Warehouse, Day Stores, R&D Store and Plants", () => {
+describe("Available Stock - every RM / PM on hand across Warehouse, Stores, R&D Store and Plants", () => {
   it("summary counts the items that have stock somewhere", async () => {
     const { token } = await setup();
     const res = await request(app).get("/api/inventory/available-stock/summary").set(authHeader(token));
@@ -51,7 +51,7 @@ describe("Available Stock - every RM / PM on hand across Warehouse, Day Stores, 
     const { token, dayStore } = await setup();
     const res = await request(app).get("/api/inventory/available-stock?view=location").set(authHeader(token));
     expect(res.headers["x-total-count"]).toBe("5"); // Cocoa x 4 locations + Jar x 1
-    expect(res.body).toContainEqual(expect.objectContaining({ itemName: "AVL Cocoa", locationKey: `ds:${dayStore.id}`, locationLabel: "AVL Day Store A", quantity: 35 }));
+    expect(res.body).toContainEqual(expect.objectContaining({ itemName: "AVL Cocoa", locationKey: `ds:${dayStore.id}`, locationLabel: "AVL Store A", quantity: 35 }));
   });
 
   it("filters: location, category, item; the item total follows the chosen locations", async () => {
@@ -59,7 +59,7 @@ describe("Available Stock - every RM / PM on hand across Warehouse, Day Stores, 
     const get = (qs: string) => request(app).get(`/api/inventory/available-stock?${qs}`).set(authHeader(token));
 
     const onlyDayStore = await get(`view=item&location=ds:${dayStore.id}`);
-    expect(onlyDayStore.body.map((r: { itemName: string; total: number }) => [r.itemName, r.total])).toEqual([["AVL Cocoa", 35]]); // the Jar is not in that Day Store
+    expect(onlyDayStore.body.map((r: { itemName: string; total: number }) => [r.itemName, r.total])).toEqual([["AVL Cocoa", 35]]); // the Jar is not in that Store
     expect((await get("view=item&location=warehouse&location=rnd")).body.find((r: { itemName: string }) => r.itemName === "AVL Cocoa").total).toBe(72); // 60 + 12
 
     expect((await get("view=item&category=PM")).body.map((r: { itemName: string }) => r.itemName)).toEqual(["AVL Jar"]);
@@ -125,7 +125,7 @@ describe("Available Stock - what the receipts say about each item", () => {
     expect(await count("hasOnOrder=Yes&hasQuarantine=No")).toBe("0");
   });
 
-  it("batches: the receipts behind an item, soonest expiry first; a Day Store login cannot open them", async () => {
+  it("batches: the receipts behind an item, soonest expiry first; a Store login sees only the QC-accepted ones, without the vendor and invoice", async () => {
     const { token, whey } = await detailSetup();
     const res = await request(app).get(`/api/inventory/available-stock/batches?itemId=${whey.id}`).set(authHeader(token));
     expect(res.status).toBe(200);
@@ -140,6 +140,10 @@ describe("Available Stock - what the receipts say about each item", () => {
     const { token: ds, user } = await createUser(["STORE"]);
     const store = await prisma.dayStore.create({ data: { name: "AVD Store", createdById: user.id } });
     await prisma.dayStoreAssignment.create({ data: { userId: user.id, dayStoreId: store.id } });
-    expect((await request(app).get(`/api/inventory/available-stock/batches?itemId=${whey.id}`).set(authHeader(ds))).status).toBe(403);
+    const asStore = await request(app).get(`/api/inventory/available-stock/batches?itemId=${whey.id}`).set(authHeader(ds));
+    expect(asStore.status).toBe(200);
+    const storeBatchNos = asStore.body.map((b: { batchNo: string }) => b.batchNo);
+    expect(storeBatchNos).toEqual(["AVD-OLD", "AVD-B1", "AVD-B2"]); // AVD-B3 is still pending QC: not accepted, so not shown
+    expect(asStore.body.every((b: { vendorName: unknown; invoiceNo: unknown }) => b.vendorName === null && b.invoiceNo === null)).toBe(true);
   });
 });

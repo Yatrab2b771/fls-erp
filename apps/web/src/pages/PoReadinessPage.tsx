@@ -380,7 +380,7 @@ function PoReadinessCard({
                 <th>Item</th>
                 <th>Category</th>
                 <th className="text-right">Required</th>
-                <th className="text-right" title="Warehouse + every Day Store + every Plant, combined">On Hand</th>
+                <th className="text-right" title="Warehouse + every Store + every Plant, combined">On Hand</th>
                 <th></th>
                 {canManage && <th></th>}
               </tr>

@@ -59,7 +59,7 @@ export const createAdjustmentSchema = z
     note: z.string().trim().min(3, "Write why the stock is being corrected.").max(500),
   })
   .superRefine((d, ctx) => {
-    if (d.locationType === "DAY_STORE" && !d.dayStoreId) ctx.addIssue({ code: "custom", path: ["dayStoreId"], message: "Pick the Day Store." });
+    if (d.locationType === "DAY_STORE" && !d.dayStoreId) ctx.addIssue({ code: "custom", path: ["dayStoreId"], message: "Pick the Store." });
     if (d.locationType === "PLANT" && !d.plantId) ctx.addIssue({ code: "custom", path: ["plantId"], message: "Pick the Plant." });
     if (d.mode === "DELTA" && (d.quantityDelta === undefined || Math.abs(d.quantityDelta) < EPS)) ctx.addIssue({ code: "custom", path: ["quantityDelta"], message: "Enter how much to add (+) or take out (-)." });
     if (d.mode === "COUNT" && d.countedQty === undefined) ctx.addIssue({ code: "custom", path: ["countedQty"], message: "Enter the quantity you counted." });
@@ -204,7 +204,7 @@ async function assertMayAdjust(req: AuthedRequest, input: Pick<CreateAdjustmentI
   if (input.locationType === "WAREHOUSE") {
     if (!roles.includes("STORE") || (await getScopedDayStoreIds(req.user!.id, roles)) !== null) throw new RouteError(403, "Only the Warehouse can correct Warehouse stock.");
   } else if (input.locationType === "DAY_STORE") {
-    if (!roles.includes("STORE")) throw new RouteError(403, "Only Store can correct a Day Store's stock.");
+    if (!roles.includes("STORE")) throw new RouteError(403, "Only Store can correct a Store's stock.");
     await assertDayStoreAccess(req.user!.id, roles, input.dayStoreId!);
   } else if (input.locationType === "PLANT") {
     if (!roles.includes("PRODUCTION")) throw new RouteError(403, "Only Production can correct a Plant's stock.");
@@ -220,7 +220,7 @@ stockAdjustmentsRouter.post("/", requireRole(...REQUESTERS), validateBody(create
     await assertMayAdjust(req, input);
     const item = await prisma.inventoryItem.findUnique({ where: { id: input.itemId }, select: { id: true, name: true, unit: true } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
-    if (input.locationType === "DAY_STORE" && !(await prisma.dayStore.findUnique({ where: { id: input.dayStoreId! }, select: { id: true } }))) return res.status(400).json({ error: "Unknown Day Store" });
+    if (input.locationType === "DAY_STORE" && !(await prisma.dayStore.findUnique({ where: { id: input.dayStoreId! }, select: { id: true } }))) return res.status(400).json({ error: "Unknown Store" });
     if (input.locationType === "PLANT" && !(await prisma.plant.findUnique({ where: { id: input.plantId! }, select: { id: true } }))) return res.status(400).json({ error: "Unknown Plant" });
 
     const unit = input.unit ?? item.unit ?? "";

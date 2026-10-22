@@ -802,6 +802,8 @@ export interface BatchUtilization extends UtilizationPart {
   items: UtilizationItem[];
   sheets: { RM: UtilizationSheetValues | null; PM: UtilizationSheetValues | null };
   entries: UtilizationEntry[];
+  /** Material the Store issued as an extra request for this batch that is not in its plan (givenQty = what was issued): the form lists it so Production fills in what was used. */
+  extraItems: UtilizationItem[];
   /** Finished packs this batch is planned to make (the PM plan's target yield, scaled to the batch): the basis the PM sheet is shared on. */
   pmPacks: number | null;
 }
@@ -885,6 +887,8 @@ export interface ProductionBatch {
   bulkQcRemarks: string | null;
   packagingStartDate: string | null;
   packagingStatus: string | null;
+  /** When Production handed the QA-approved packed goods over to the Day Store (null until then). */
+  handedToStoreAt?: string | null;
   packagingEndDate: string | null;
   packagingRemarks: string | null;
   packQaStatus: string | null;

@@ -509,7 +509,7 @@ function RmPart({ r, canRaise }: { r: SampleRequestDetail; canRaise: boolean }) 
     try {
       await raise.mutateAsync({ itemId: item.id, quantity: n, unit: item.unit ?? "Kg", note: `For ${sampleNo(r.requestNo)}`, sampleRequestId: r.id });
       await qc.invalidateQueries({ queryKey: ["sample-requests"] });
-      toast.success("Raw material request sent to the Store.");
+      toast.success("Raw material request sent to the Warehouse.");
       setItemId("");
       setQty("");
     } catch (err) {
@@ -540,11 +540,11 @@ function RmPart({ r, canRaise }: { r: SampleRequestDetail; canRaise: boolean }) 
           <div className="flex gap-2">
             <input className="field font-mono" type="number" min="0" step="any" placeholder={`Quantity${item?.unit ? ` (${item.unit})` : ""}`} value={qty} onChange={(e) => setQty(e.target.value)} />
             <button type="button" className="btn-primary btn-sm shrink-0" disabled={raise.isPending} onClick={submit}>
-              Ask Store
+              Ask Warehouse
             </button>
           </div>
           {error && <p className="text-xs font-bold text-rose-600">{error}</p>}
-          <p className="text-micro text-slate-400">Goes to the Store like any R&amp;D raw-material request, tied to this sample.</p>
+          <p className="text-micro text-slate-400">Goes to the Warehouse like any R&amp;D raw-material request, tied to this sample.</p>
         </div>
       )}
     </div>

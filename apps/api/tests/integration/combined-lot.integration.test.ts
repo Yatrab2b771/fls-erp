@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, sendPlanToProduction } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -13,6 +14,7 @@ async function createApprovedPoItem(bdToken: string, quantity = 100, productName
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName, productCategory: "Powder", quantity, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -23,24 +25,26 @@ async function makeTokens() {
     store: (await createUser(["STORE"])).token,
     ppic: (await createUser(["PPIC"])).token,
     qa: (await createUser(["QA_QC"])).token,
+    rnd: (await createUser(["RND"])).token,
+    admin: (await createUser(["ADMIN"])).token,
     accounts: (await createUser(["ACCOUNTS"])).token,
     dispatch: (await createUser(["DISPATCH"])).token,
   };
 }
 
-/** Walks a PreProduction run to its own terminal stage, plans and completes exactly one ProductionBatch covering the whole plannedQty, and returns the CombinedLot that creates. */
+/**
+ * A CombinedLot ready for its IPQC step. Nothing creates a lot any more (a completed batch no longer combines into one; see
+ * production-batches.routes.ts), but the lots that already exist keep their own stage routes - so the lot is made directly, on a run that was
+ * walked to its own terminal stage and had exactly one batch covering the whole plannedQty completed.
+ */
 async function createFreshCombinedLot(itemId: string, tokens: Awaited<ReturnType<typeof makeTokens>>, plannedQty = 100) {
   const run = (await request(app).post("/api/pre-productions").set(authHeader(tokens.production)).send({ purchaseOrderItemId: itemId })).body;
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.ppic)).send({ action: "FORWARD" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", lineClearanceStatus: "Approved" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
-
+  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
+  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
   const pb = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, plannedQty })).body;
   await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: plannedQty });
-  const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
-  return completed.body.combinedLot as { id: string; currentStageId: string };
+  await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
+  return (await prisma.combinedLot.create({ data: { preProductionId: run.id } })) as { id: string; currentStageId: string };
 }
 
 describe("PATCH /api/combined-lots/:id/stage — full forward walk", () => {
@@ -86,8 +90,10 @@ describe("PATCH /api/combined-lots/:id/stage — full forward walk", () => {
     expect(qaGateMfg.body.recycleLogs).toHaveLength(1);
     expect(qaGateMfg.body.recycleLogs[0]).toMatchObject({ stageId: "QA_GATE_MFG", quantity: 4 });
 
-    // BULK_QC — same hard gate.
-    const bulkQc = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", bulkQcStatus: "Approved" });
+    // BULK_QC — R&D's own step (not QA's), same hard gate.
+    const bulkDenied = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", bulkQcStatus: "Approved" });
+    expect(bulkDenied.status).toBe(403);
+    const bulkQc = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.rnd)).send({ action: "FORWARD", bulkQcStatus: "Approved" });
     expect(bulkQc.status).toBe(200);
     expect(bulkQc.body.currentStageId).toBe("PACKAGING");
 
@@ -103,8 +109,14 @@ describe("PATCH /api/combined-lots/:id/stage — full forward walk", () => {
       .patch(`/api/combined-lots/${lot.id}/stage`)
       .set(authHeader(tokens.qa))
       .send({ action: "FORWARD", packQaStatus: "Approved", packQcStatus: "Approved", packApprovedQty: 85, packRejectedQty: 2, packWastageQty: 3 });
-    expect(qaGatePackaging.body.currentStageId).toBe("BILLING_EWAY_BILL");
+    expect(qaGatePackaging.body.currentStageId).toBe("FG_STORE");
     expect(qaGatePackaging.body.recycleLogs).toHaveLength(2);
+
+    // FG_STORE — the Day Store receives the finished goods; FG_QC_RELEASE — QA releases them.
+    const fgStore = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
+    expect(fgStore.body.currentStageId).toBe("FG_QC_RELEASE");
+    const fgRelease = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", fgQaStatus: "Approved", fgQcStatus: "Approved" });
+    expect(fgRelease.body.currentStageId).toBe("BILLING_EWAY_BILL");
 
     // BILLING_EWAY_BILL — Accounts.
     const billing = await request(app).patch(`/api/combined-lots/${lot.id}/stage`).set(authHeader(tokens.accounts)).send({ action: "FORWARD", invoiceNo: "INV-9001" });
@@ -148,15 +160,19 @@ describe("PATCH /api/combined-lots/:id/stage — combined-shipment guard at Disp
         ],
       });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+    await sendPlanToProduction(po.body.items[0].id);
+    await sendPlanToProduction(po.body.items[1].id);
     return [po.body.items[0].id as string, po.body.items[1].id as string] as const;
   }
 
   async function fastForwardToDispatchPlan(lotId: string, tokens: Awaited<ReturnType<typeof makeTokens>>) {
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", ipqcStatus: "Approved" });
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", mfgQaStatus: "Approved", mfgQcStatus: "Approved" });
-    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", bulkQcStatus: "Approved" });
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.rnd)).send({ action: "FORWARD", bulkQcStatus: "Approved" });
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.production)).send({ action: "FORWARD", packagingStatus: "Completed" });
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", packQaStatus: "Approved", packQcStatus: "Approved" });
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
+    await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", fgQaStatus: "Approved", fgQcStatus: "Approved" });
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(tokens.accounts)).send({ action: "FORWARD" });
   }
 
@@ -202,7 +218,7 @@ describe("PATCH /api/combined-lots/:id/stage — combined-shipment guard at Disp
 // per-test-parameter results (a full replace each save) plus the doc's
 // three sequential sign-offs.
 describe("Certificate of Analysis — /coa/results and /coa/sign", () => {
-  it("PUT /coa/results is QA-only and fully replaces the test list each save", async () => {
+  it("PUT /coa/results is R&D-only and fully replaces the test list each save", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const tokens = await makeTokens();
     const itemId = await createApprovedPoItem(bdToken);
@@ -216,7 +232,7 @@ describe("Certificate of Analysis — /coa/results and /coa/sign", () => {
 
     const first = await request(app)
       .put(`/api/combined-lots/${lot.id}/coa/results`)
-      .set(authHeader(tokens.qa))
+      .set(authHeader(tokens.rnd))
       .send({
         results: [
           { testName: "Description", specification: "Brown colour free flowing powder", observation: "Conforms" },
@@ -229,7 +245,7 @@ describe("Certificate of Analysis — /coa/results and /coa/sign", () => {
 
     const second = await request(app)
       .put(`/api/combined-lots/${lot.id}/coa/results`)
-      .set(authHeader(tokens.qa))
+      .set(authHeader(tokens.rnd))
       .send({ results: [{ testName: "pH (10% aqua. sol.)", specification: "4.5-7.5", observation: "6.1" }] });
     expect(second.status).toBe(200);
     expect(second.body.coaResults).toHaveLength(1);
@@ -241,20 +257,20 @@ describe("Certificate of Analysis — /coa/results and /coa/sign", () => {
     const itemId = await createApprovedPoItem(bdToken);
     const lot = await createFreshCombinedLot(itemId, tokens);
 
-    const reviewTooSoon = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.qa)).send({ step: "REVIEWED" });
+    const reviewTooSoon = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.rnd)).send({ step: "REVIEWED" });
     expect(reviewTooSoon.status).toBe(409);
 
-    const analyzed = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.qa)).send({ step: "ANALYZED" });
+    const analyzed = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.rnd)).send({ step: "ANALYZED" });
     expect(analyzed.status).toBe(200);
     expect(analyzed.body.coaAnalyzedById).toBeTruthy();
 
-    const reAnalyze = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.qa)).send({ step: "ANALYZED" });
+    const reAnalyze = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.rnd)).send({ step: "ANALYZED" });
     expect(reAnalyze.status).toBe(409);
 
-    const reviewed = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.qa)).send({ step: "REVIEWED" });
+    const reviewed = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.rnd)).send({ step: "REVIEWED" });
     expect(reviewed.status).toBe(200);
 
-    const approved = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.qa)).send({ step: "APPROVED" });
+    const approved = await request(app).post(`/api/combined-lots/${lot.id}/coa/sign`).set(authHeader(tokens.rnd)).send({ step: "APPROVED" });
     expect(approved.status).toBe(200);
     expect(approved.body.coaApprovedById).toBeTruthy();
   });
@@ -269,7 +285,7 @@ describe("Certificate of Analysis — /coa/results and /coa/sign", () => {
 
     const saved = await request(app)
       .patch(`/api/combined-lots/${lot.id}/stage`)
-      .set(authHeader(tokens.qa))
+      .set(authHeader(tokens.rnd))
       .send({ action: "FORWARD", bulkQcStatus: "Approved", coaResult: "Complies", coaRemark: "All parameters within specification." });
     expect(saved.status).toBe(200);
     expect(saved.body.coaResult).toBe("Complies");

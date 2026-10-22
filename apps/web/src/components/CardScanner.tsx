@@ -4,17 +4,19 @@ import * as XLSX from "xlsx";
 import { AlertTriangle, ArrowLeft, Building2, Camera, Check, ChevronRight, Contact, Download, FileEdit, ImageUp, Layers, Loader2, Search, UserRound } from "lucide-react";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { SURE_ENOUGH, downloadVcf, findDuplicateCards, useBusinessCards, useCardPhoto, useScanCard, type BusinessCard } from "../lib/businessCardHooks";
+import { fromVisitingCards } from "../lib/backTo";
+import { SURE_ENOUGH, downloadVcf, findDuplicateCards, useBusinessCards, useCardEvent, useCardEvents, useCardPhoto, useScanCard, type BusinessCard } from "../lib/businessCardHooks";
 import { LEAD_STATUS_META, fmtDay, guessCityState, useCreateLead, useLeads, type Lead } from "../lib/leadHooks";
 import { LeadKindFields } from "./LeadPickers";
-import { ChipMulti } from "./LeadPickers";
-import { POWDER_TYPES, PRODUCT_FORMATS } from "../lib/leadHooks";
+import { PRODUCT_FORMATS } from "../lib/leadHooks";
 import { addReportSheet, stampedName } from "../lib/excelReport";
 import { useToast } from "./Toast";
 
-// The visiting-card flow, step by step like the phone app: Home -> take or pick a photo -> check it -> choose the product formats ->
-// the card is read -> review the details (brand, contact, address, customer type, formats) -> Save. Saving makes the card a LEAD, and the next
-// screen offers "Add 1st meeting". A card typed in by hand skips the photo and the reading.
+// The visiting-card home. Scanning is the QUICK scan, the same for every department (made for an event): one tap on a photo saves the card at once,
+// with the event's name, and it is read in the background while the person scans the next one. The person then checks the card from "My cards"
+// (everyone) or "Waiting for your check" (BD). BD's check is the review screen: brand, contact, address, customer type, formats -> Save, which makes
+// the card a LEAD (handing it to whoever follows it up is done from the card list's "Make lead"), and the next screen offers "Add 1st meeting".
+// A card typed in by hand is reviewed the same way (BD) or saved as a card (everyone else).
 
 const CARD_FORMAT_NAMES: Record<string, string> = { Bar: "Bars", Gummy: "Gummies", Tablet: "Tablets", Capsule: "Capsules" };
 const asFormats = (categories: string[]) => [...new Set(categories.map((c) => CARD_FORMAT_NAMES[c] ?? c).filter((c) => (PRODUCT_FORMATS as readonly string[]).includes(c)))];
@@ -22,9 +24,6 @@ const asFormats = (categories: string[]) => [...new Set(categories.map((c) => CA
 type Kinds = { customerTypes: string[]; productFormats: string[]; powderTypes: string[] };
 type Step =
   | { name: "home" }
-  | { name: "preview"; file: File; url: string }
-  | { name: "formats"; file: File; url: string }
-  | { name: "reading"; file: File; url: string; error?: string }
   | { name: "review"; card: BusinessCard | null }
   | { name: "saved"; lead: Lead; card: BusinessCard | null };
 
@@ -42,37 +41,25 @@ function Screen({ title, onBack, children }: { title: string; onBack: () => void
   );
 }
 
-export function CardScanner({ onShowSaved }: { onShowSaved: () => void }) {
+export function CardScanner({ onShowSaved, onOpenCard, onNewCard }: { onShowSaved: () => void; onOpenCard: (c: BusinessCard) => void; onNewCard: () => void }) {
+  const { hasRole } = useAuth();
+  const canLead = hasRole("BD");
   const [step, setStep] = useState<Step>({ name: "home" });
   const [kinds, setKinds] = useState<Kinds>({ customerTypes: [], productFormats: [], powderTypes: [] });
-  const scan = useScanCard();
 
   const home = () => {
     setKinds({ customerTypes: [], productFormats: [], powderTypes: [] });
     setStep({ name: "home" });
   };
 
-  function chosen(file: File | undefined) {
-    if (!file) return;
-    setStep({ name: "preview", file, url: URL.createObjectURL(file) });
-  }
-
-  async function read(file: File, url: string) {
-    setStep({ name: "reading", file, url });
-    try {
-      const card = await scan.mutateAsync({ photo: file, categories: kinds.productFormats });
-      setStep({ name: "review", card });
-    } catch (err) {
-      setStep({ name: "reading", file, url, error: err instanceof ApiError ? err.message : "Could not read the card. Try again." });
-    }
-  }
-
   switch (step.name) {
     case "home":
       return (
         <CardHome
-          onPhoto={chosen}
+          canLead={canLead}
+          onOpenCard={onOpenCard}
           onManual={() => {
+            if (!canLead) return onNewCard(); // only BD makes a lead on the spot; others save the card
             setKinds({ customerTypes: [], productFormats: [], powderTypes: [] });
             setStep({ name: "review", card: null });
           }}
@@ -83,70 +70,6 @@ export function CardScanner({ onShowSaved }: { onShowSaved: () => void }) {
           onShowSaved={onShowSaved}
         />
       );
-    case "preview":
-      return (
-        <Screen title="Preview" onBack={home}>
-          <p className="text-sm text-slate-500">Check that the card is in focus and all text is readable.</p>
-          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
-            <img src={step.url} alt="Visiting card" className="max-h-[26rem] w-full object-contain" />
-          </div>
-          <div className="space-y-2">
-            <button type="button" className="btn-primary h-12 w-full justify-center text-sm" onClick={() => setStep({ name: "formats", file: step.file, url: step.url })}>
-              <Check className="h-4 w-4" strokeWidth={2.5} /> Use This Photo
-            </button>
-            <button type="button" className="btn-ghost h-12 w-full justify-center text-sm" onClick={home}>
-              <Camera className="h-4 w-4" strokeWidth={2.25} /> Retake
-            </button>
-          </div>
-        </Screen>
-      );
-    case "formats":
-      return (
-        <Screen title="Categories" onBack={() => setStep({ name: "preview", file: step.file, url: step.url })}>
-          <div className="card space-y-3 p-4 sm:p-5">
-            <p className="text-lg font-black text-slate-900">Product Formats</p>
-            <p className="text-sm text-slate-500">Choose every product format that applies. Selecting Powder lets you pick its types.</p>
-            <FormatsOnly kinds={kinds} setKinds={setKinds} />
-          </div>
-          <button
-            type="button"
-            className="btn-primary h-12 w-full justify-center text-sm"
-            disabled={kinds.productFormats.length === 0 || (kinds.productFormats.includes("Powder") && kinds.powderTypes.length === 0)}
-            onClick={() => void read(step.file, step.url)}
-          >
-            Continue to text recognition
-          </button>
-          {kinds.productFormats.length === 0 && <p className="text-xs font-bold text-amber-600">Choose at least one product format.</p>}
-          {kinds.productFormats.includes("Powder") && kinds.powderTypes.length === 0 && <p className="text-xs font-bold text-amber-600">Powder is selected: choose its powder type.</p>}
-        </Screen>
-      );
-    case "reading":
-      return (
-        <Screen title="Reading card" onBack={() => setStep({ name: "formats", file: step.file, url: step.url })}>
-          <div className="relative mx-auto max-w-sm overflow-hidden rounded-2xl border border-brand-200 bg-slate-50">
-            <img src={step.url} alt="Visiting card" className="max-h-64 w-full object-contain" />
-            {!step.error && <div className="absolute inset-x-0 top-0 h-full animate-pulse bg-gradient-to-b from-transparent via-brand-400/25 to-transparent" />}
-          </div>
-          {step.error ? (
-            <div className="space-y-2">
-              <p className="rounded-xl bg-rose-50 px-3 py-2 text-sm font-bold text-rose-700">{step.error}</p>
-              <div className="flex gap-2">
-                <button type="button" className="btn-primary btn-sm" onClick={() => void read(step.file, step.url)}>
-                  Try again
-                </button>
-                <button type="button" className="btn-ghost btn-sm" onClick={home}>
-                  Retake
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="mx-auto flex max-w-sm items-center justify-center gap-2 rounded-full border border-brand-200 bg-white px-5 py-3 text-sm font-bold text-slate-700 shadow-sm">
-              <Loader2 className="h-4 w-4 animate-spin text-brand-600" /> Reading text from the card…
-            </div>
-          )}
-          <p className="text-center text-xs text-slate-400">The card is read on our server and saved only when you press Save.</p>
-        </Screen>
-      );
     case "review":
       return <CardReview card={step.card} kinds={kinds} setKinds={setKinds} onBack={home} onSaved={(lead, card) => setStep({ name: "saved", lead, card })} />;
     case "saved":
@@ -155,21 +78,6 @@ export function CardScanner({ onShowSaved }: { onShowSaved: () => void }) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-
-function FormatsOnly({ kinds, setKinds }: { kinds: Kinds; setKinds: (k: Kinds) => void }) {
-  const hasPowder = kinds.productFormats.includes("Powder");
-  return (
-    <div className="space-y-3">
-      <ChipMulti options={PRODUCT_FORMATS} value={kinds.productFormats} onChange={(v) => setKinds({ ...kinds, productFormats: v, powderTypes: v.includes("Powder") ? kinds.powderTypes : [] })} />
-      {hasPowder && (
-        <div className="rounded-xl border border-dashed border-brand-300 bg-brand-50/40 px-3 py-2.5">
-          <p className="mb-1.5 text-xs font-bold text-brand-800">Powder type</p>
-          <ChipMulti options={POWDER_TYPES} value={kinds.powderTypes} onChange={(v) => setKinds({ ...kinds, powderTypes: v })} small />
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Home
@@ -180,14 +88,36 @@ function LeadThumb({ lead }: { lead: Lead }) {
   return photo ? <img src={photo} alt="" className="h-14 w-20 flex-none rounded-lg border border-slate-200 object-cover" /> : <div className="flex h-14 w-20 flex-none items-center justify-center rounded-lg bg-brand-50 text-brand-600"><Building2 className="h-5 w-5" /></div>;
 }
 
-function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: File | undefined) => void; onManual: () => void; onResume: (c: BusinessCard) => void; onShowSaved: () => void }) {
+function CardHome({ canLead, onOpenCard, onManual, onResume, onShowSaved }: { canLead: boolean; onOpenCard: (c: BusinessCard) => void; onManual: () => void; onResume: (c: BusinessCard) => void; onShowSaved: () => void }) {
   const { user } = useAuth();
-  const camera = useRef<HTMLInputElement>(null);
-  const gallery = useRef<HTMLInputElement>(null);
+  const toast = useToast();
+  const quickCamera = useRef<HTMLInputElement>(null);
+  const quickGallery = useRef<HTMLInputElement>(null);
+  const quick = useScanCard();
+  const [event, setEvent] = useCardEvent();
+  const { data: events } = useCardEvents();
   const { data: cards } = useBusinessCards();
   const { data: leads } = useLeads();
-  const scanned = (cards ?? []).length;
-  const unfinished = (cards ?? []).filter((c) => c.status === "NEEDS_VERIFY");
+  // BD sees every card; this screen is about the ones this person collected
+  const mine = useMemo(() => (cards ?? []).filter((c) => c.collectedBy.id === user?.id), [cards, user?.id]);
+  const scanned = mine.length;
+  const unfinished = mine.filter((c) => c.status === "NEEDS_VERIFY");
+  const reading = mine.filter((c) => c.status === "READING");
+
+  // One tap on a photo: it is saved at once and read in the background, so the next card can be scanned straight away
+  async function quickScan(files: FileList | null) {
+    const list = [...(files ?? [])];
+    let ok = 0;
+    for (const file of list) {
+      try {
+        await quick.mutateAsync({ photo: file, categories: [], event: event.trim() });
+        ok += 1;
+      } catch (err) {
+        toast.error(`${file.name || "Photo"}: ${err instanceof ApiError ? err.message : "could not be saved"}`);
+      }
+    }
+    if (ok) toast.success(ok === 1 ? "Saved. It is being read: scan the next card." : `${ok} cards saved. They are being read.`);
+  }
   const recent = useMemo(() => [...(leads ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5), [leads]);
 
   function exportMine() {
@@ -223,13 +153,22 @@ function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: F
 
       <div className="card space-y-4 p-5">
         <div>
-          <p className="text-2xl font-black text-slate-900">Instant Card Scanner</p>
-          <p className="mt-1 text-sm text-slate-500">Capture visiting cards, automatically extract the details, and keep every contact as a lead you can follow up.</p>
+          <p className="text-2xl font-black text-slate-900">{canLead ? "Instant Card Scanner" : "Collect visiting cards"}</p>
+          <p className="mt-1 text-sm text-slate-500">{canLead ? "Scan visiting cards fast (each is read in the background), then turn the cards into leads and hand them to whoever follows them up." : "Take a photo of every card you collect. It is saved at once and read in the background, so scan the next one straight away. BD follows the cards up."}</p>
         </div>
-        <input ref={camera} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { onPhoto(e.target.files?.[0]); e.target.value = ""; }} />
-        <input ref={gallery} type="file" accept="image/*" className="hidden" onChange={(e) => { onPhoto(e.target.files?.[0]); e.target.value = ""; }} />
-        <button type="button" className="btn-primary h-14 w-full justify-center text-base" onClick={() => camera.current?.click()}>
-          <Camera className="h-5 w-5" strokeWidth={2.25} /> Scan Visiting Card
+        <div>
+          <label className="label">Event</label>
+          <input className="field" list="card-events" value={event} onChange={(e) => setEvent(e.target.value)} placeholder="e.g. Expo Delhi 2026: every card you scan gets this name" />
+          <datalist id="card-events">
+            {(events ?? []).map((ev) => (
+              <option key={ev} value={ev} />
+            ))}
+          </datalist>
+        </div>
+        <input ref={quickCamera} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { void quickScan(e.target.files); e.target.value = ""; }} />
+        <input ref={quickGallery} type="file" accept="image/*" multiple className="hidden" onChange={(e) => { void quickScan(e.target.files); e.target.value = ""; }} />
+        <button type="button" className="btn-primary h-14 w-full justify-center text-base" disabled={quick.isPending} onClick={() => quickCamera.current?.click()}>
+          {quick.isPending ? <Loader2 className="h-5 w-5 animate-spin" /> : <Camera className="h-5 w-5" strokeWidth={2.25} />} Scan Visiting Card
         </button>
         <button type="button" className="btn-ghost h-12 w-full justify-center text-sm" onClick={onManual}>
           <FileEdit className="h-4 w-4" strokeWidth={2.25} /> Add Card Manually
@@ -240,23 +179,42 @@ function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: F
         <div className="card p-4">
           <Layers className="h-5 w-5 text-brand-600" />
           <p className="mt-2 text-3xl font-black text-slate-900">{scanned}</p>
-          <p className="text-sm text-slate-500">Cards scanned</p>
+          <p className="text-sm text-slate-500">Cards you scanned{reading.length ? ` (${reading.length} being read)` : ""}</p>
         </div>
-        <button type="button" onClick={() => gallery.current?.click()} className="card p-4 text-left hover:border-brand-300">
+        <button type="button" onClick={() => quickGallery.current?.click()} className="card p-4 text-left hover:border-brand-300">
           <ImageUp className="h-5 w-5 text-brand-600" />
-          <p className="mt-2 text-lg font-black text-brand-700">Upload Card</p>
-          <p className="text-sm text-slate-500">Choose a card photo from the gallery</p>
+          <p className="mt-2 text-lg font-black text-brand-700">Upload Cards</p>
+          <p className="text-sm text-slate-500">Choose one or many card photos from the gallery</p>
         </button>
       </div>
 
       <button type="button" onClick={onShowSaved} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-brand-200 bg-brand-50/60 py-3 text-sm font-black text-brand-700 hover:bg-brand-50">
         <Search className="h-4 w-4" strokeWidth={2.5} /> View Saved Cards
       </button>
-      <button type="button" onClick={exportMine} disabled={(leads ?? []).length === 0} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white py-3 text-sm font-black text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+      {canLead && <button type="button" onClick={exportMine} disabled={(leads ?? []).length === 0} className="flex w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white py-3 text-sm font-black text-slate-700 hover:bg-slate-50 disabled:opacity-50">
         <Download className="h-4 w-4" strokeWidth={2.5} /> Export My Data
-      </button>
+      </button>}
 
-      {unfinished.length > 0 && (
+      {!canLead && mine.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-sm font-black text-slate-900">My cards ({mine.length})</p>
+          {mine.slice(0, 8).map((c) => (
+            <button key={c.id} type="button" disabled={c.status === "READING"} onClick={() => onOpenCard(c)} className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left ${c.status === "VERIFIED" ? "border-emerald-200 bg-emerald-50/50" : "border-amber-200 bg-amber-50"}`}>
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-black text-slate-800">{c.status === "READING" ? "Reading the card…" : c.company || c.name || "Scanned card"}</span>
+                <span className="block text-xs text-slate-500">
+                  {c.status === "READING" ? "Saved. The details fill in by themselves." : c.status === "VERIFIED" ? "Verified" : c.readError ? c.readError : "Read. Tap to check the details and choose the category."}
+                  {c.event ? ` · ${c.event}` : ""}
+                </span>
+                {c.duplicateOf && <span className="block text-xs font-bold text-amber-700">Possible duplicate of {c.duplicateOf.name || c.duplicateOf.company} (added by {c.duplicateOf.addedBy})</span>}
+              </span>
+              {c.status === "READING" ? <Loader2 className="h-4 w-4 flex-none animate-spin text-brand-600" /> : <ChevronRight className="h-4 w-4 flex-none text-slate-400" />}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {canLead && unfinished.length > 0 && (
         <div className="space-y-2">
           <p className="text-sm font-black text-amber-700">Waiting for your check ({unfinished.length})</p>
           {unfinished.map((c) => (
@@ -271,6 +229,7 @@ function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: F
         </div>
       )}
 
+      {canLead && (
       <div>
         <div className="mb-2 flex items-center justify-between">
           <p className="text-lg font-black text-slate-900">Recent cards</p>
@@ -283,7 +242,7 @@ function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: F
         ) : (
           <div className="space-y-3">
             {recent.map((l) => (
-              <Link key={l.id} to={`/leads/${l.id}`} className="card block space-y-2.5 p-4 hover:border-brand-300">
+              <Link key={l.id} to={`/leads/${l.id}`} {...fromVisitingCards()} className="card block space-y-2.5 p-4 hover:border-brand-300">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="truncate text-base font-black text-slate-900">{l.brandName}</p>
@@ -319,6 +278,7 @@ function CardHome({ onPhoto, onManual, onResume, onShowSaved }: { onPhoto: (f: F
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -531,7 +491,7 @@ function CardSaved({ lead, card, onAnother }: { lead: Lead; card: BusinessCard |
         <button type="button" className="btn-ghost h-12 w-full justify-center text-sm" onClick={vcf}>
           <Contact className="h-4 w-4" strokeWidth={2.25} /> Save to Phone Contacts
         </button>
-        <button type="button" className="btn-primary h-12 w-full justify-center text-sm" onClick={() => navigate(`/leads/${lead.id}?meeting=1`)}>
+        <button type="button" className="btn-primary h-12 w-full justify-center text-sm" onClick={() => navigate(`/leads/${lead.id}?meeting=1`, fromVisitingCards())}>
           Add 1st Meeting
         </button>
         <button type="button" className="btn-ghost h-12 w-full justify-center text-sm" onClick={onAnother}>

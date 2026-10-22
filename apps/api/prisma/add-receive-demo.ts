@@ -5,8 +5,8 @@ import { prisma } from "../src/common/lib/prisma";
 import { signAccessToken } from "../src/common/lib/jwt";
 
 /**
- * Batches left waiting at Production's Receive step, to try Material Received by hand. Its own small scenario, so nothing existing is touched:
- * a "DEMO Rx" Plant with its own Day Store (the Plant holds NO material, so the Day Store has to send everything), three new materials,
+ * Batches left waiting at Production's Receive step, to try Material Received by hand. Runs on one of the real Plants (no extra Day Store is
+ * made; name the Plant as the first argument, default Day Store 22): it holds none of the three new materials, so the Day Store has to send everything,
  * and one product whose plan is split into three batches. Each batch goes through Indent Issue, Batch No and Dispensing; the Day Store
  * sends its material to the Plant and the batch waits there for Production to confirm it on Material Received. Safe to run again (it adds
  * another product each time).
@@ -30,15 +30,20 @@ async function call<T = any>(role: RoleName, method: "get" | "post" | "patch", p
 }
 
 const day = (offset = 0) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+/** The Store receives what the Warehouse issued it (it is in transit until then): Admin acts as the Store. */
+const receiveAtStore = (txn: { id: string }) => call("ADMIN", "post", `/api/inventory/transactions/${txn.id}/confirm-delivery`, {});
+
 
 async function main() {
   for (const role of ["BD", "PRODUCTION", "RND", "STORE"] as RoleName[]) await tokenFor(role);
   const admin = await tokenFor("ADMIN");
   const customer = await prisma.customer.findFirstOrThrow({ where: { companyName: { startsWith: "DEMO" } }, orderBy: { createdAt: "asc" } });
 
-  // Its own Plant and Day Store, with nothing in the Plant
-  const dayStore = (await prisma.dayStore.findFirst({ where: { name: "DEMO Rx Day Store" } })) ?? (await prisma.dayStore.create({ data: { name: "DEMO Rx Day Store", createdById: admin.id } }));
-  const plant = (await prisma.plant.findFirst({ where: { name: "DEMO Rx Plant" } })) ?? (await prisma.plant.create({ data: { name: "DEMO Rx Plant", createdById: admin.id, dayStoreId: dayStore.id } }));
+  // One of the real Plants (no extra Day Store is made): the Plant holds none of this scenario's three new materials, so the Day Store has to send
+  // everything. Name another Plant as the first argument; default Day Store 22.
+  const plantName = process.argv[2] ?? "Store 22";
+  const plant = await prisma.plant.findFirstOrThrow({ where: { name: plantName, dayStoreId: { not: null } } });
+  const dayStore = await prisma.dayStore.findUniqueOrThrow({ where: { id: plant.dayStoreId! } });
 
   const ensureItem = async (category: "RM" | "PM", name: string, unit: string) =>
     (await prisma.inventoryItem.findFirst({ where: { category, name } })) ?? (await prisma.inventoryItem.create({ data: { category, name, unit } }));
@@ -51,7 +56,7 @@ async function main() {
     await prisma.inventoryTransaction.create({
       data: { itemId: item.id, createdById: admin.id, date: new Date(), unit, type: "RECEIVED", quantity: qty, vendorName: "DEMO Vendor", grnNo: `DEMO-RX-${Date.now()}-${item.name.slice(-3)}`, batchNo: "RX-LOT", receiptStatus: "ACCEPTED", acceptedById: admin.id, acceptedAt: new Date(), expiryDate: new Date(Date.now() + 365 * 86_400_000) },
     });
-    await call("STORE", "post", "/api/inventory/transactions", { itemId: item.id, type: "ISSUED_DAY_STORE", date: new Date().toISOString(), unit, quantity: qty, dayStoreId: dayStore.id });
+    await receiveAtStore(await call<{ id: string }>("STORE", "post", "/api/inventory/transactions", { itemId: item.id, type: "ISSUED_DAY_STORE", date: new Date().toISOString(), unit, quantity: qty, dayStoreId: dayStore.id }));
   }
 
   // A product ordered by the customer, planned for that Plant and sent to Production (both plans calculated)

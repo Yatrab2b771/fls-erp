@@ -2,7 +2,7 @@ import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, ChevronDown, Download, PackageOpen, Truck } from "lucide-react";
-import { useHandOverBatch, useHandoverBoard, type HandoverRow } from "../lib/hooks";
+import { useHandOverToStore, useHandoverBoard, type HandoverRow } from "../lib/hooks";
 import { useAuth } from "../lib/auth";
 import { ApiError } from "../lib/api";
 import { useToast } from "../components/Toast";
@@ -19,20 +19,21 @@ import type { CombinedLotStageId } from "../lib/types";
 import { CustomerName } from "../components/CustomerName";
 import { customerTypeLabel } from "../lib/customerTags";
 
-type BatchState = "PACKING" | "READY" | "HANDED";
-const STATE_LABEL: Record<BatchState, string> = { PACKING: "Packaging running", READY: "Ready to hand over", HANDED: "Handed over" };
+type BatchState = "PACKING" | "WAITING_QA" | "READY";
+const STATE_ORDER: BatchState[] = ["PACKING", "WAITING_QA", "READY"];
+const STATE_LABEL: Record<BatchState, string> = { PACKING: "Packaging running", WAITING_QA: "Waiting for QA approval", READY: "Ready to hand over to store" };
 const STATE_PILL: Record<BatchState, string> = {
   PACKING: "border-amber-200 bg-amber-50 text-amber-700",
+  WAITING_QA: "border-sky-200 bg-sky-50 text-sky-700",
   READY: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  HANDED: "border-sky-200 bg-sky-50 text-sky-700",
 };
 
-const packagingDone = (b: HandoverRow) => String(b.packagingStatus ?? "").trim().toLowerCase() === "completed";
-// Packaging running: at Packaging, not Completed yet. Ready: Packaging Completed (or already moved on) and not handed over yet.
+// Packaging running: still at Packaging (Production's sheet). Waiting for QA: the Packaging save sent it to QA's packaging gate. Ready: QA approved it
+// and Production hands it over to the store.
 function stateOf(b: HandoverRow): BatchState {
-  if (b.handedOverAt) return "HANDED";
-  if (b.currentStageId === "PACKAGING" && !packagingDone(b)) return "PACKING";
-  return "READY";
+  if (b.awaitingStoreHandover) return "READY";
+  if (b.waitingForQa) return "WAITING_QA";
+  return "PACKING";
 }
 
 interface ProductGroup {
@@ -68,15 +69,15 @@ function groupByProduct(rows: HandoverRow[]): ProductGroup[] {
   });
 }
 
-// Production's third tile. A product's batches whose manufacturing is complete: once a batch's packaging reads Completed, Production hands
-// it over to QA with one click. After that QA's packaging gate, the Day Store (finished goods), QA's approval and Dispatch belong to other
-// departments; a batch leaves this page once QA has passed the packaging gate.
+// Production's third tile. A product's batches whose manufacturing is complete: saving a finished Packaging sheet sends the batch to QA's packaging
+// gate by itself (it stays listed here, waiting for approval); once QA has approved it Production hands it over to the store with one click, and it
+// leaves this page. The Day Store (finished goods), QA's release and Dispatch belong to other departments.
 export function HandoverPage() {
   const { hasRole } = useAuth();
   const canHandOver = hasRole("PRODUCTION");
   const toast = useToast();
   const { data, isLoading } = useHandoverBoard();
-  const handOver = useHandOverBatch();
+  const handOver = useHandOverToStore();
   const filters = useTileFilters();
   const [openId, setOpenId] = useState<string | null>(null);
   const picked = (key: string) => filters.applied.picks[key] ?? [];
@@ -125,7 +126,7 @@ export function HandoverPage() {
         toast.error(`${b.batchNo ?? "Batch"}: ${err instanceof ApiError ? err.message : "could not hand over"}`);
       }
     }
-    if (ok) toast.success(`${ok} batch${ok === 1 ? "" : "es"} handed over to QA.`);
+    if (ok) toast.success(`${ok} batch${ok === 1 ? "" : "es"} handed over to the store.`);
   }
 
   function download() {
@@ -144,10 +145,10 @@ export function HandoverPage() {
         "Packed Qty": b.packedQty ?? "",
         "Dispatched Qty": b.dispatchedQty,
         "Now At": COMBINED_LOT_STAGE_LABEL[b.currentStageId as CombinedLotStageId] ?? b.currentStageId,
-        "Handed Over": b.handedOverAt ? new Date(b.handedOverAt).toLocaleString() : "",
+        "Sent for QA Approval": b.sentForQaAt ? new Date(b.sentForQaAt).toLocaleString() : "",
     }));
     const wb = XLSX.utils.book_new();
-    addReportSheet(wb, "Handover", "FLS Handover to QA", describeFilters(filters, fields, "Manufactured"), rows, { totals: ["Output Qty", "Packed Qty", "Dispatched Qty"] });
+    addReportSheet(wb, "Handover", "FLS Handover to Store", describeFilters(filters, fields, "Manufactured"), rows, { totals: ["Output Qty", "Packed Qty", "Dispatched Qty"] });
     XLSX.writeFile(wb, stampedName("FLS_Handover"));
   }
 
@@ -178,7 +179,7 @@ export function HandoverPage() {
             <p className="text-sm text-slate-500">
               {groups.length.toLocaleString()} product{groups.length === 1 ? "" : "s"}
               {isFiltered ? ` of ${all.length}` : ""} —{" "}
-              {canHandOver ? "when a batch's packaging is complete, hand it over to QA. After QA passes the packaging gate it goes to the Day Store as finished goods." : "batches Production has handed over to QA."}
+              {canHandOver ? "a finished Packaging save sends the batch to QA for approval; once QA approves, hand it over to the store as finished goods." : "batches Production has packed, waiting for QA's approval or its hand-over to the store."}
             </p>
           </div>
         </div>
@@ -187,7 +188,7 @@ export function HandoverPage() {
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-1.5">{(["PACKING", "READY", "HANDED"] as BatchState[]).map(chip)}</div>
+      <div className="flex flex-wrap gap-1.5">{STATE_ORDER.map(chip)}</div>
 
       <TileFilterBar filters={filters} tileKey="handover" fields={fields} dateLabel="Manufactured" />
 
@@ -217,7 +218,7 @@ export function HandoverPage() {
               {pg.rows.map((g) => {
                 const open = openId === g.itemId;
                 const ready = g.batches.filter((b) => stateOf(b) === "READY");
-                const states = (["PACKING", "READY", "HANDED"] as BatchState[]).map((s) => ({ s, n: g.batches.filter((b) => stateOf(b) === s).length })).filter((x) => x.n > 0);
+                const states = STATE_ORDER.map((s) => ({ s, n: g.batches.filter((b) => stateOf(b) === s).length })).filter((x) => x.n > 0);
                 return (
                   <Fragment key={g.itemId}>
                     <tr className={`transition hover:bg-slate-50 ${open ? "bg-slate-50/70" : ""}`}>
@@ -257,12 +258,12 @@ export function HandoverPage() {
                             type="button"
                             className="btn-primary btn-sm"
                             disabled={ready.length === 0 || handOver.isPending}
-                            title={ready.length === 0 ? "No batch of this product has finished packaging yet" : `Hand over ${ready.length} ready batch${ready.length === 1 ? "" : "es"} to QA`}
+                            title={ready.length === 0 ? "No batch of this product is approved by QA yet" : `Hand over ${ready.length} approved batch${ready.length === 1 ? "" : "es"} to the store`}
                             onClick={() => {
-                              if (window.confirm(`Hand over ${ready.length} batch${ready.length === 1 ? "" : "es"} of ${g.productName} to QA?`)) void hand(ready);
+                              if (window.confirm(`Hand over ${ready.length} batch${ready.length === 1 ? "" : "es"} of ${g.productName} to the store?`)) void hand(ready);
                             }}
                           >
-                            Hand over{ready.length > 1 ? ` all ready (${ready.length})` : " to QA"}
+                            Handover to Store{ready.length > 1 ? ` (${ready.length})` : ""}
                           </button>
                         </td>
                       )}
@@ -279,7 +280,7 @@ export function HandoverPage() {
                                   <th className="px-3 py-2">Packaging</th>
                                   <th className="px-3 py-2">Now at</th>
                                   <th className="px-3 py-2">Status</th>
-                                  <th className="px-3 py-2">Handed over</th>
+                                  <th className="px-3 py-2">Sent for QA</th>
                                   <th className="px-3 py-2" />
                                 </tr>
                               </thead>
@@ -297,11 +298,11 @@ export function HandoverPage() {
                                       <td className="px-3 py-2">
                                         <span className={`pill ${STATE_PILL[st]}`}>{STATE_LABEL[st]}</span>
                                       </td>
-                                      <td className="px-3 py-2 text-slate-500">{b.handedOverAt ? new Date(b.handedOverAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                                      <td className="px-3 py-2 text-slate-500">{b.sentForQaAt ? new Date(b.sentForQaAt).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—"}</td>
                                       <td className="px-3 py-2 text-right">
                                         {canHandOver && st === "READY" && (
                                           <button type="button" className="btn-primary btn-sm" disabled={handOver.isPending} onClick={() => void hand([b])}>
-                                            Hand over
+                                            Handover to Store
                                           </button>
                                         )}
                                         {canHandOver && st === "PACKING" && (
@@ -309,7 +310,7 @@ export function HandoverPage() {
                                             Open packaging →
                                           </Link>
                                         )}
-                                        {st === "HANDED" && (
+                                        {st === "WAITING_QA" && (
                                           <Link to={`/production-batches/${b.batchId}`} className="text-tiny font-bold text-slate-500 hover:underline">
                                             View →
                                           </Link>

@@ -24,7 +24,7 @@ async function setup() {
   await stock(whey.id, "Kg", 30);
   await stock(jar.id, "Nos", 400);
 
-  // AO Powder: both a packaging BOM (1 kg pack, a Jar linked to the Store item + a Leaflet that is not) and an RM formulation (20 g whey + 10 g of an item not in the catalog per 30 g serving)
+  // AO Powder: both a packaging BOM (1 kg pack, a Jar linked to the Warehouse item + a Leaflet that is not) and an RM formulation (20 g whey + 10 g of an item not in the catalog per 30 g serving)
   const name = `AO Powder ${stamp}`;
   await prisma.sku.create({
     data: {

@@ -16,27 +16,7 @@ const MFG_APPROVAL_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const BULK_QC_STATUSES = ["Approved", "Not Approved", "Hold"] as const;
 const PACK_APPROVAL_STATUSES = ["Approved", "Not approved", "Hold"] as const;
 const TRANSPORT_TYPES = ["By Land", "By Courier", "By Air"] as const;
-export const PACKAGING_STATUSES = [
-  "Not Started",
-  "Filling",
-  "Labelling",
-  "Wad Sealing",
-  "Shrinking",
-  "Corrugated Packing",
-  "Sorting",
-  "Bottling",
-  "Scooping",
-  "Silica",
-  "Counting",
-  "Pouch Filling",
-  "Canister Packing",
-  "Pouch Packing",
-  "Sachet Filling",
-  "Monocartoning",
-  "In Progress",
-  "Completed",
-  "On Hold",
-] as const;
+export const PACKAGING_STATUSES = ["In Progress", "Completed", "On Hold"] as const;
 
 export const PRODUCTION_BATCH_STAGE_FIELDS: Partial<Record<CombinedLotStageId, FieldDef[]>> = {
   IPQC: [

@@ -68,9 +68,9 @@ const STAGE_ORDER = ["MATERIAL_RECEIVED", "INDENT_ISSUE", "DISPENSING", "SAMPLE_
 export function PreparationSteps({ prep }: { prep: PlanPreparation }) {
   const at = STAGE_ORDER.indexOf(prep.stage);
   const steps = [
-    { label: "Material Received (GRN)", who: "Day Store", done: at > 0, detail: prep.grnNo ? `GRN ${prep.grnNo}${prep.grnDate ? ` · ${dayText(prep.grnDate)}` : ""}` : null },
+    { label: "Material Received (GRN)", who: "Store", done: at > 0, detail: prep.grnNo ? `GRN ${prep.grnNo}${prep.grnDate ? ` · ${dayText(prep.grnDate)}` : ""}` : null },
     { label: "Indent Issue", who: "Production", done: at > 1, detail: prep.indentSlip ? `Slip ${prep.indentSlip}${prep.indentDate ? ` · ${dayText(prep.indentDate)}` : ""}` : null },
-    { label: "Dispensing", who: "Day Store", done: at > 2, detail: prep.rmDispensingDate || prep.pmIssuedDate ? `RM ${dayText(prep.rmDispensingDate) ?? "—"} · PM ${dayText(prep.pmIssuedDate) ?? "—"}` : null },
+    { label: "Dispensing", who: "Store", done: at > 2, detail: prep.rmDispensingDate || prep.pmIssuedDate ? `RM ${dayText(prep.rmDispensingDate) ?? "—"} · PM ${dayText(prep.pmIssuedDate) ?? "—"}` : null },
     { label: "Line Clearance", who: "QA", done: prep.lineClearance === "Approved", detail: prep.lineClearance },
   ];
   const current = steps.findIndex((s) => !s.done);

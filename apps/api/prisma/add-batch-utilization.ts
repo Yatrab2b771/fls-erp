@@ -6,8 +6,8 @@ import { signAccessToken } from "../src/common/lib/jwt";
 
 /**
  * A multi-batch demo for a run that has been started but not divided yet: the plan is split into batches, two of them go all the way
- * through Indent Issue, Batch No (the system's serial), Dispensing and Line Clearance, are produced with their own Utilization (used, waste,
- * reject, sample) and completed; the last one waits at Dispensing.
+ * through Indent Issue, Batch No (the system's serial), Dispensing and Receive, are produced with their own RM Utilization (used, waste,
+ * reject, sample) and completed; the last one is READY, production not started.
  *
  *   npx tsx prisma/add-batch-utilization.ts
  */
@@ -42,18 +42,25 @@ async function main() {
     await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/indent`, { prodIndentSlipSign: "DEMO Production Head", productionPlanDate: day(-4) });
     const allocated = await call<{ batchNo: string }>("RND", "post", `/api/production-batches/${batch.id}/batch-no/allocate`, {});
     await call("ADMIN", "post", `/api/production-batches/${batch.id}/dispense`, { rmDispensingDate: day(-3), pmIssuedDate: day(-3), dispensingRemarks: "DEMO: batch material dispensed" });
-    await receiveAll(batch.id); // Production confirms what the Day Store sent
+    await receiveAll(batch.id); // Production confirms what the Store sent
     if (last) {
       console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · is READY, production not started`);
       continue;
     }
 
-    // Production: start fields, then the end and the bulk made (the Utilization is filled later, at Packaging)
+    // Production: start fields; the batch is then at In-Process QA and QA / R&D take it through the QA Gate and Bulk QC; back with Production: the RM
+    // Utilization of the whole batch (what it produced; each plan material used as it was given), then the end time and Send to Packaging
     const start = new Date(Date.now() - (parts.length - b) * 86_400_000);
     await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shift: b % 2 === 0 ? "Day" : "Night", manpowerCount: 8, shiftStartAt: start.toISOString() });
-    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed", outputQty: qty });
+    const stage = (role: RoleName, body: Record<string, unknown>) => call(role, "patch", `/api/production-batches/${batch.id}/stage`, { action: "FORWARD", ...body });
+    await stage("QA_QC", { ipqcStatus: "Approved", ipqcRemarks: "DEMO: checks fine" });
+    await stage("QA_QC", { mfgQaStatus: "Approved", mfgQcStatus: "Approved" });
+    await stage("RND", { bulkQcStatus: "Approved", bulkQcRemarks: "DEMO: bulk passed" });
+    const util = (await call<{ id: string; utilization: { items: { itemId: string; category: string; givenQty: number }[] } }[]>("PRODUCTION", "get", `/api/pre-productions/${run.id}/production-batches`)).find((x) => x.id === batch.id)!.utilization.items;
+    await call("PRODUCTION", "put", `/api/production-batches/${batch.id}/utilization/RM`, { producedQty: qty, wasteQty: 0, rejectQty: 0, sampleQty: 0, lines: util.filter((x) => x.category === "RM").map((n) => ({ itemId: n.itemId, consumedQty: n.givenQty })) });
+    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed" });
     const done = await call<{ productionBatch: { inputQty: number; outputQty: number } }>("PRODUCTION", "post", `/api/production-batches/${batch.id}/complete`, {});
-    console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · completed (bulk output ${done.productionBatch.outputQty}; its Utilization is filled later, at Packaging)`);
+    console.log(`batch ${b + 1}: ${qty} · ${allocated.batchNo} · sent to Packaging (output ${done.productionBatch.outputQty} from its RM Utilization)`);
   }
 }
 

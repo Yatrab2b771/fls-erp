@@ -22,7 +22,7 @@ const REMARK_COLUMNS = ["Remark", "Remarks", "Note", "Notes"];
 // Which Day Store this row belongs to, by name — lets one sheet mix rows
 // for several stores (e.g. the app's own downloaded report, which has a
 // Day Store column per row) instead of requiring one sheet per store.
-const DAY_STORE_COLUMNS = ["Day Store", "Store", "Store Name"];
+const DAY_STORE_COLUMNS = ["Store", "Day Store", "Store Name"]; // "Day Store" is the old header
 
 // Accepts both the short codes the rest of the app uses (RM/PM) and the
 // full labels the app's own downloaded report prints (Raw Material /

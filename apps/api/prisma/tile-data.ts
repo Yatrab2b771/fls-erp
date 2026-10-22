@@ -19,8 +19,8 @@ async function main() {
   for (const status of ["PAID_PARTIAL", "PAID_FULL", "ON_HOLD", "REJECTED"] as const) await add(`Finance: ${status}`, prisma.financeDecision.count({ where: { status } }));
   await add("Finance: pending (a PI line with no decision)", prisma.requirementPurchaseLine.count({ where: { status: "OPEN", finance: null } }));
   await add("Customer shipments", prisma.fgShipment.count({ where: { type: "CUSTOMER", deletedAt: null } }));
-  await add("Warehouse: plan requests open (Day Store asked)", prisma.inventoryRequest.count({ where: { purpose: "ISSUED_DAY_STORE", requestingDayStoreId: { not: null }, forRequestId: { not: null }, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } } }));
-  await add("Warehouse: material requests open (Day Store)", prisma.inventoryRequest.count({ where: { purpose: "ISSUED_DAY_STORE", requestingDayStoreId: { not: null }, forRequestId: null, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } } }));
+  await add("Warehouse: plan requests open (Store asked)", prisma.inventoryRequest.count({ where: { purpose: "ISSUED_DAY_STORE", requestingDayStoreId: { not: null }, forRequestId: { not: null }, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } } }));
+  await add("Warehouse: material requests open (Store)", prisma.inventoryRequest.count({ where: { purpose: "ISSUED_DAY_STORE", requestingDayStoreId: { not: null }, forRequestId: null, deletedAt: null, status: { in: ["PENDING", "APPROVED", "PARTIALLY_ISSUED"] } } }));
   await add("Extra material: open", prisma.inventoryRequest.count({ where: { isExtra: true, deletedAt: null, status: { in: ["PENDING", "APPROVED"] } } }));
   await add("Extra material: issued", prisma.inventoryRequest.count({ where: { isExtra: true, deletedAt: null, status: { notIn: ["PENDING", "APPROVED", "REJECTED"] } } }));
   for (const purpose of ["PRODUCTION", "WASTE", "REJECTED", "SAMPLE"] as const) await add(`Plant consumption: ${purpose}`, prisma.batchMaterialConsumption.count({ where: { purpose } }));

@@ -25,7 +25,7 @@ const STAGES: Record<string, { view: QcBoardView; title: string; blurb: string }
   ipqc: { view: "IPQC", title: "IPQC (In-Process QA)", blurb: "Batches whose in-process check is waiting for QA." },
   "qa-gate-mfg": { view: "QA_GATE_MFG", title: "QA Gate: Manufacturing", blurb: "Batches that finished manufacturing and wait at QA's gate." },
   "qa-gate-packaging": { view: "QA_GATE_PACKAGING", title: "QA Gate: Packaging", blurb: "Batches that finished packaging and wait at QA's gate." },
-  "fg-release": { view: "FG_QC_RELEASE", title: "FG QC & Release", blurb: "Finished goods at the Day Store waiting for QA's approval. Only an Approved lets the Day Store hand them to Dispatch." },
+  "fg-release": { view: "FG_QC_RELEASE", title: "FG QC & Release", blurb: "Finished goods at the Store waiting for QA's approval. Only an Approved lets the Store hand them to Dispatch." },
   "on-hold": { view: "ON_HOLD", title: "On Hold", blurb: "Everything QA has put on hold, at any stage. Approve to release it, or send it back." },
 };
 

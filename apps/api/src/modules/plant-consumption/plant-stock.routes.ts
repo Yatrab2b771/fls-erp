@@ -83,7 +83,7 @@ plantStockRouter.post("/return", requireRole("PRODUCTION"), validateBody(returnS
     const [plant, item] = await Promise.all([prisma.plant.findUnique({ where: { id: input.plantId }, select: { id: true, name: true, dayStoreId: true } }), prisma.inventoryItem.findUnique({ where: { id: input.itemId }, select: { id: true, name: true, unit: true } })]);
     if (!plant) return res.status(404).json({ error: "Plant not found" });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
-    if (!plant.dayStoreId) return res.status(400).json({ error: "This Plant has no Day Store to send material back to." });
+    if (!plant.dayStoreId) return res.status(400).json({ error: "This Plant has no Store to send material back to." });
     const unit = item.unit ?? "Kg";
 
     const transfer = await runSerializable(async (tx) => {

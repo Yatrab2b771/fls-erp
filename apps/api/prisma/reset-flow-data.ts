@@ -111,7 +111,7 @@ async function main() {
   );
 
   for (const [label, n] of out) if (n > 0) console.log(`  ${label.padEnd(26)} ${n}`);
-  console.log("Done. Users, plants, day stores, vendors, customers, the item catalog, BOMs, recipes and opening stock were kept.");
+  console.log("Done. Users, plants, stores, vendors, customers, the item catalog, BOMs, recipes and opening stock were kept.");
 }
 
 main()

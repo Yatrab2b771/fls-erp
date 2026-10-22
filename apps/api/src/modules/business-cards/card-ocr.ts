@@ -49,6 +49,13 @@ function exclusive<T>(job: () => Promise<T>): Promise<T> {
 
 export class CardPhotoError extends Error {}
 
+/** Is the photo one that can be read at all (opens, big enough)? Checked before a scan is accepted, so the person is told at once. */
+export async function checkCardPhoto(input: Buffer): Promise<void> {
+  const meta = await sharp(input, { failOn: "none" }).rotate().metadata();
+  if (!meta.width || !meta.height) throw new CardPhotoError("That photo could not be opened.");
+  if (Math.min(meta.width, meta.height) < 300) throw new CardPhotoError("The photo is too small to read. Please take it closer, in good light.");
+}
+
 /** The photo, made easier to read. `variant` picks how hard to push the contrast. */
 async function prepare(input: Buffer, variant: "soft" | "hard"): Promise<{ png: Buffer; dark: boolean }> {
   const base = sharp(input, { failOn: "none" }).rotate(); // honours the phone's rotation

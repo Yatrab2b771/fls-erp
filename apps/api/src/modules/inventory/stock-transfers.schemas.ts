@@ -24,7 +24,7 @@ export const createStockTransferSchema = z
     destPlantId: z.string().uuid().optional(),
   })
   .refine((data) => (data.sourceType === "DAY_STORE" ? !!data.sourceDayStoreId && !data.sourcePlantId : true), {
-    message: "Select a source Day Store",
+    message: "Select a source Store",
     path: ["sourceDayStoreId"],
   })
   .refine((data) => (data.sourceType === "PLANT" ? !!data.sourcePlantId && !data.sourceDayStoreId : true), {
@@ -36,7 +36,7 @@ export const createStockTransferSchema = z
     path: ["destinationType"],
   })
   .refine((data) => (data.destinationType === "DAY_STORE" ? !!data.destDayStoreId && !data.destPlantId : true), {
-    message: "Select a destination Day Store",
+    message: "Select a destination Store",
     path: ["destDayStoreId"],
   })
   .refine((data) => (data.destinationType === "PLANT" ? !!data.destPlantId && !data.destDayStoreId : true), {
@@ -44,11 +44,11 @@ export const createStockTransferSchema = z
     path: ["destPlantId"],
   })
   .refine((data) => (data.destinationType === "WAREHOUSE" ? !data.destDayStoreId && !data.destPlantId : true), {
-    message: "A Warehouse destination doesn't take a Day Store or Plant",
+    message: "A Warehouse destination doesn't take a Store or Plant",
     path: ["destinationType"],
   })
   .refine((data) => !(data.sourceType === "DAY_STORE" && data.destinationType === "DAY_STORE"), {
-    message: "Day-Store-to-Day-Store transfers aren't supported — send back to the Warehouse or on to a Plant instead",
+    message: "Store-to-Store transfers aren't supported — send back to the Warehouse or on to a Plant instead",
     path: ["destinationType"],
   });
 

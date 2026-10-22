@@ -5,10 +5,13 @@ import { prisma } from "../../common/lib/prisma";
 import { recordAudit } from "../../common/lib/audit";
 import { requireAuth, requireRole, type AuthedRequest } from "../../common/middleware/auth";
 import { validateBody } from "../../common/middleware/validate";
-import { CARD_CATEGORY_TO_FORMAT, CLOSED_STATUSES, CUSTOMER_TYPES, LEAD_SOURCES, LEAD_STATUSES, POWDER_TYPES, PRODUCT_FORMATS, type LeadStatusName } from "./lead-options";
+import { notifyUser } from "../../common/lib/notify";
+import { CARD_CATEGORY_TO_FORMAT, CLOSED_STATUSES, CUSTOMER_TYPES, LEAD_SOURCES, LEAD_STATUSES, POWDER_TYPES, PRODUCT_FORMATS, normalizeOption, withTypedOptions, type LeadStatusName } from "./lead-options";
 
 /**
- * BD's lead book. A salesman sees and works on his own leads; Admin sees all of them.
+ * BD's lead book. A lead has one person responsible for it (the POC). BD adds leads and hands them to whoever should follow them up (any department:
+ * visiting cards are collected by everyone at an event); that person sees and works on their own leads (meetings, status, follow-up dates), while
+ * adding leads, assigning them and Convert stay with BD. BD sees the leads they made or hold; Admin sees all of them.
  *   GET   /                 the leads (each with its meeting count and the last meeting's notes)
  *   GET   /summary          counts per status and what is due today / overdue (the dashboard tiles)
  *   GET   /forecast         the pipeline by closure month and by lead source, and the funnel from lead to PO
@@ -22,10 +25,13 @@ import { CARD_CATEGORY_TO_FORMAT, CLOSED_STATUSES, CUSTOMER_TYPES, LEAD_SOURCES,
  * A Converted lead waits for its PO until a purchase order of its customer is entered after the conversion; then it is done.
  */
 export const leadsRouter = Router();
-leadsRouter.use(requireAuth, requireRole("BD"));
+leadsRouter.use(requireAuth);
 
 const isAdmin = (req: AuthedRequest) => req.user!.roles.includes("ADMIN" as never);
-const visible = (req: AuthedRequest): Prisma.LeadWhereInput => (isAdmin(req) ? {} : { pocId: req.user!.id });
+const isBd = (req: AuthedRequest) => req.user!.roles.includes("BD" as never);
+/** Everyone: the leads they are responsible for. BD also: the leads they made (and maybe handed to someone else). Admin: all. */
+const visible = (req: AuthedRequest): Prisma.LeadWhereInput => (isAdmin(req) ? {} : isBd(req) ? { OR: [{ pocId: req.user!.id }, { createdById: req.user!.id }] } : { pocId: req.user!.id });
+const bdOnly = requireRole("BD");
 
 type MeetingRow = LeadMeeting & { createdBy: { fullName: string } };
 type LeadRow = Lead & { poc: { fullName: string }; _count: { meetings: number }; meetings: { number: number; meetingDate: Date; notes: string }[] };
@@ -126,6 +132,13 @@ const dateTime = z.string().refine((v) => !Number.isNaN(new Date(v).getTime()), 
 
 const estimateFields = { estimatedQty: text(120).nullable(), estimatedValueLac: z.number().positive("The value must be more than zero.").max(100000).nullable() };
 
+// The list's own names, or a name BD typed under "Others" (2 to 40 letters; one in the list in another case becomes the list's spelling)
+const optionList = (fixed: readonly string[]) =>
+  z
+    .array(z.string().trim().min(2, "A name needs at least 2 letters.").max(40, "Keep each name under 40 letters."))
+    .max(30)
+    .transform((xs) => [...new Set(xs.map((x) => normalizeOption(fixed, x)))]);
+
 const detailFields = {
   brandName: text(200).min(1, "Enter the brand / company name."),
   contactPerson: text(120),
@@ -135,9 +148,9 @@ const detailFields = {
   address: text(500),
   city: text(80),
   state: text(80),
-  customerTypes: z.array(pick(CUSTOMER_TYPES)).max(CUSTOMER_TYPES.length),
-  productFormats: z.array(pick(PRODUCT_FORMATS)).max(PRODUCT_FORMATS.length),
-  powderTypes: z.array(pick(POWDER_TYPES)).max(POWDER_TYPES.length),
+  customerTypes: optionList(CUSTOMER_TYPES),
+  productFormats: optionList(PRODUCT_FORMATS),
+  powderTypes: optionList(POWDER_TYPES),
   leadSource: pick(LEAD_SOURCES).nullable(),
 };
 
@@ -160,6 +173,8 @@ const createSchema = z
     nextFollowUpAt: dateTime.optional(),
     closureMonth: monthSchema.optional(),
     businessCardId: z.string().uuid().optional(),
+    // Who follows this lead up (any active user); BD themself when not given
+    assignToId: z.string().uuid().optional(),
   })
   .refine((d) => d.customerTypes.length > 0, { message: "Choose at least one customer type.", path: ["customerTypes"] })
   .refine((d) => d.productFormats.length > 0, { message: "Choose at least one product format.", path: ["productFormats"] })
@@ -172,6 +187,8 @@ const updateSchema = z
     nextFollowUpAt: dateTime.nullable(),
     closureMonth: monthSchema.nullable(),
     ...estimateFields,
+    // BD / Admin: hand the lead to someone else
+    pocId: z.string().uuid(),
   })
   .partial()
   .refine((d) => d.customerTypes === undefined || d.customerTypes.length > 0, { message: "Choose at least one customer type.", path: ["customerTypes"] })
@@ -312,16 +329,46 @@ leadsRouter.get("/forecast", async (req: AuthedRequest, res, next) => {
   }
 });
 
-leadsRouter.post("/", validateBody(createSchema), async (req: AuthedRequest, res, next) => {
+const DEPARTMENT: Record<string, string> = { BD: "BD", PPIC: "PPIC", STORE: "Store", PURCHASE: "Purchase", ACCOUNTS: "Accounts", PRODUCTION: "Production", QA_QC: "QA", DISPATCH: "Dispatch", RND: "R&D", REGULATORY: "Regulatory", ADMIN: "Admin" };
+
+/** BD / Admin: the people a lead can be handed to (every active user, with their department). */
+leadsRouter.get("/assignees", bdOnly, async (_req: AuthedRequest, res, next) => {
+  try {
+    const users = await prisma.user.findMany({ where: { isActive: true }, select: { id: true, fullName: true, roles: { select: { role: { select: { name: true } } } } }, orderBy: { fullName: "asc" }, take: 1000 });
+    res.json(
+      users.map((u) => {
+        const names = u.roles.map((r) => r.role.name as string);
+        const first = names.find((n) => n !== "ADMIN") ?? names[0];
+        return { id: u.id, name: u.fullName, department: first ? (DEPARTMENT[first] ?? first) : "" };
+      }),
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function nameOf(userId: string): Promise<string> {
+  return (await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true } }))?.fullName ?? "BD";
+}
+
+/** The person a lead is handed to must be an active user. */
+async function assignee(id: string) {
+  return prisma.user.findFirst({ where: { id, isActive: true }, select: { id: true, fullName: true } });
+}
+
+leadsRouter.post("/", bdOnly, validateBody(createSchema), async (req: AuthedRequest, res, next) => {
   try {
     const d = req.body as z.infer<typeof createSchema>;
     const status = d.status ?? "DISCUSSION";
     if (status === "CONVERTED") return res.status(400).json({ error: CONVERTED_MESSAGE });
     if (d.businessCardId) {
-      const card = await prisma.businessCard.findFirst({ where: { id: d.businessCardId, ...(isAdmin(req) ? {} : { createdById: req.user!.id }) }, select: { id: true } });
+      const card = await prisma.businessCard.findFirst({ where: { id: d.businessCardId }, select: { id: true, status: true } });
       if (!card) return res.status(404).json({ error: "Visiting card not found" });
+      if (card.status === "READING") return res.status(409).json({ error: "The card is still being read. Wait a few seconds." });
       if (await prisma.lead.findUnique({ where: { businessCardId: card.id }, select: { id: true } })) return res.status(409).json({ error: "This visiting card is already a lead." });
     }
+    const owner = d.assignToId && d.assignToId !== req.user!.id ? await assignee(d.assignToId) : null;
+    if (d.assignToId && d.assignToId !== req.user!.id && !owner) return res.status(400).json({ error: "Choose an active user to follow this lead up." });
     const lead = await prisma.lead.create({
       data: {
         brandName: d.brandName,
@@ -340,7 +387,7 @@ leadsRouter.post("/", validateBody(createSchema), async (req: AuthedRequest, res
         closureMonth: d.closureMonth ?? null,
         nextFollowUpAt: status === "DROPPED" ? null : (d.nextFollowUpAt ?? null),
         businessCardId: d.businessCardId ?? null,
-        pocId: req.user!.id,
+        pocId: owner?.id ?? req.user!.id,
         createdById: req.user!.id,
       },
       include: listInclude,
@@ -352,7 +399,8 @@ leadsRouter.post("/", validateBody(createSchema), async (req: AuthedRequest, res
         data: { status: "VERIFIED", verifiedAt: new Date(), name: lead.contactPerson, company: lead.brandName, designation: lead.designation, phones: lead.phones, email: lead.email, address: lead.address, categories: lead.productFormats },
       });
     }
-    await recordAudit({ actorId: req.user!.id, action: "lead.created", entityType: "Lead", entityId: lead.id });
+    await recordAudit({ actorId: req.user!.id, action: "lead.created", entityType: "Lead", entityId: lead.id, metadata: owner ? { assignedTo: owner.id } : undefined });
+    if (owner) await notifyUser(owner.id, { title: `Lead for you: ${lead.brandName}`, body: `${await nameOf(req.user!.id)} gave you this lead to follow up.`, link: `/leads/${lead.id}` }).catch((err) => req.log?.error({ err }, "notify failed: lead.assigned"));
     res.status(201).json(serialize(lead));
   } catch (err) {
     next(err);
@@ -382,6 +430,9 @@ leadsRouter.patch("/:id", validateBody(updateSchema), async (req: AuthedRequest<
     const d = req.body as z.infer<typeof updateSchema>;
     const lead = await prisma.lead.findFirst({ where: { id: req.params.id, ...visible(req) } });
     if (!lead) return res.status(404).json({ error: "Lead not found" });
+    if (d.pocId !== undefined && !isBd(req) && !isAdmin(req)) return res.status(403).json({ error: "Only BD can hand a lead to someone else." });
+    const newOwner = d.pocId && d.pocId !== lead.pocId ? await assignee(d.pocId) : null;
+    if (d.pocId && d.pocId !== lead.pocId && !newOwner) return res.status(400).json({ error: "Choose an active user to follow this lead up." });
     if (d.status === "CONVERTED" && lead.status !== "CONVERTED") return res.status(400).json({ error: CONVERTED_MESSAGE });
     const touchesEstimate = (d.estimatedQty !== undefined && d.estimatedQty !== null) || (d.estimatedValueLac !== undefined && d.estimatedValueLac !== null);
     if (touchesEstimate && !(await enrich([lead as LeadRow])).get(lead.id)!.sampleApproved) return res.status(409).json({ error: ESTIMATE_LOCKED_MESSAGE });
@@ -413,6 +464,7 @@ leadsRouter.patch("/:id", validateBody(updateSchema), async (req: AuthedRequest<
         productFormats: unique(formats),
         powderTypes: formats.includes("Powder") ? unique(powder) : [],
         ...(d.leadSource !== undefined ? { leadSource: d.leadSource } : {}),
+        ...(newOwner ? { pocId: newOwner.id } : {}),
         ...(d.closureMonth !== undefined ? { closureMonth: d.closureMonth } : {}),
         ...(d.estimatedQty !== undefined ? { estimatedQty: d.estimatedQty?.trim() || null } : {}),
         ...(d.estimatedValueLac !== undefined ? { estimatedValueLac: d.estimatedValueLac } : {}),
@@ -422,7 +474,8 @@ leadsRouter.patch("/:id", validateBody(updateSchema), async (req: AuthedRequest<
       },
       include: listInclude,
     });
-    await recordAudit({ actorId: req.user!.id, action: "lead.updated", entityType: "Lead", entityId: lead.id, metadata: status !== lead.status ? { status } : undefined });
+    await recordAudit({ actorId: req.user!.id, action: "lead.updated", entityType: "Lead", entityId: lead.id, metadata: status !== lead.status || newOwner ? { ...(status !== lead.status ? { status } : {}), ...(newOwner ? { assignedTo: newOwner.id } : {}) } : undefined });
+    if (newOwner) await notifyUser(newOwner.id, { title: `Lead for you: ${updated.brandName}`, body: `${await nameOf(req.user!.id)} gave you this lead to follow up.`, link: `/leads/${lead.id}` }).catch((err) => req.log?.error({ err }, "notify failed: lead.assigned"));
     res.json(await withExtra(updated));
   } catch (err) {
     next(err);
@@ -499,7 +552,7 @@ leadsRouter.post("/:id/reschedule", validateBody(rescheduleSchema), async (req: 
   }
 });
 
-leadsRouter.post("/:id/convert", validateBody(convertSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
+leadsRouter.post("/:id/convert", bdOnly, validateBody(convertSchema), async (req: AuthedRequest<{ id: string }>, res, next) => {
   try {
     const d = req.body as z.infer<typeof convertSchema>;
     const lead = await prisma.lead.findFirst({ where: { id: req.params.id, ...visible(req) }, include: listInclude });
@@ -523,6 +576,19 @@ leadsRouter.post("/:id/convert", validateBody(convertSchema), async (req: Authed
 });
 
 /** The product formats a visiting card's categories stand for (used by the screen to prefill a lead made from a card). */
-leadsRouter.get("/options/lists", (_req, res) => {
-  res.json({ customerTypes: CUSTOMER_TYPES, productFormats: PRODUCT_FORMATS, powderTypes: POWDER_TYPES, leadSources: LEAD_SOURCES, statuses: LEAD_STATUSES, cardCategoryToFormat: CARD_CATEGORY_TO_FORMAT });
+leadsRouter.get("/options/lists", async (_req, res, next) => {
+  try {
+    // the names typed under "Others" on any lead join the lists, for everyone
+    const used = await prisma.lead.findMany({ select: { customerTypes: true, productFormats: true, powderTypes: true }, take: 20000 });
+    res.json({
+      customerTypes: withTypedOptions(CUSTOMER_TYPES, used.flatMap((l) => l.customerTypes)),
+      productFormats: withTypedOptions(PRODUCT_FORMATS, used.flatMap((l) => l.productFormats)),
+      powderTypes: withTypedOptions(POWDER_TYPES, used.flatMap((l) => l.powderTypes)),
+      leadSources: LEAD_SOURCES,
+      statuses: LEAD_STATUSES,
+      cardCategoryToFormat: CARD_CATEGORY_TO_FORMAT,
+    });
+  } catch (err) {
+    next(err);
+  }
 });

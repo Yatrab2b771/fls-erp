@@ -517,7 +517,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
     if (fresh.length === 0) return toast.error("Old spec has nothing new to add.");
     setRows((prev) => [...prev, ...fresh]);
     setDirty(true);
-    toast.success(`${fresh.length} row(s) added from the old spec - pick the Store item for each and Save.`);
+    toast.success(`${fresh.length} row(s) added from the old spec - pick the Warehouse item for each and Save.`);
   }
 
   function loadCopy() {
@@ -715,7 +715,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
               <tr>
                 {useLevels && <th className="w-24 px-2 py-2">Level</th>}
                 <th className="px-2 py-2">Component</th>
-                <th className="px-2 py-2">Store item</th>
+                <th className="px-2 py-2">Warehouse item</th>
                 <th className="px-2 py-2">Specification</th>
                 <th className="px-2 py-2">Make</th>
                 <th className="w-20 px-2 py-2">Qty / pack</th>
@@ -755,13 +755,13 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
                     </td>
                     <td className="min-w-[13rem] px-2 py-1.5">
                       {canEdit ? (
-                        <ItemPicker items={itemOptions} value={r.itemId} onChange={(id) => pickItem(idx, id)} placeholder="- Pick Store item -" />
+                        <ItemPicker items={itemOptions} value={r.itemId} onChange={(id) => pickItem(idx, id)} placeholder="- Pick Warehouse item -" />
                       ) : (
                         <span className="text-slate-700">{item ? (item.code ? `${item.code} - ${item.name}` : item.name) : "-"}</span>
                       )}
                       {!r.itemId && r.type.trim() && (
                         <p className="mt-0.5 flex items-center gap-1 text-micro font-semibold text-amber-600">
-                          <AlertTriangle className="h-3 w-3" /> Not in Store list
+                          <AlertTriangle className="h-3 w-3" /> Not in Warehouse list
                         </p>
                       )}
                     </td>
@@ -810,7 +810,7 @@ function BomEditor({ sku, customerId, canEdit: canEditProp, siblingNames, snapsh
               <Plus className="h-3 w-3" strokeWidth={2.5} /> Add row
             </button>
             <div className="flex flex-wrap items-center gap-2">
-              {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Store item</span>}
+              {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Warehouse item</span>}
               <input className="field !h-7 !w-48 !py-0 text-xs" placeholder="What changed? (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
               <button type="button" className="btn-primary btn-sm" disabled={updatePackaging.isPending || saveSlot.isPending || !dirty} onClick={handleSave}>
                 {updatePackaging.isPending || saveSlot.isPending ? "Saving..." : slot ? `Save ${slot}` : "Save BOM"}

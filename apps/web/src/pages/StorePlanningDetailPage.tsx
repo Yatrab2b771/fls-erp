@@ -22,7 +22,7 @@ export function StorePlanningDetailPage() {
   const isDayStore = !!metric?.startsWith("store-");
   const dayStoreId = isDayStore ? metric!.slice("store-".length) : undefined;
   const { data: summary } = useStoreDashboardSummary({ enabled: isDayStore });
-  const dayStoreName = summary?.dayStores.find((d) => d.id === dayStoreId)?.name ?? "Day Store";
+  const dayStoreName = summary?.dayStores.find((d) => d.id === dayStoreId)?.name ?? "Store";
 
   if (!metric || !["rm", "pm", "fg", "quarantine"].includes(metric) && !isDayStore) {
     return <EmptyState icon={Warehouse} title="Unknown report" hint="That dashboard tile doesn't exist." accent="rose" />;

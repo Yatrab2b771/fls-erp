@@ -1,44 +1,44 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock, issueToPlant, acceptPendingReceipts } from "./helpers";
 
 const app = createApp();
 
-describe("Day Stores / Plants — named, growable identities", () => {
-  it("STORE (or ADMIN) can add a new Day Store / Plant; anyone authenticated can list them; names are unique", async () => {
+describe("Stores / Plants — named, growable identities", () => {
+  it("STORE (or ADMIN) can add a new Store / Plant; anyone authenticated can list them; names are unique", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: plainToken } = await createUser([]);
 
-    const deniedCreate = await request(app).post("/api/inventory/day-stores").set(authHeader(plainToken)).send({ name: "Day Store A" });
+    const deniedCreate = await request(app).post("/api/inventory/day-stores").set(authHeader(plainToken)).send({ name: "Store A" });
     expect(deniedCreate.status).toBe(403);
 
-    const created = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Day Store A" });
+    const created = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store A" });
     expect(created.status).toBe(201);
 
-    const dup = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Day Store A" });
+    const dup = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store A" });
     expect(dup.status).toBe(409);
 
     const list = await request(app).get("/api/inventory/day-stores").set(authHeader(plainToken));
     expect(list.status).toBe(200);
-    expect(list.body.map((d: { name: string }) => d.name)).toEqual(["Day Store A"]);
+    expect(list.body.map((d: { name: string }) => d.name)).toEqual(["Store A"]);
 
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant 1" });
     expect(plant.status).toBe(201);
+    // The list is the Plants paired with a Day Store (here the one made with "Day Store A"); a Plant made on its own is only in ?all=true
     const plantList = await request(app).get("/api/inventory/plants").set(authHeader(plainToken));
-    expect(plantList.body.map((p: { name: string }) => p.name)).toEqual(["Plant 1"]);
+    expect(plantList.body.map((p: { name: string }) => p.name)).toEqual(["Store A"]);
+    const allPlants = await request(app).get("/api/inventory/plants?all=true").set(authHeader(plainToken));
+    expect(allPlants.body.map((p: { name: string }) => p.name)).toEqual(["Plant 1", "Store A"]);
   });
 
-  it("STORE (or ADMIN) can rename a Day Store / Plant; a plain user can't; renaming to an existing name is blocked; existing transactions pick up the new name", async () => {
+  it("STORE (or ADMIN) can rename a Store / Plant; a plain user can't; renaming to an existing name is blocked; existing transactions pick up the new name", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: plainToken } = await createUser([]);
     const store1 = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store 1" });
     await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store 2" });
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 10, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 10, isOpeningStock: true });
     const txn = await request(app)
       .post("/api/inventory/transactions")
       .set(authHeader(storeToken))
@@ -124,10 +124,7 @@ describe("Store assignment — restricts which specific store(s) a STORE user ca
     const { token: restrictedToken, user: restrictedUser } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(adminToken)).send({ category: "RM", name: "Scoped Item" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(adminToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-22", unit: "Kg", quantity: 100, isOpeningStock: true });
+    await receiveAcceptedStock(adminToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-22", unit: "Kg", quantity: 100, isOpeningStock: true });
 
     const storeA = await request(app).post("/api/inventory/day-stores").set(authHeader(adminToken)).send({ name: "Scoped Store A" });
     const storeB = await request(app).post("/api/inventory/day-stores").set(authHeader(adminToken)).send({ name: "Scoped Store B" });
@@ -156,8 +153,9 @@ describe("Store assignment — restricts which specific store(s) a STORE user ca
     expect(issueB.status).toBe(403);
 
     // Issuing a Material Request "from" Store B (ISSUED_PRODUCTION, dayStoreId: B) is blocked too.
-    const req = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 5, purpose: "ISSUED_PRODUCTION" });
-    await request(app).patch(`/api/inventory/requests/${req.body.id}/review`).set(authHeader(restrictedToken)).send({ action: "APPROVE" });
+    const req = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 5, purpose: "ISSUED_PRODUCTION", plantId: storeB.body.pairedPlant.id });
+    // The request is for Store B's Plant, so ADMIN approves it (the restricted user may not act for Store B at all)
+    await request(app).patch(`/api/inventory/requests/${req.body.id}/review`).set(authHeader(adminToken)).send({ action: "APPROVE" });
     const issueFromB = await request(app)
       .post(`/api/inventory/requests/${req.body.id}/issue`)
       .set(authHeader(restrictedToken))
@@ -173,25 +171,22 @@ describe("Store assignment — restricts which specific store(s) a STORE user ca
   });
 });
 
-describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
-  it("tags which Day Store received an ISSUED_DAY_STORE entry", async () => {
+describe("S6/S7 — Store / Plant tagging on the existing ledger", () => {
+  it("tags which Store received an ISSUED_DAY_STORE entry", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Day Store A" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-20", unit: "Kg", quantity: 10, isOpeningStock: true });
+    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store A" });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-20", unit: "Kg", quantity: 10, isOpeningStock: true });
 
     const txn = await request(app)
       .post("/api/inventory/transactions")
       .set(authHeader(storeToken))
       .send({ itemId: item.body.id, type: "ISSUED_DAY_STORE", date: "2026-08-21", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
     expect(txn.status).toBe(201);
-    expect(txn.body.dayStore.name).toBe("Day Store A");
+    expect(txn.body.dayStore.name).toBe("Store A");
   });
 
-  it("bulk import reads a per-row Day Store column and tags each row accordingly, auto-creating any store name it hasn't seen before", async () => {
+  it("bulk import reads a per-row Store column and tags each row accordingly, auto-creating any store name it hasn't seen before", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const existingStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store 1" });
     await request(app)
@@ -205,6 +200,7 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
           { category: "PM", itemName: "1kg Jar", date: "2026-08-20", unit: "Count", quantity: 500 },
         ],
       });
+    await acceptPendingReceipts(); // the imported receipts wait for inward QC; approve them so they are stock
 
     const imported = await request(app)
       .post("/api/inventory/transactions/import")
@@ -239,10 +235,7 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     // Real stock first — issuing (direct or via request) checks live
     // on-hand now, so this per-store balance test needs something real
     // to draw down instead of running the whole thing on nothing.
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
 
     // 25 Kg goes to Store 1.
     await request(app)
@@ -277,10 +270,7 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     // A second request issued straight from central stock (dayStoreId: null) must NOT touch Store 1's balance.
     const req2 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 5, purpose: "ISSUED_PRODUCTION" });
     await request(app).patch(`/api/inventory/requests/${req2.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app)
-      .post(`/api/inventory/requests/${req2.body.id}/issue`)
-      .set(authHeader(storeToken))
-      .send({ date: "2026-08-22", unit: "Kg", quantity: 5, dayStoreId: null });
+    await issueToPlant(storeToken, req2.body.id, { date: "2026-08-22", unit: "Kg", quantity: 5 });
 
     const afterCentral = await request(app).get(`/api/inventory/day-stores/${dayStore.body.id}/stock`).set(authHeader(storeToken));
     expect(afterCentral.body.stock[0].onHand).toBe(15); // unchanged
@@ -288,19 +278,17 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     // Warehouse's own on-hand math is completely untouched by any of this
     // store-level bookkeeping — still just received minus all issued,
     // regardless of which store (if any) an issuance was tagged to.
-    // 100 received − 25 (issued to store) − 15 (issued to production, both requests) = 60.
+    // 100 received − 25 (to Store 1) − 5 (the second request's Plant has its own Day Store, which the Warehouse sent 5 to) = 70. The 10 Store 1
+    // sent on to Production is not a Warehouse movement.
     const warehouseStock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
-    expect(warehouseStock.body[0].onHand).toBe(60);
+    expect(warehouseStock.body[0].onHand).toBe(70);
   });
 
   it("blocks deleting an ISSUED_DAY_STORE entry that a later production issue 'from' that store already depends on — even though the Warehouse-wide total would stay fine", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
     const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store 1" });
 
     const issueToStore = await request(app)
@@ -335,17 +323,14 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     expect(okDelete.status).toBe(204);
   });
 
-  it("blocks issuing to production 'from' a Day Store that never actually received that much, even when the Warehouse total is enough", async () => {
+  it("blocks issuing to production 'from' a Store that never actually received that much, even when the Warehouse total is enough", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein Concentrate" });
     const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store 1" });
 
     // 120 Kg lands in the central Warehouse only — never allocated to Store 1.
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-22", unit: "Kg", quantity: 120, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-22", unit: "Kg", quantity: 120, isOpeningStock: true });
 
     // Warehouse-wide there's plenty (120 >= 100), but tagging the issue
     // as coming out of Store 1 — which received 0 — must still be
@@ -359,7 +344,7 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
       .set(authHeader(storeToken))
       .send({ date: "2026-08-22", unit: "Kg", quantity: 100, dayStoreId: dayStore.body.id });
     expect(issue.status).toBe(409);
-    expect(issue.body.error).toMatch(/Day Store/);
+    expect(issue.body.error).toMatch(/Store/);
 
     const storeStock = await request(app).get(`/api/inventory/day-stores/${dayStore.body.id}/stock`).set(authHeader(storeToken));
     expect(storeStock.body.stock).toEqual([]); // nothing ever happened at this store — no negative balance
@@ -367,14 +352,11 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     const request2 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 100, purpose: "ISSUED_PRODUCTION" });
     await request(app).patch(`/api/inventory/requests/${request2.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
     // Central stock (dayStoreId: null) still works — the Warehouse total really does cover it.
-    const centralIssue = await request(app)
-      .post(`/api/inventory/requests/${request2.body.id}/issue`)
-      .set(authHeader(storeToken))
-      .send({ date: "2026-08-22", unit: "Kg", quantity: 100, dayStoreId: null });
+    const centralIssue = await issueToPlant(storeToken, request2.body.id, { date: "2026-08-22", unit: "Kg", quantity: 100 });
     expect(centralIssue.status).toBe(201);
   });
 
-  it("tags which Plant a Material Request is for, and carries it onto the issued transaction along with the issuing Day Store", async () => {
+  it("tags which Plant a Material Request is for, and carries it onto the issued transaction along with the issuing Store", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
@@ -383,12 +365,9 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
     // issue further down, since (by design, see the per-store balance
     // test above) an ISSUED_PRODUCTION row still counts as its own
     // outflow from the Warehouse-wide total even when tagged to a store.
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 20, isOpeningStock: true });
-    const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant 1" });
-    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Day Store A" });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 20, isOpeningStock: true });
+    const dayStore = await request(app).post("/api/inventory/day-stores").set(authHeader(storeToken)).send({ name: "Store A" });
+    const plant = { body: dayStore.body.pairedPlant }; // material goes to a Plant from its own Store, so the request is for that Store's Plant
     // The issue below is tagged as coming out of Day Store A's own shelf
     // — it needs to have actually received that much first, same as any
     // other Day-Store-tagged production issue.
@@ -401,7 +380,7 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
       .post("/api/inventory/requests")
       .set(authHeader(ppicToken))
       .send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
-    expect(req1.body.plant.name).toBe("Plant 1");
+    expect(req1.body.plant.name).toBe("Store A");
 
     await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
     const issued = await request(app)
@@ -409,8 +388,8 @@ describe("S6/S7 — Day Store / Plant tagging on the existing ledger", () => {
       .set(authHeader(storeToken))
       .send({ date: "2026-08-21", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
     expect(issued.status).toBe(201);
-    expect(issued.body.plant.name).toBe("Plant 1");
-    expect(issued.body.dayStore.name).toBe("Day Store A");
+    expect(issued.body.plant.name).toBe("Store A");
+    expect(issued.body.dayStore.name).toBe("Store A");
   });
 });
 

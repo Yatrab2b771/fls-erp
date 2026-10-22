@@ -35,7 +35,7 @@ function timelineOf(b: BatchReportDetail): { step: string; owner: string; when: 
     { step: "Batch created", owner: "Production", when: b.createdAt, detail: `Planned ${fmtQty(b.plannedQty)}` },
     { step: "Indent Issue", owner: "Production", when: b.indentSignedAt, detail: b.productionPlanDate ? `Production plan date ${dt(b.productionPlanDate)}` : "" },
     { step: "Batch No", owner: "R&D", when: b.batchNoAllocatedAt, detail: b.batchNo ?? "" },
-    { step: "Dispensing", owner: "Day Store", when: b.dispensedAt, detail: [b.rmDispensingDate ? `RM ${dt(b.rmDispensingDate)}` : "", b.pmIssuedDate ? `PM ${dt(b.pmIssuedDate)}` : "", b.grnNo ? `GRN ${b.grnNo}` : ""].filter(Boolean).join(" · ") },
+    { step: "Dispensing", owner: "Store", when: b.dispensedAt, detail: [b.rmDispensingDate ? `RM ${dt(b.rmDispensingDate)}` : "", b.pmIssuedDate ? `PM ${dt(b.pmIssuedDate)}` : "", b.grnNo ? `GRN ${b.grnNo}` : ""].filter(Boolean).join(" · ") },
     { step: "Line Clearance", owner: "QA", when: b.lineClearanceAt, detail: b.lineClearanceStatus ? `${b.lineClearanceStatus} · checklist ${Object.values(b.lineClearanceChecks ?? {}).filter(Boolean).length} of 7 OK` : "" },
     { step: "Manufacturing started", owner: "Production", when: b.shiftStartAt, detail: [b.shift ?? "", b.manpowerCount != null ? `${b.manpowerCount} people` : ""].filter(Boolean).join(" · ") },
     { step: "Manufacturing completed", owner: "Production", when: b.completedAt ?? b.shiftEndAt, detail: b.manufacturingStatus ?? "" },
@@ -43,9 +43,11 @@ function timelineOf(b: BatchReportDetail): { step: string; owner: string; when: 
     { step: "QA Gate: Manufacturing", owner: "QA", when: null, detail: b.mfgQaStatus ? `${b.mfgQaStatus} · approved ${q(b.mfgApprovedQty)} · rejected ${q(b.mfgRejectedQty)} · wastage ${q(b.mfgWastageQty)}` : "" },
     { step: "Bulk QC", owner: "R&D", when: null, detail: b.bulkQcStatus ?? "" },
     { step: "Packaging", owner: "Production", when: b.packagingStartAt, detail: [b.packagingStatus ?? "", b.packagingEndAt ? `ended ${dt(b.packagingEndAt)}` : ""].filter(Boolean).join(" · ") },
-    { step: "Handover to QA", owner: "Production", when: b.packagingEndAt && b.currentStageId !== "PACKAGING" ? b.packagingEndAt : null, detail: "" },
-    { step: "FG Store", owner: "Day Store", when: b.fgStoreReceivedDate, detail: b.fgQaStatus ? `FG QC ${b.fgQaStatus}` : "" },
-    { step: "Handed over to Dispatch", owner: "Day Store", when: b.handedOverToDispatchAt, detail: "" },
+    { step: "Sent for QA approval", owner: "Production", when: b.packagingEndAt && b.currentStageId !== "PACKAGING" ? b.packagingEndAt : null, detail: "" },
+    { step: "QA Gate: Packaging", owner: "QA", when: null, detail: "" },
+    { step: "Handover to Store", owner: "Production", when: b.handedToStoreAt, detail: "" },
+    { step: "FG Store", owner: "Store", when: b.fgStoreReceivedDate, detail: b.fgQaStatus ? `FG QC ${b.fgQaStatus}` : "" },
+    { step: "Handed over to Dispatch", owner: "Store", when: b.handedOverToDispatchAt, detail: "" },
     { step: "Invoice", owner: "Accounts", when: b.invoiceDate, detail: "" },
     { step: "Dispatched", owner: "Dispatch", when: b.dispatchDate, detail: b.dispatchedQty ? `${fmtQty(b.dispatchedQty)} sent` : "" },
   ];
@@ -87,8 +89,8 @@ function UtilizationTable({ title, rows, unitNote }: { title: string; rows: Batc
                     {m.itemName}
                     {!m.inPlan && <span className="ml-2 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-micro font-bold text-amber-700">Extra · not in plan</span>}
                     {m.extraRequestedQty > 0 && (
-                      <span className="mt-0.5 block text-micro font-medium text-amber-700" title="Extra material is asked for the product, not for one batch">
-                        Extra for this product: {q3(m.extraIssuedQty)} of {q3(m.extraRequestedQty)} {m.unit} issued
+                      <span className="mt-0.5 block text-micro font-medium text-amber-700" title="Extra material asked for this batch">
+                        Extra asked: {q3(m.extraIssuedQty)} of {q3(m.extraRequestedQty)} {m.unit} issued
                       </span>
                     )}
                   </td>
@@ -150,6 +152,7 @@ export function BatchReportPage() {
 
   const rm = b.materials.filter((m) => m.category === "RM");
   const pm = b.materials.filter((m) => m.category === "PM");
+  const other = b.materials.filter((m) => m.category === "OTHER"); // consumables asked for the batch by hand (gloves ...): asked and issued, no Utilization sheet
   const hours = hoursBetween(b.shiftStartAt, b.shiftEndAt);
   const packHours = hoursBetween(b.packagingStartAt, b.packagingEndAt);
   const yieldP = b.inputQty != null && b.outputQty != null ? pct(b.outputQty, b.inputQty) : null;
@@ -295,6 +298,7 @@ export function BatchReportPage() {
 
       <UtilizationTable title="RM Utilization" rows={rm} unitNote="Raw material: filled on the Batch tile" />
       <UtilizationTable title="PM Utilization" rows={pm} unitNote="Packaging material: filled on the Packaging tile" />
+      {other.length > 0 && <UtilizationTable title="Other material" rows={other} unitNote="Extra consumables asked for this batch (gloves, masks ...)" />}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock, sendPlanToProduction, adminToken, advanceRunToDispensing, confirmPlantReceipts, issueToPlant } from "./helpers";
 
 const app = createApp();
 
@@ -12,6 +12,7 @@ async function createApprovedPoItem(bdToken: string, poNumber: string) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Transit Product", productCategory: "Powder", quantity: 100, unit: "Kg" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -46,10 +47,7 @@ describe("GET /api/inventory/transit", () => {
     const runId = run.body.id;
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Transit Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Transit Plant" });
     await request(app).patch(`/api/pre-productions/${runId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
     const mr = await request(app)
@@ -57,15 +55,14 @@ describe("GET /api/inventory/transit", () => {
       .set(authHeader(ppicToken))
       .send({ itemId: item.body.id, category: "RM", requestedQty: 50, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${mr.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${mr.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 50, dayStoreId: null });
+    await issueToPlant(storeToken, mr.body.id, { date: "2026-08-01", unit: "Kg", quantity: 50 });
 
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // -> INDENT_ISSUE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" }); // -> LINE_CLEARANCE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" }); // -> DISPENSING
+    await confirmPlantReceipts();
+    await advanceRunToDispensing(runId);
 
     const dispensed = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(await adminToken()))
       .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 15, unit: "Kg", purpose: "SAMPLE" }] });
     expect(dispensed.status).toBe(200);
     expect(dispensed.body.currentStageId).toBe("SAMPLE_QC_APPROVAL");

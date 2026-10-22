@@ -11,12 +11,12 @@ import { getOnHandByDayStoreAndItem, getOnHandByItemId, getOnHandByPlantAndItem,
  *   100 received -> 40 to the Day Store -> 5 of those on to its Plant
  *   Warehouse 60, Day Store 35, Plant 5, nothing lost: 100 in total.
  */
-describe("Day Store -> Plant issue keeps the Warehouse, Day Store and Plant balances apart", () => {
-  it("does not take the Day Store's issue to its Plant out of the Warehouse a second time", async () => {
+describe("Store -> Plant issue keeps the Warehouse, Store and Plant balances apart", () => {
+  it("does not take the Store's issue to its Plant out of the Warehouse a second time", async () => {
     const { user } = await createUser(["STORE"]);
     const item = await prisma.inventoryItem.create({ data: { category: "RM", name: "DSP Cocoa", unit: "Kg" } });
-    const dayStore = await prisma.dayStore.create({ data: { name: "DSP Day Store", createdById: user.id } });
-    const plant = await prisma.plant.create({ data: { name: "DSP Day Store", createdById: user.id, dayStoreId: dayStore.id } });
+    const dayStore = await prisma.dayStore.create({ data: { name: "DSP Store", createdById: user.id } });
+    const plant = await prisma.plant.create({ data: { name: "DSP Store", createdById: user.id, dayStoreId: dayStore.id } });
     const base = { itemId: item.id, createdById: user.id, date: new Date(), unit: "Kg" };
 
     await prisma.inventoryTransaction.create({ data: { ...base, type: "RECEIVED", quantity: 100, vendorName: "V", receiptStatus: "ACCEPTED", acceptedById: user.id, acceptedAt: new Date() } });

@@ -99,7 +99,7 @@ lotsRouter.get("/expiring", async (req: AuthedRequest, res, next) => {
         for (const lot of lots) if (lot.remaining > 1e-9 && lot.expiryDate && lot.expiryDate.getTime() <= cutoff.getTime()) found.push({ place, lot });
       };
       add("Warehouse", wh);
-      ds.forEach((lots, i) => add(`Day Store: ${dayStores[i]!.name}`, lots));
+      ds.forEach((lots, i) => add(`Store: ${dayStores[i]!.name}`, lots));
       pl.forEach((lots, i) => add(`Plant: ${plants[i]!.name}`, lots));
     }
     const rows = await lotRows([...new Set(found.map((f) => f.lot.receiptId))]);
@@ -157,8 +157,8 @@ lotsRouter.get("/trace/lot/:receiptId", async (req: AuthedRequest<{ receiptId: s
         return { kind: "BATCH" as const, at: a.dispensingLine.createdAt, quantity: round3(a.quantity), to: `Batch ${b.batchNo ?? "(no number yet)"}`, batchId: b.id, batchNo: b.batchNo, productName: po.productName, poNumber: po.purchaseOrder.poNumber, customerName: po.purchaseOrder.customer.companyName };
       }
       const t = a.issueTxn!;
-      const to = t.type === "ISSUED_DAY_STORE" ? `Day Store: ${t.dayStore?.name ?? "—"}` : t.type === "ISSUED_RND" ? "R&D Store" : `Plant: ${t.plant?.name ?? "—"}`;
-      const from = t.type === "ISSUED_PRODUCTION" ? `Day Store: ${t.dayStore?.name ?? "—"}` : "Warehouse";
+      const to = t.type === "ISSUED_DAY_STORE" ? `Store: ${t.dayStore?.name ?? "—"}` : t.type === "ISSUED_RND" ? "R&D Store" : `Plant: ${t.plant?.name ?? "—"}`;
+      const from = t.type === "ISSUED_PRODUCTION" ? `Store: ${t.dayStore?.name ?? "—"}` : "Warehouse";
       return { kind: t.type, at: t.date, quantity: round3(a.quantity), from, to };
     });
     res.json({ lot: lotView(lot), movements, unaccountedQty: round3(Math.max(0, lot.quantity - (lot.rejectedQty ?? 0) - allocations.filter((a) => a.issueTxn && a.issueTxn.type !== "ISSUED_PRODUCTION").reduce((s, a) => s + a.quantity, 0))) });

@@ -206,7 +206,7 @@ function RaiseForm() {
     const out: PlaceOption[] = [];
     const scopedStores = myStore?.scoped ? myStore.stores : null;
     if (hasRole("STORE", "ADMIN") && !scopedStores) out.push({ id: "WAREHOUSE", name: "Warehouse", type: "WAREHOUSE" });
-    if (hasRole("STORE", "ADMIN")) for (const d of scopedStores ?? dayStores ?? []) out.push({ id: `DS:${d.id}`, name: `Day Store: ${d.name}`, type: "DAY_STORE", dayStoreId: d.id });
+    if (hasRole("STORE", "ADMIN")) for (const d of scopedStores ?? dayStores ?? []) out.push({ id: `DS:${d.id}`, name: `Store: ${d.name}`, type: "DAY_STORE", dayStoreId: d.id });
     if (hasRole("PRODUCTION", "ADMIN")) for (const p of plants ?? []) out.push({ id: `PL:${p.id}`, name: `Plant: ${p.name}`, type: "PLANT", plantId: p.id });
     if (hasRole("RND", "ADMIN")) out.push({ id: "RND", name: "R&D Store", type: "RND_STORE" });
     return out;

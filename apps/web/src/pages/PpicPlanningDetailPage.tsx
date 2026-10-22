@@ -273,7 +273,7 @@ export function ProductActions({
           <>
             <b>{label}</b> —{" "}
             {wasSent
-              ? "Production can't open or move its run, or make batches, until you release it. Material already at the Day Store stays there."
+              ? "Production can't open or move its run, or make batches, until you release it. Material already at the Store stays there."
               : claimsStage
                 ? "it stops claiming stock and can't be sent to Production until you release it. Regulatory carries on."
                 : "its plan can't be generated until you release the hold."}
@@ -313,7 +313,7 @@ export function ProductActions({
         message={
           <>
             <b>{label}</b> will be closed for good. <b>This cannot be undone</b> — it can never be released or planned again.
-            {wasSent && " Production's run (if opened) stops and the Day Store's untouched requests for it are dropped; material already issued stays as stock."} BD will be told.
+            {wasSent && " Production's run (if opened) stops and the Store's untouched requests for it are dropped; material already issued stays as stock."} BD will be told.
           </>
         }
         requireReason

@@ -105,6 +105,10 @@ export type LeadInput = Partial<Pick<Lead, "brandName" | "contactPerson" | "desi
   estimatedQty?: string | null;
   estimatedValueLac?: number | null;
   businessCardId?: string;
+  /** BD: who follows the lead up (any department); BD themself when not given. */
+  assignToId?: string;
+  /** BD: hand the lead to someone else. */
+  pocId?: string;
 };
 
 export interface MeetingInput {
@@ -172,6 +176,25 @@ export function useLeadSummary(options?: { enabled?: boolean }) {
 function useInvalidate() {
   const qc = useQueryClient();
   return () => qc.invalidateQueries({ queryKey: KEY });
+}
+
+/** The names to choose from: the fixed ones plus those typed under "Others" on any lead (they join the list for everyone). Shows the fixed ones until it loads. */
+export function useLeadOptions() {
+  const { data } = useQuery({
+    queryKey: ["leads", "options"],
+    queryFn: () => api<{ customerTypes: string[]; productFormats: string[]; powderTypes: string[] }>("/api/leads/options/lists"),
+    staleTime: 60_000,
+  });
+  return {
+    customerTypes: data?.customerTypes ?? [...CUSTOMER_TYPES],
+    productFormats: data?.productFormats ?? [...PRODUCT_FORMATS],
+    powderTypes: data?.powderTypes ?? [...POWDER_TYPES],
+  };
+}
+
+/** BD / Admin: the people a lead can be handed to, with their department. */
+export function useLeadAssignees(options?: { enabled?: boolean }) {
+  return useQuery({ queryKey: ["leads", "assignees"], queryFn: () => api<{ id: string; name: string; department: string }[]>("/api/leads/assignees"), enabled: options?.enabled, staleTime: 60_000 });
 }
 
 export function useCreateLead() {

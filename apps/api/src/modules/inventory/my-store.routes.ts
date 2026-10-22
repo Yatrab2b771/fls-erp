@@ -108,7 +108,7 @@ myStoreRouter.post("/requests", validateBody(createRequestSchema), async (req: A
     const scope = await scopeOf(req);
     const stores = await prisma.dayStore.findMany({ where: scope ? { id: { in: scope } } : {}, select: { id: true, name: true } });
     const store = data.dayStoreId ? stores.find((s) => s.id === data.dayStoreId) : stores.length === 1 ? stores[0] : undefined;
-    if (!store) return res.status(400).json({ error: stores.length > 1 ? "Choose which Day Store this request is for." : "You are not assigned to that Day Store." });
+    if (!store) return res.status(400).json({ error: stores.length > 1 ? "Choose which Store this request is for." : "You are not assigned to that Store." });
 
     const item = await prisma.inventoryItem.findUnique({ where: { id: data.itemId } });
     if (!item) return res.status(400).json({ error: "Unknown inventory item" });
@@ -154,6 +154,7 @@ for (const kind of ["received", "issued-to-plant"] as const) {
             batchNo: true,
             grnNo: true,
             fulfillsRequestId: true,
+            fulfillsRequest: { select: { isExtra: true } },
             isTransitTracked: true,
             deliveredAt: true,
             item: { select: { name: true, category: true } },
@@ -180,6 +181,8 @@ for (const kind of ["received", "issued-to-plant"] as const) {
           batchNo: r.batchNo,
           grnNo: r.grnNo,
           viaRequest: !!r.fulfillsRequestId,
+          // Extra material asked for a batch outside its plan (or what R&D's BOM change needs), dispensed with its own GRN
+          isExtra: !!r.fulfillsRequest?.isExtra,
           status: r.isTransitTracked && !r.deliveredAt ? "In Transit" : "Delivered",
           issuedBy: r.createdBy.fullName,
         })),

@@ -76,7 +76,7 @@ export function DayStoreStagePage({ stage }: { stage: StoreBoardStage }) {
             "Required Qty": r3(m.requiredQty),
             "Dispensed So Far": r3(m.consumedQty),
             "Still To Dispense": r3(Math.max(0, m.requiredQty - m.consumedQty)),
-            "Day Store Has": m.dayStoreQty,
+            "Store Has": m.dayStoreQty,
             "Plant Has": m.plantQty,
           }))
         : r.materials.map((m) => ({
@@ -87,7 +87,7 @@ export function DayStoreStagePage({ stage }: { stage: StoreBoardStage }) {
             Category: m.category,
             Unit: m.unit,
             "Required Qty": m.requiredQty,
-            "With Day Store": r3(m.receivedQty + m.atDayStoreQty),
+            "With Store": r3(m.receivedQty + m.atDayStoreQty),
             Short: m.shortQty,
           })),
     );
@@ -244,7 +244,7 @@ function GrnForm({ row, canAct, onDone }: { row: StoreBoardRow; canAct: boolean;
                 <th className="px-3 py-2 text-left">Material</th>
                 <th className="px-3 py-2 text-left">Type</th>
                 <th className="px-3 py-2 text-right">Required</th>
-                <th className="px-3 py-2 text-right">With Day Store</th>
+                <th className="px-3 py-2 text-right">With Store</th>
                 <th className="px-3 py-2 text-left">Status</th>
               </tr>
             </thead>
@@ -332,7 +332,7 @@ function DispenseForm({ row, canAct, onDone }: { row: StoreBoardRow; canAct: boo
               <th className="px-3 py-2 text-left">Material</th>
               <th className="px-3 py-2 text-right">Required</th>
               <th className="px-3 py-2 text-right">Dispensed</th>
-              <th className="px-3 py-2 text-right">Day Store</th>
+              <th className="px-3 py-2 text-right">Store</th>
               <th className="px-3 py-2 text-right">Plant</th>
               <th className="px-3 py-2 text-left">Dispense now</th>
               <th className="px-3 py-2 text-left">Purpose</th>

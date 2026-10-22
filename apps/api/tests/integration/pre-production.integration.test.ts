@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, sendPlanToProduction, receiveAcceptedStock, issueToPlant, createDayStoreLogin, adminToken, advanceRunToDispensing, confirmPlantReceipts } from "./helpers";
 
 const app = createApp();
 
 /** Creates a customer + PO (DRAFT), approves it as BD, and returns its one line item's id. */
-async function createApprovedPoItem(bdToken: string) {
+async function createApprovedPoItem(bdToken: string, plantId?: string) {
   const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
   const po = await request(app)
     .post("/api/purchase-orders")
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id, plantId);
   return po.body.items[0].id as string;
 }
 
@@ -67,9 +68,10 @@ describe("POST /api/pre-productions", () => {
 describe("PATCH /api/pre-productions/:id/checklist", () => {
   it("Line Clearance (dispensing): starts as 7 unchecked rows, each side can only fill in its own column, and rejects an unknown item key", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const itemId = await createApprovedPoItem(bdToken);
+    const ds = await createDayStoreLogin(); // the Dispensing checklist is the Store of the run's Plant's
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const storeToken = ds.token;
     const { token: qaToken } = await createUser(["QA_QC"]);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
@@ -108,13 +110,14 @@ describe("PATCH /api/pre-productions/:id/checklist", () => {
 describe("PATCH /api/pre-productions/:id/stage — full forward walk", () => {
   it("walks a run from Material Received through Sample QC Approval, each stage gated to its department, fields persisted along the way, and completes in place at the terminal stage", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const itemId = await createApprovedPoItem(bdToken);
+    const ds = await createDayStoreLogin(); // Material Received and Dispensing are the Store of the run's Plant
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
 
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const storeToken = ds.token;
     const { token: qaToken } = await createUser(["QA_QC"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
 
@@ -127,18 +130,16 @@ describe("PATCH /api/pre-productions/:id/stage — full forward walk", () => {
     expect(materialReceived.body.currentStageId).toBe("INDENT_ISSUE");
     expect(materialReceived.body.grnNo).toBe("GRN-9001");
 
-    // INDENT_ISSUE — PPIC. Also carries the former Production Plan fields.
+    // INDENT_ISSUE — Production's own step (not PPIC's). Also carries the former Production Plan fields.
+    const ppicDenied = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" });
+    expect(ppicDenied.status).toBe(403);
     const indentIssue = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(ppicToken))
-      .send({ action: "FORWARD", prodIndentSlipSign: "PPIC-IND-1", productionPlanDate: "2026-08-01", unit: "41" });
-    expect(indentIssue.body.currentStageId).toBe("LINE_CLEARANCE");
-    expect(indentIssue.body.prodIndentSlipSign).toBe("PPIC-IND-1");
-
-    // LINE_CLEARANCE — QA_QC. Hard gate — must literally read Approved.
-    const lineClearance = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" });
-    expect(lineClearance.status).toBe(200);
-    expect(lineClearance.body.currentStageId).toBe("DISPENSING");
+      .set(authHeader(productionToken))
+      .send({ action: "FORWARD", prodIndentSlipSign: "PROD-IND-1", productionPlanDate: "2026-08-01", unit: "41" });
+    expect(indentIssue.status).toBe(200);
+    expect(indentIssue.body.currentStageId).toBe("DISPENSING"); // a run has no Line Clearance stage: each batch has its own
+    expect(indentIssue.body.prodIndentSlipSign).toBe("PROD-IND-1");
 
     // DISPENSING — Store.
     const dispensing = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD", rmDispensingDate: "2026-08-02" });
@@ -171,12 +172,10 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: storeToken } = await createUser(["STORE"]);
+    const adminTok = await adminToken(); // the run-level steps are done as ADMIN: this test is about the Plant's stock
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
 
     // Run created with NO plant — walk it up to Dispensing.
     const itemId1 = await createApprovedPoItem(bdToken);
@@ -184,10 +183,7 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     const runId = run.body.id;
     expect(run.body.plantId).toBeNull();
 
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" });
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" });
-    const { token: qaTokenForClearance } = await createUser(["QA_QC"]);
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaTokenForClearance)).send({ action: "FORWARD", lineClearanceStatus: "Approved" });
+    await advanceRunToDispensing(runId);
 
     const check = await request(app).get(`/api/pre-productions/${runId}`).set(authHeader(storeToken));
     expect(check.body.currentStageId).toBe("DISPENSING");
@@ -195,7 +191,7 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     // No plant assigned yet — logging consumption is blocked.
     const blockedNoPlant = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 5, unit: "Kg" }] });
     expect(blockedNoPlant.status).toBe(400);
 
@@ -210,14 +206,14 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
 
     const badItem = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", consumption: [{ itemId: "00000000-0000-0000-0000-000000000000", quantity: 5, unit: "Kg" }] });
     expect(badItem.status).toBe(400);
 
     // Give the plant some inflow first, via the normal Material Request -> issue flow.
     const req1 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 50, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${req1.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-22", unit: "Kg", quantity: 50, dayStoreId: null });
+    await issueToPlant(storeToken, req1.body.id, { date: "2026-08-22", unit: "Kg", quantity: 50 });
 
     const beforeConsumption = await request(app).get(`/api/inventory/plants/${plant.body.id}/stock`).set(authHeader(storeToken));
     expect(beforeConsumption.body.stock).toEqual([expect.objectContaining({ onHand: 50 })]);
@@ -225,7 +221,7 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     // Now log real consumption at Dispensing — this is the actual point of the feature.
     const dispensed = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", rmDispensingDate: "2026-08-22", consumption: [{ itemId: item.body.id, quantity: 18, unit: "Kg" }] });
     expect(dispensed.status).toBe(200);
     expect(dispensed.body.currentStageId).toBe("SAMPLE_QC_APPROVAL");
@@ -241,12 +237,10 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: storeToken } = await createUser(["STORE"]);
+    const adminTok = await adminToken(); // the run-level steps are done as ADMIN: this test is about the Plant's stock
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
 
     const itemId1 = await createApprovedPoItem(bdToken);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId1 });
@@ -255,20 +249,17 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     const plant = await request(app).post("/api/inventory/plants").set(authHeader(storeToken)).send({ name: "Plant Gamma" });
     await request(app).patch(`/api/pre-productions/${runId}/plant`).set(authHeader(ppicToken)).send({ plantId: plant.body.id });
 
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" });
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" });
-    const { token: qaTokenForClearance2 } = await createUser(["QA_QC"]);
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaTokenForClearance2)).send({ action: "FORWARD", lineClearanceStatus: "Approved" });
+    await advanceRunToDispensing(runId);
 
     // Only 10 Kg ever makes it to this Plant.
     const req1 = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${req1.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-22", unit: "Kg", quantity: 10, dayStoreId: null });
+    await issueToPlant(storeToken, req1.body.id, { date: "2026-08-22", unit: "Kg", quantity: 10 });
 
     // Trying to log 20 Kg of consumption — more than the 10 this Plant actually has — is rejected.
     const overConsume = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 20, unit: "Kg" }] });
     expect(overConsume.status).toBe(409);
     expect(overConsume.body.error).toMatch(/Whey Protein/);
@@ -283,7 +274,7 @@ describe("Pre-Production Plant + real-time per-Plant balance", () => {
     // Exactly what's available goes through fine.
     const okConsume = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 10, unit: "Kg" }] });
     expect(okConsume.status).toBe(200);
     expect(okConsume.body.currentStageId).toBe("SAMPLE_QC_APPROVAL");
@@ -311,12 +302,10 @@ describe("Dispensing Sheet — weighing fields and QA line verification", () => 
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: qaToken } = await createUser(["QA_QC"]);
+    const adminTok = await adminToken(); // the run-level steps are done as ADMIN: this test is about the weighing fields
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Weighing Sheet Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
 
     const itemId1 = await createApprovedPoItem(bdToken);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId1 });
@@ -328,15 +317,13 @@ describe("Dispensing Sheet — weighing fields and QA line verification", () => 
       .set(authHeader(ppicToken))
       .send({ itemId: item.body.id, category: "RM", requestedQty: 18, purpose: "ISSUED_PRODUCTION", plantId: plant.body.id });
     await request(app).patch(`/api/inventory/requests/${req1.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${req1.body.id}/issue`).set(authHeader(storeToken)).send({ date: "2026-08-21", unit: "Kg", quantity: 18, dayStoreId: null });
+    await issueToPlant(storeToken, req1.body.id, { date: "2026-08-21", unit: "Kg", quantity: 18 });
 
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // -> INDENT_ISSUE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "FORWARD" }); // -> LINE_CLEARANCE
-    await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(qaToken)).send({ action: "FORWARD", lineClearanceStatus: "Approved" }); // -> DISPENSING
+    await advanceRunToDispensing(runId);
 
     const dispensed = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(storeToken))
+      .set(authHeader(adminTok))
       .send({ action: "FORWARD", consumption: [{ itemId: item.body.id, quantity: 18, unit: "Kg", grossWeight: 20.5, tareWeight: 2.5, arNo: "AR-2026-0091" }] });
     expect(dispensed.status).toBe(200);
     expect(dispensed.body.consumptions).toHaveLength(1);
@@ -362,26 +349,26 @@ describe("Dispensing Sheet — weighing fields and QA line verification", () => 
 describe("PATCH /api/pre-productions/:id/stage — send back", () => {
   it("requires a note, is gated to the current stage's department, and returns the run to the previous stage", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const itemId = await createApprovedPoItem(bdToken);
-    const { token: ppicToken } = await createUser(["PPIC"]);
+    const ds = await createDayStoreLogin();
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
 
-    const { token: storeToken } = await createUser(["STORE"]);
+    const storeToken = ds.token;
 
     await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" });
-    // Now at INDENT_ISSUE (PPIC).
+    // Now at INDENT_ISSUE (Production's).
 
     const wrongDept = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "REJECT", note: "not mine" });
     expect(wrongDept.status).toBe(403);
 
-    const noNote = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(ppicToken)).send({ action: "REJECT" });
+    const noNote = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(productionToken)).send({ action: "REJECT" });
     expect(noNote.status).toBe(400);
 
     const rejected = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(ppicToken))
+      .set(authHeader(productionToken))
       .send({ action: "REJECT", note: "GRN details look wrong, please recheck the delivery." });
     expect(rejected.status).toBe(200);
     expect(rejected.body.currentStageId).toBe("MATERIAL_RECEIVED"); // back to the previous stage
@@ -391,11 +378,12 @@ describe("PATCH /api/pre-productions/:id/stage — send back", () => {
 
   it("has nothing to send back from the very first stage", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const itemId = await createApprovedPoItem(bdToken);
+    const ds = await createDayStoreLogin();
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
 
-    const { token: storeToken } = await createUser(["STORE"]);
+    const storeToken = ds.token;
     const res = await request(app).patch(`/api/pre-productions/${run.body.id}/stage`).set(authHeader(storeToken)).send({ action: "REJECT", note: "n/a" });
     expect(res.status).toBe(400);
   });
@@ -442,6 +430,7 @@ describe("POST /api/pre-productions — PO Readiness gate", () => {
       .set(authHeader(bdToken))
       .send({ customerId: customer.body.id, poNumber, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
     await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+    await sendPlanToProduction(po.body.items[0].id);
     return { poId: po.body.id as string, itemId: po.body.items[0].id as string };
   }
 
@@ -479,10 +468,7 @@ describe("POST /api/pre-productions — PO Readiness gate", () => {
     // Tracked, but fully covered by live stock.
     const covered = await createApprovedPoWithId(bdToken, "PO-GATE-1003");
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Gate Covered Item" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 50, isOpeningStock: true });
     await request(app).post("/api/po-readiness").set(authHeader(ppicToken)).send({ purchaseOrderId: covered.poId, itemId: item.body.id, category: "RM", requiredQty: 50, unit: "Kg" });
 
     const created = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: covered.itemId });
@@ -493,13 +479,13 @@ describe("POST /api/pre-productions — PO Readiness gate", () => {
 // Indent Issue → real InventoryRequest — closes the gap where the stage's
 // only record of the ask was a free-text sign-off, disconnected from
 // Store's actual "what leaves the shelf for Production" gate.
-describe("PATCH /api/pre-productions/:id/stage — Indent Issue lines create real InventoryRequest rows", () => {
-  it("creates a PENDING InventoryRequest per line, tagged to the run, only when at Indent Issue", async () => {
+describe("PATCH /api/pre-productions/:id/stage — Indent Issue", () => {
+  it("ignores the indent lines a client sends: the indent is the plan's own list, so no InventoryRequest rows are made from the stage", async () => {
     const { token: bdToken } = await createUser(["BD"]);
-    const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: storeToken } = await createUser(["STORE"]);
-    const itemId = await createApprovedPoItem(bdToken);
+    const ds = await createDayStoreLogin();
+    const storeToken = ds.token;
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
 
@@ -509,25 +495,19 @@ describe("PATCH /api/pre-productions/:id/stage — Indent Issue lines create rea
     const atIndentIssue = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD" }); // MATERIAL_RECEIVED -> INDENT_ISSUE
     expect(atIndentIssue.body.currentStageId).toBe("INDENT_ISSUE");
 
-    // Wrong category for the item — rejected before anything is written.
-    const mismatch = await request(app)
-      .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(ppicToken))
-      .send({ action: "FORWARD", indentLines: [{ itemId: rm.body.id, category: "PM", requestedQty: 10 }] });
-    expect(mismatch.status).toBe(400);
-
+    // The indent is the plan's own list of materials, so the lines a client sends are ignored: even a line with the wrong category is not
+    // an error, and no Material Request is made from the stage (the Day Store sends the material when the batch is dispensed).
     const forwarded = await request(app)
       .patch(`/api/pre-productions/${runId}/stage`)
-      .set(authHeader(ppicToken))
-      .send({ action: "FORWARD", indentLines: [{ itemId: rm.body.id, category: "RM", requestedQty: 10 }] });
+      .set(authHeader(productionToken))
+      .send({ action: "FORWARD", indentLines: [{ itemId: rm.body.id, category: "PM", requestedQty: 10 }] });
     expect(forwarded.status).toBe(200);
-    expect(forwarded.body.currentStageId).toBe("LINE_CLEARANCE");
-    expect(forwarded.body.indentRequests).toHaveLength(1);
-    expect(forwarded.body.indentRequests[0]).toMatchObject({ itemId: rm.body.id, category: "RM", requestedQty: 10, status: "PENDING" });
+    expect(forwarded.body.currentStageId).toBe("DISPENSING");
+    expect(forwarded.body.indentRequests).toHaveLength(0);
 
-    // Store's own Material Requests queue sees it too — it's a real row.
+    // Store's own Material Requests queue gets nothing from it either
     const requests = await request(app).get("/api/inventory/requests?status=PENDING").set(authHeader(storeToken));
-    expect(requests.body.some((r: { id: string }) => r.id === forwarded.body.indentRequests[0].id)).toBe(true);
+    expect(requests.body.filter((r: { itemId: string }) => r.itemId === rm.body.id)).toHaveLength(0);
   });
 });
 
@@ -538,17 +518,15 @@ describe("PATCH /api/pre-productions/:id/stage — cross-module traceability lin
   it("links Material Received to a real RECEIVED transaction, and rejects an unknown id", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
-    const { token: storeToken } = await createUser(["STORE"]);
-    const itemId = await createApprovedPoItem(bdToken);
+    const ds = await createDayStoreLogin();
+    const storeToken = ds.token;
+    const itemId = await createApprovedPoItem(bdToken, ds.plant.id);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
     // Already at MATERIAL_RECEIVED (Store) — that's the very first stage.
 
     const rm = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "GRN Link Item" });
-    const receipt = await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: rm.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 25, isOpeningStock: true, grnNo: "GRN-LINK-1" });
+    const receipt = await receiveAcceptedStock(storeToken, { itemId: rm.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 25, isOpeningStock: true, grnNo: "GRN-LINK-1" });
 
     const badLink = await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD", sourceReceiptId: "00000000-0000-0000-0000-000000000000" });
     expect(badLink.status).toBe(400);

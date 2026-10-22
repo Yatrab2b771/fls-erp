@@ -54,8 +54,8 @@ export function StockTransfersPage() {
   const blurb = dayStoreLogin
     ? "Send unused RM/PM back to the Warehouse, or on to your own Plant."
     : warehouseSeat
-      ? "Stock that Day Stores have sent back to the Warehouse - confirm it when it arrives."
-      : "Stock moving between a Day Store, its Plant and the Warehouse.";
+      ? "Stock that Stores have sent back to the Warehouse - confirm it when it arrives."
+      : "Stock moving between a Store, its Plant and the Warehouse.";
 
   return (
     <div className="space-y-6">
@@ -323,7 +323,7 @@ function SendTransferForm({ stores }: { stores: { id: string; name: string; plan
                 setPickedStoreId(v);
                 setItemId("");
               }}
-              placeholder="— Select your Day Store —"
+              placeholder="— Select your Store —"
             />
           )}
         </div>

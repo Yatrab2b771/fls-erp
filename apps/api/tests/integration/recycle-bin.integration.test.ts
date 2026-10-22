@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock } from "./helpers";
 
 const app = createApp();
 
@@ -25,10 +25,7 @@ describe("Recycle Bin", () => {
     const { token: adminToken } = await createUser(["ADMIN"]);
 
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Recycle Bin Test Item" });
-    const txn = await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 40, isOpeningStock: true, vendorName: "Bin Test Vendor" });
+    const txn = await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-26", unit: "Kg", quantity: 40, isOpeningStock: true, vendorName: "Bin Test Vendor" });
     expect(txn.status).toBe(201);
 
     const stockBefore = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));

@@ -74,7 +74,7 @@ export function StockIssuedPage() {
             <h1 className="text-2xl font-black tracking-tight text-slate-900">Stock Issued</h1>
             <p className="text-sm text-slate-500">
               {paged.total.toLocaleString()} issue entr{paged.total === 1 ? "y" : "ies"}
-              {isFiltered ? " match" : ""} from the Warehouse — to Day Stores and the R&D Store
+              {isFiltered ? " match" : ""} from the Warehouse — to Stores and the R&D Store
             </p>
           </div>
         </div>
@@ -105,7 +105,7 @@ export function StockIssuedPage() {
       {paged.isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : paged.total === 0 ? (
-        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "Nothing issued yet"} hint={isFiltered ? "Nothing matches these filters." : "Issues show here once Store sends material out of the Warehouse."} accent="brand" />
+        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "Nothing issued yet"} hint={isFiltered ? "Nothing matches these filters." : "Issues show here once Warehouse sends material out of the Warehouse."} accent="brand" />
       ) : (
         <div className="card overflow-x-auto">
           <table className="w-full whitespace-nowrap text-xs">

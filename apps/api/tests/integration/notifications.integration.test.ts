@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, receiveAcceptedStock, sendPlanToProduction, createDayStoreLogin, issueToPlant } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
@@ -17,6 +18,7 @@ async function createApprovedPoItem(bdToken: string) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity: 100, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -118,19 +120,20 @@ describe("Notification wiring — Pre-Production / Combined Lot", () => {
   it("forwarding notifies the next stage's role, excluding the actor, and DISPATCH_PLAN's self-forward doesn't re-notify", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const itemId = await createApprovedPoItem(bdToken);
-    const { token: ppicToken } = await createUser(["PPIC"]);
+    const ds = await createDayStoreLogin(); // Material Received is the Store of the run's Plant
+    await sendPlanToProduction(itemId, ds.plant.id);
     const { token: productionToken } = await createUser(["PRODUCTION"]);
     const run = await request(app).post("/api/pre-productions").set(authHeader(productionToken)).send({ purchaseOrderItemId: itemId });
     const runId = run.body.id;
 
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
-    const { token: storeToken } = await createUser(["STORE"]);
+    const storeToken = ds.token;
     const { token: dispatchToken } = await createUser(["DISPATCH"]);
 
-    // MATERIAL_RECEIVED -> INDENT_ISSUE: PPIC should be notified, Store (the actor) should not.
+    // MATERIAL_RECEIVED -> INDENT_ISSUE (Production's step): Production should be notified, Store (the actor) should not.
     await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(storeToken)).send({ action: "FORWARD", grnNo: "GRN-9001" });
-    const ppicInbox = await notifsFor(ppicToken);
-    expect(ppicInbox.notifications.some((n) => n.title.includes("Indent Issue"))).toBe(true);
+    const productionInbox = await notifsFor(productionToken);
+    expect(productionInbox.notifications.some((n) => n.title.includes("Indent Issue"))).toBe(true);
     // Purchase is unrelated to this pipeline any more (PO_RELEASE is
     // retired) — never notified at all.
     const purchaseInbox = await notifsFor(purchaseToken);
@@ -147,8 +150,9 @@ describe("Notification wiring — Pre-Production / Combined Lot", () => {
     await request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(adminToken)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
     const pb = (await request(app).post(`/api/pre-productions/${runId}/production-batches`).set(authHeader(productionToken)).send({ ...BATCH_START, plannedQty: 100 })).body;
     await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(productionToken)).send({ outputQty: 100 });
-    const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
-    const lotId = completed.body.combinedLot.id as string;
+    await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(productionToken));
+    // A completed batch no longer combines into a lot by itself; the lot (which still has its own stage routes) is made directly
+    const lotId = (await prisma.combinedLot.create({ data: { preProductionId: runId } })).id;
     await request(app).patch(`/api/combined-lots/${lotId}/stage`).set(authHeader(adminToken)).send({ action: "JUMP", targetStageId: "DISPATCH_PLAN" });
     const dispatchInboxBefore = await notifsFor(dispatchToken);
     expect(dispatchInboxBefore.unreadCount).toBeGreaterThan(0);
@@ -180,13 +184,11 @@ describe("Notification wiring — Inventory", () => {
   it("a material request notifies STORE; review and issue notify the requester", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
+    const { plant } = await createDayStoreLogin();
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
 
-    const created = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION" });
+    const created = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId: item.body.id, category: "RM", requestedQty: 10, purpose: "ISSUED_PRODUCTION", plantId: plant.id });
     const storeInbox = await notifsFor(storeToken);
     expect(storeInbox.notifications.some((n) => n.title.includes("New request"))).toBe(true);
 
@@ -195,10 +197,7 @@ describe("Notification wiring — Inventory", () => {
     expect(ppicInboxAfterReview.notifications.some((n) => n.title.toLowerCase().includes("approved"))).toBe(true);
     await request(app).post("/api/notifications/read-all").set(authHeader(ppicToken));
 
-    await request(app)
-      .post(`/api/inventory/requests/${created.body.id}/issue`)
-      .set(authHeader(storeToken))
-      .send({ date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: null });
+    await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 10 });
     const ppicInboxAfterIssue = await notifsFor(ppicToken);
     expect(ppicInboxAfterIssue.notifications.some((n) => n.title.includes("Issued"))).toBe(true);
   });

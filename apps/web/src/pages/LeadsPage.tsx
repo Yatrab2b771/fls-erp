@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { ArrowLeft, CalendarClock, Download, Plus, ScanLine, TrendingUp, Users } from "lucide-react";
 import { useAuth } from "../lib/auth";
-import { LEAD_STATUS_META, LEAD_STATUS_ORDER, followUpState, fmtDateTime, fmtDay, fmtLac, isClosed, monthLabel, useLeads, type Lead, type LeadStatus } from "../lib/leadHooks";
+import { LEAD_STATUS_META, LEAD_STATUS_ORDER, followUpState, fmtDateTime, fmtDay, fmtLac, isClosed, monthLabel, useLeads, type Lead } from "../lib/leadHooks";
 import { useTileFilters } from "../lib/tileFilters";
 import { useClientPaging } from "../lib/useClientPaging";
 import { ClientPager } from "../components/Pagination";
@@ -11,45 +11,28 @@ import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import { EmptyState } from "../components/EmptyState";
 import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport";
 
-// BD's leads: every company BD is talking to, with its status, last meeting and next follow-up. The tiles above are quick filters.
+// BD's leads: every company BD is talking to, with its status, last meeting and next follow-up. Everything is narrowed with the filters.
 
 const distinct = (xs: (string | null | undefined)[]) => [...new Set(xs.filter((v): v is string => !!v))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 const FOLLOW_UP_BUCKETS = ["Overdue", "Today", "Later", "Not set"];
+const WAITING_FOR_PO = "Waiting for PO (converted, no PO yet)";
 
 function bucketOf(l: Lead): string {
   const s = followUpState(l.nextFollowUpAt, l.status);
   return s.tone === "late" ? "Overdue" : s.tone === "today" ? "Today" : s.tone === "later" ? "Later" : isClosed(l.status) ? "" : "Not set";
 }
 
-type Quick = "ALL" | "DUE" | "WAITING_PO" | LeadStatus;
-
 export function LeadsPage() {
   const { hasRole } = useAuth();
   const navigate = useNavigate();
   const { data, isLoading } = useLeads();
   const filters = useTileFilters();
-  const [quick, setQuick] = useState<Quick>("ALL");
   const every = data ?? [];
   const picked = (key: string) => filters.applied.picks[key] ?? [];
   const showPoc = hasRole("ADMIN") || distinct(every.map((l) => l.pocName)).length > 1;
 
-  const counts = useMemo(() => {
-    const byStatus = Object.fromEntries(LEAD_STATUS_ORDER.map((s) => [s, 0])) as Record<LeadStatus, number>;
-    let due = 0;
-    let overdue = 0;
-    let waitingPo = 0;
-    for (const l of every) {
-      byStatus[l.status] += 1;
-      if (l.waitingForPo) waitingPo += 1;
-      const b = bucketOf(l);
-      if (b === "Overdue") overdue += 1;
-      if (b === "Overdue" || b === "Today") due += 1;
-    }
-    return { byStatus, due, overdue, waitingPo };
-  }, [every]);
-
   const fields: FilterField[] = [
-    { key: "status", label: "Lead status", options: LEAD_STATUS_ORDER.map((s) => LEAD_STATUS_META[s].label) },
+    { key: "status", label: "Lead status", options: [...LEAD_STATUS_ORDER.map((s) => LEAD_STATUS_META[s].label), WAITING_FOR_PO] },
     { key: "ctype", label: "Customer type", options: distinct(every.flatMap((l) => l.customerTypes)) },
     { key: "format", label: "Product format", options: distinct(every.flatMap((l) => l.productFormats)) },
     { key: "powder", label: "Powder type", options: distinct(every.flatMap((l) => l.powderTypes)) },
@@ -64,8 +47,7 @@ export function LeadsPage() {
     const any = (key: string, values: string[]) => !picked(key).length || values.some((v) => picked(key).includes(v));
     return every.filter(
       (l) =>
-        (quick === "ALL" || (quick === "DUE" ? ["Overdue", "Today"].includes(bucketOf(l)) : quick === "WAITING_PO" ? l.waitingForPo : l.status === quick)) &&
-        any("status", [LEAD_STATUS_META[l.status].label]) &&
+        any("status", [LEAD_STATUS_META[l.status].label, ...(l.waitingForPo ? [WAITING_FOR_PO] : [])]) &&
         any("ctype", l.customerTypes) &&
         any("format", l.productFormats) &&
         any("powder", l.powderTypes) &&
@@ -77,10 +59,10 @@ export function LeadsPage() {
         (!dateTo || l.createdAt.slice(0, 10) <= dateTo),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [every, filters.applied, quick]);
+  }, [every, filters.applied]);
 
   const pg = useClientPaging(rows);
-  const isFiltered = filters.activeCount > 0 || quick !== "ALL";
+  const isFiltered = filters.activeCount > 0;
 
   function download() {
     const lines = rows.map((l) => ({
@@ -111,20 +93,6 @@ export function LeadsPage() {
     addReportSheet(wb, "Leads", "FLS BD: Leads", describeFilters(filters, fields, "Added"), lines);
     XLSX.writeFile(wb, stampedName("FLS_Leads"));
   }
-
-  const tile = (key: Quick, label: string, value: number, hint: string, tone: string, extra?: string) => (
-    <button
-      key={key}
-      type="button"
-      onClick={() => setQuick(quick === key ? "ALL" : key)}
-      aria-pressed={quick === key}
-      className={`rounded-2xl border px-3.5 py-3 text-left transition ${quick === key ? "border-brand-500 bg-brand-50 ring-2 ring-brand-200" : "border-slate-200 bg-white hover:border-slate-300"}`}
-    >
-      <p className={`text-micro font-black uppercase tracking-wider ${tone}`}>{label}</p>
-      <p className="mt-1 text-2xl font-black leading-none text-slate-900">{value}</p>
-      <p className="mt-1 text-micro text-slate-400">{extra ?? hint}</p>
-    </button>
-  );
 
   return (
     <div className="space-y-5">
@@ -157,16 +125,12 @@ export function LeadsPage() {
           <button type="button" className="btn-ghost btn-sm shrink-0" disabled={rows.length === 0} onClick={download}>
             <Download className="h-3.5 w-3.5" strokeWidth={2.25} /> Download Excel
           </button>
-          <Link to="/leads/new" className="btn-primary btn-sm">
-            <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add lead
-          </Link>
+          {hasRole("BD") && (
+            <Link to="/leads/new" className="btn-primary btn-sm">
+              <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> Add lead
+            </Link>
+          )}
         </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-10">
-        {tile("DUE", "Follow up today", counts.due, "due today or earlier", "text-brand-700", counts.overdue ? `${counts.overdue} overdue` : "none overdue")}
-        {tile("WAITING_PO", "Waiting for PO", counts.waitingPo, "converted, no PO yet", "text-emerald-700")}
-        {LEAD_STATUS_ORDER.map((s) => tile(s, LEAD_STATUS_META[s].label, counts.byStatus[s], LEAD_STATUS_META[s].meaning.toLowerCase(), LEAD_STATUS_META[s].text))}
       </div>
 
       <TileFilterBar filters={filters} tileKey="leads" fields={fields} dateLabel="Added" />
@@ -174,7 +138,7 @@ export function LeadsPage() {
       {isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : rows.length === 0 ? (
-        <EmptyState icon={Users} title={isFiltered ? "Nothing matches these filters" : "No leads yet"} hint={isFiltered ? "Clear a filter or the tile above." : "Scan a visiting card or press “Add lead” to start."} />
+        <EmptyState icon={Users} title={isFiltered ? "Nothing matches these filters" : "No leads yet"} hint={isFiltered ? "Clear a filter." : "Scan a visiting card or press “Add lead” to start."} />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">

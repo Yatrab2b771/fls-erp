@@ -24,6 +24,7 @@ import { getPoItemPlanAvailability } from "../planning/add-on-plan";
 import { canSeeUnapprovedPos, poVisibilityWhere } from "./po-visibility";
 import { poInclude, computeCompletion, computeItemDispatch, type PoWithBatches } from "./po-completion";
 import { productionStageOf } from "../ppic/production-stage";
+import { agingRanges, dateRange, readFilters, type DateRange } from "../ppic/ppic-filters";
 import {
   createPurchaseOrderSchema,
   createProductCategorySchema,
@@ -181,9 +182,17 @@ purchaseOrdersRouter.get("/", async (req: AuthedRequest, res, next) => {
   try {
     const pagination = parsePagination(req);
     const search = parseSearch(req);
+    // The filter bar: customers picked by name, and the PO's age in whole days (Aging buckets) counted from its order date (entry date when it has none)
+    const filters = readFilters(req);
+    const orderedWithin = (range: DateRange): Prisma.PurchaseOrderWhereInput => ({ OR: [{ orderDate: range }, { orderDate: null, createdAt: range }] });
+    const aging = agingRanges(filters);
+    const dates = dateRange(filters);
     const visible: Prisma.PurchaseOrderWhereInput = {
       AND: [
         poVisibilityWhere(req.user?.roles),
+        ...(filters.customer.length ? [{ customer: { companyName: { in: filters.customer } } }] : []),
+        ...(aging ? [{ OR: aging.map(orderedWithin) }] : []),
+        ...(dates ? [orderedWithin(dates)] : []),
         ...(search
           ? [
               {
@@ -1240,7 +1249,7 @@ purchaseOrdersRouter.post(
             link: "/my-store/production-requests",
           },
           req.user!.id,
-        ).catch((err) => req.log?.error({ err }, "notify failed: plan released to day store"));
+        ).catch((err) => req.log?.error({ err }, "notify failed: plan released to store"));
       }
       await syncShortToPurchaseSafe(req.user!.id, req.log);
       res.json(updated);

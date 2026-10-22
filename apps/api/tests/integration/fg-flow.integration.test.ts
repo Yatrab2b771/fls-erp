@@ -6,12 +6,13 @@ import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
-describe("Finished goods after Packaging: QA gate -> Day Store -> QA approval -> Dispatch -> customer / Warehouse", () => {
+describe("Finished goods after Packaging: QA gate -> Store -> QA approval -> Dispatch -> customer / Warehouse", () => {
   it("walks a batch from QA's packaging gate to Dispatch, ships it in parts to the customer and the Warehouse, and the Warehouse stock follows", async () => {
     const { token: bd } = await createUser(["BD"]);
     const { token: qa } = await createUser(["QA_QC"]);
+    const { token: production } = await createUser(["PRODUCTION"]);
     const { token: dispatch } = await createUser(["DISPATCH"]);
-    const { token: warehouse } = await createUser(["STORE"]); // not limited to a Day Store: the Warehouse seat
+    const { token: warehouse } = await createUser(["STORE"]); // not limited to a Store: the Warehouse seat
     const { user: dayStoreUser, token: dayStore } = await createUser(["STORE"]);
     const { user: otherUser, token: otherStore } = await createUser(["STORE"]);
 
@@ -31,10 +32,13 @@ describe("Finished goods after Packaging: QA gate -> Day Store -> QA approval ->
     const stage = (token: string, body: Record<string, unknown>) => request(app).patch(`/api/production-batches/${batch.id}/stage`).set(authHeader(token)).send(body);
     const board = (token: string, st: string) => request(app).get(`/api/fg/store-board?stage=${st}`).set(authHeader(token));
 
-    // QA passes the packaging gate: the finished goods are now at the Day Store
+    // QA passes the packaging gate: the finished goods wait for Production to hand them over to the store
     const gate = await stage(qa, { action: "FORWARD", packQaStatus: "Approved", packQcStatus: "Approved", packApprovedQty: 100 });
     expect(gate.status).toBe(200);
     expect(gate.body.currentStageId).toBe("FG_STORE");
+    expect((await board(dayStore, "FG_STORE")).body).toEqual([]); // not the Store's yet
+    expect((await stage(dayStore, { action: "FORWARD", fgStoreReceivedDate: "2026-10-12" })).status).toBe(409);
+    expect((await request(app).post(`/api/production-batches/${batch.id}/handover-to-store`).set(authHeader(production))).status).toBe(200);
 
     // The Day Store of the Plant receives them; another Day Store and the Warehouse seat cannot
     expect((await board(dayStore, "FG_STORE")).body.map((r: { batchNo: string }) => r.batchNo)).toEqual(["FG-1"]);
@@ -46,7 +50,7 @@ describe("Finished goods after Packaging: QA gate -> Day Store -> QA approval ->
 
     // QA approves the finished goods: only a real Approved moves them on
     expect((await board(qa, "FG_QC_RELEASE")).body.map((r: { batchNo: string }) => r.batchNo)).toEqual(["FG-1"]);
-    expect((await stage(dayStore, { action: "FORWARD", fgQaStatus: "Approved" })).status).toBe(403); // not the Day Store's call
+    expect((await stage(dayStore, { action: "FORWARD", fgQaStatus: "Approved" })).status).toBe(403); // not the Store's call
     const held = await stage(qa, { action: "FORWARD", fgQaStatus: "Hold", fgQcStatus: "Hold" });
     expect(held.body.currentStageId).toBe("FG_QC_RELEASE");
     const notApproved = await stage(qa, { action: "FORWARD", fgQcStatus: "Approved" });
@@ -96,7 +100,7 @@ describe("Finished goods after Packaging: QA gate -> Day Store -> QA approval ->
     expect((await dispatchBoard())[0]!.remainingQty).toBe(20);
     const send = (id: string) => request(app).post(`/api/fg/shipments/${id}/send`).set(authHeader(dispatch)).send({ transportType: "Own vehicle" });
     expect((await send(ask.body.id)).status).toBe(409); // the Warehouse has not accepted
-    expect((await request(app).patch(`/api/fg/shipments/${ask.body.id}/decision`).set(authHeader(dayStore)).send({ action: "ACCEPT" })).status).toBe(403); // a Day Store is not the Warehouse
+    expect((await request(app).patch(`/api/fg/shipments/${ask.body.id}/decision`).set(authHeader(dayStore)).send({ action: "ACCEPT" })).status).toBe(403); // a Store is not the Warehouse
     const requests = (await request(app).get("/api/fg/warehouse-requests").set(authHeader(warehouse))).body as { id: string; status: string; productName: string }[];
     expect(requests.find((r) => r.id === ask.body.id)).toMatchObject({ status: "REQUESTED", productName: "FG Powder" });
     const accepted = await request(app).patch(`/api/fg/shipments/${ask.body.id}/decision`).set(authHeader(warehouse)).send({ action: "ACCEPT" });

@@ -39,7 +39,6 @@ import { VendorsPage } from "./pages/VendorsPage";
 import { VendorPurchaseOrdersPage } from "./pages/VendorPurchaseOrdersPage";
 import { VendorPurchaseOrderDetailPage } from "./pages/VendorPurchaseOrderDetailPage";
 import { StockTransfersPage } from "./pages/StockTransfersPage";
-import { PlantConsumptionPage } from "./pages/PlantConsumptionPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { PpicPlanningDetailPage } from "./pages/PpicPlanningDetailPage";
 import { PpicMaterialPlanningPage } from "./pages/PpicMaterialPlanningPage";
@@ -166,7 +165,7 @@ export default function App() {
           <Route path="/extra-material" element={<ExtraMaterialPage />} />
           <Route path="/my-store/grn" element={<DayStoreStagePage stage="MATERIAL_RECEIVED" />} />
           <Route path="/my-store/finished-goods" element={<FgStorePage stages={["FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"]} heading="Finished Goods" blurb="" tileKey="day-store-fg" />} />
-          <Route path="/fg-approval" element={<FgStorePage stages={["FG_QC_RELEASE"]} heading="Finished Goods Approval" blurb="Finished goods held at the Day Store, waiting for QA's approval." tileKey="qa-fg" />} />
+          <Route path="/fg-approval" element={<FgStorePage stages={["FG_QC_RELEASE"]} heading="Finished Goods Approval" blurb="Finished goods held at the Store, waiting for QA's approval." tileKey="qa-fg" />} />
           <Route path="/finished-goods-dispatch" element={<FgDispatchPage />} />
           <Route path="/fg-warehouse-requests" element={<FgWarehouseRequestsPage />} />
           <Route path="/my-store/dispensing" element={<DayStoreStagePage stage="DISPENSING" />} />
@@ -187,7 +186,7 @@ export default function App() {
           <Route path="/vendor-purchase-orders" element={<VendorPurchaseOrdersPage />} />
           <Route path="/vendor-purchase-orders/:id" element={<VendorPurchaseOrderDetailPage />} />
           <Route path="/stock-transfers" element={<StockTransfersPage />} />
-          <Route path="/plant-consumption" element={<PlantConsumptionPage />} />
+          <Route path="/plant-consumption" element={<Navigate to="/material-consumption" replace />} />
           <Route path="/purchase-orders/:id" element={<PurchaseOrderDetailPage />} />
           <Route path="/purchase-orders/:id/full-report" element={<PoFullReportPage />} />
           <Route path="/pre-productions/:id" element={<PreProductionDetailPage />} />

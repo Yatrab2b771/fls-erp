@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser, BATCH_START } from "./helpers";
+import { authHeader, createUser, BATCH_START, sendPlanToProduction } from "./helpers";
 
 const app = createApp();
 
@@ -13,6 +13,7 @@ async function createApprovedPoItem(bdToken: string, quantity = 100) {
     .set(authHeader(bdToken))
     .send({ customerId: customer.body.id, items: [{ productName: "Medicine A", productCategory: "Powder", quantity, unit: "KG" }] });
   await request(app).patch(`/api/purchase-orders/${po.body.id}/review`).set(authHeader(bdToken)).send({ status: "APPROVED" });
+  await sendPlanToProduction(po.body.items[0].id);
   return po.body.items[0].id as string;
 }
 
@@ -23,17 +24,16 @@ async function makeTokens() {
     store: (await createUser(["STORE"])).token,
     ppic: (await createUser(["PPIC"])).token,
     qa: (await createUser(["QA_QC"])).token,
+    admin: (await createUser(["ADMIN"])).token,
   };
 }
 
 /** Creates a PreProduction run for the given item and walks it to its own terminal stage (SAMPLE_QC_APPROVAL, Approved) — the point ProductionBatch runs become creatable from. */
 async function createRunReadyForProduction(itemId: string, tokens: Awaited<ReturnType<typeof makeTokens>>) {
   const run = (await request(app).post("/api/pre-productions").set(authHeader(tokens.production)).send({ purchaseOrderItemId: itemId })).body;
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.ppic)).send({ action: "FORWARD" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", lineClearanceStatus: "Approved" });
-  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.store)).send({ action: "FORWARD" });
-  const ready = await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.qa)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
+  // ADMIN brings the run to its terminal stage (the department steps before it are covered in pre-production.integration.test.ts)
+  await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "JUMP", targetStageId: "SAMPLE_QC_APPROVAL" });
+  const ready = await request(app).patch(`/api/pre-productions/${run.id}/stage`).set(authHeader(tokens.admin)).send({ action: "FORWARD", sampleQcStatus: "Approved" });
   return ready.body as { id: string; plannedQty: number; combinedQty: number };
 }
 
@@ -98,8 +98,10 @@ describe("PATCH /api/production-batches/:id — execution fields", () => {
   });
 });
 
-describe("POST /api/production-batches/:id/complete — auto-combine + auto-create CombinedLot", () => {
-  it("adds outputQty to the parent's combinedQty and tracks remainingQty, without creating a lot until the total is fully planned", async () => {
+// A completed batch adds what it made to its run's combined quantity, but no CombinedLot is created from it any more: the batch carries the QA
+// gates itself (see production-batches.routes.ts). Lots that already exist are covered in combined-lot.integration.test.ts.
+describe("POST /api/production-batches/:id/complete — adds to the run's combined quantity, creates no lot", () => {
+  it("adds outputQty to the parent's combinedQty and tracks remainingQty, and creates no lot when the total is fully made", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const tokens = await makeTokens();
     const itemId = await createApprovedPoItem(bdToken, 100);
@@ -115,7 +117,7 @@ describe("POST /api/production-batches/:id/complete — auto-combine + auto-crea
     const completed1 = await request(app).post(`/api/production-batches/${pb1.id}/complete`).set(authHeader(tokens.production));
     expect(completed1.status).toBe(200);
     expect(completed1.body.productionBatch.status).toBe("COMPLETED");
-    expect(completed1.body.combinedLot).toBeNull(); // only 58 of 100 pooled in so far
+    expect(completed1.body.combinedLot ?? null).toBeNull();
 
     const afterFirst = await request(app).get(`/api/pre-productions/${run.id}`).set(authHeader(tokens.production));
     expect(afterFirst.body.combinedQty).toBe(58);
@@ -127,26 +129,25 @@ describe("POST /api/production-batches/:id/complete — auto-combine + auto-crea
     const reComplete = await request(app).post(`/api/production-batches/${pb1.id}/complete`).set(authHeader(tokens.production));
     expect(reComplete.status).toBe(409);
 
-    // Second run covers the remaining 42 — this one tips combinedQty over
-    // plannedQty (100), which is exactly the trigger for the CombinedLot.
-    const pb2 = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, batchNo: "PB-B", plannedQty: 42 })).body;
+    // Second run covers the remaining 42: combinedQty reaches plannedQty (100), and still no lot is made.
+    const pb2 = (await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, batchNo: "PB-B", plannedQty: 42, reason: "The first batch made 58 of its 60: this one makes up the rest" })).body;
     await request(app).patch(`/api/production-batches/${pb2.id}`).set(authHeader(tokens.production)).send({ outputQty: 42 });
     const completed2 = await request(app).post(`/api/production-batches/${pb2.id}/complete`).set(authHeader(tokens.production));
     expect(completed2.status).toBe(200);
-    expect(completed2.body.combinedLot).not.toBeNull();
-    expect(completed2.body.combinedLot.currentStageId).toBe("IPQC");
+    expect(completed2.body.combinedLot ?? null).toBeNull();
 
     const afterSecond = await request(app).get(`/api/pre-productions/${run.id}`).set(authHeader(tokens.production));
     expect(afterSecond.body.combinedQty).toBe(100);
     expect(afterSecond.body.remainingQty).toBe(0);
-    expect(afterSecond.body.combinedLot.id).toBe(completed2.body.combinedLot.id);
+    expect(afterSecond.body.combinedLot ?? null).toBeNull();
 
-    // Once the lot exists, no further ProductionBatch can be planned — nothing left to plan.
+    // Nothing is left to plan, so no further ProductionBatch can be planned.
     const noMoreRoom = await request(app).post(`/api/pre-productions/${run.id}/production-batches`).set(authHeader(tokens.production)).send({ ...BATCH_START, plannedQty: 1 });
-    expect(noMoreRoom.status).toBe(409);
+    expect(noMoreRoom.status).toBe(400);
+    expect(noMoreRoom.body.error).toMatch(/left unplanned/);
   });
 
-  it("creates the CombinedLot directly off a single run that covers the whole planned quantity in one go", async () => {
+  it("a single batch covering the whole planned quantity completes without creating a lot", async () => {
     const { token: bdToken } = await createUser(["BD"]);
     const tokens = await makeTokens();
     const itemId = await createApprovedPoItem(bdToken, 50);
@@ -156,6 +157,6 @@ describe("POST /api/production-batches/:id/complete — auto-combine + auto-crea
     await request(app).patch(`/api/production-batches/${pb.id}`).set(authHeader(tokens.production)).send({ outputQty: 50 });
     const completed = await request(app).post(`/api/production-batches/${pb.id}/complete`).set(authHeader(tokens.production));
     expect(completed.status).toBe(200);
-    expect(completed.body.combinedLot).not.toBeNull();
+    expect(completed.body.combinedLot ?? null).toBeNull();
   });
 });

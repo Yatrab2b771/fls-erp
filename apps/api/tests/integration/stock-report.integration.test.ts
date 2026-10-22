@@ -65,11 +65,11 @@ describe("Available Stock report for a period (Opening / Received / Issued / Clo
     const entriesOf = async (query: Record<string, string | string[]>) =>
       (await request(app).get("/api/inventory/available-stock/report/entries").query({ itemId: item.id, from: "2026-09-02", to: "2026-09-30", ...query }).set(authHeader(token))).body as { label: string; direction: string; qty: number }[];
     const allEntries = await entriesOf({});
-    expect(allEntries.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Day Store:MOVED", "Issued to Plant:MOVED", "Received from vendor:IN"]); // 5, 8 and 10 Sept; the first two move stock inside the company
+    expect(allEntries.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Store:MOVED", "Issued to Plant:MOVED", "Received from vendor:IN"]); // 5, 8 and 10 Sept; the first two move stock inside the company
     const warehouseOnly = await entriesOf({ location: "warehouse" });
-    expect(warehouseOnly.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Day Store:OUT", "Received from vendor:IN"]);
+    expect(warehouseOnly.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Store:OUT", "Received from vendor:IN"]);
     const dayStoreOnly = await entriesOf({ location: `ds:${store.id}` });
-    expect(dayStoreOnly.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Day Store:IN", "Issued to Plant:OUT"]);
+    expect(dayStoreOnly.map((e) => `${e.label}:${e.direction}`)).toEqual(["Issued to Store:IN", "Issued to Plant:OUT"]);
 
     // A period in which nothing moved still shows the opening / closing balance of what is held
     expect((await report({ from: "2026-09-20", to: "2026-09-25" })).row).toMatchObject({ opening: 150, received: 0, issued: 0, closing: 150 });

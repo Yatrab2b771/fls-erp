@@ -230,7 +230,7 @@ function ReworkSheet({ r, canAct }: { r: Rework; canAct: boolean }) {
           <Link to="/extra-material" className="font-bold text-brand-700 hover:underline">
             Request extra material
           </Link>{" "}
-          (write “Rework {r.reworkNo}” as the reason): the Day Store gives what it has, then asks the Warehouse, and PPIC only when the Warehouse is short too.
+          (write “Rework {r.reworkNo}” as the reason): the Store gives what it has, then asks the Warehouse, and PPIC only when the Warehouse is short too.
         </p>
       </div>
 

@@ -39,7 +39,7 @@ export interface PackagingComponentInput {
   overagePct?: number | null;
   /** Primary / Secondary / Tertiary when the sheet states it; otherwise guessed from the type name. */
   packingLevel?: string | null;
-  /** The Store item this component is linked to (its name), when R&D picked one. */
+  /** The Warehouse item this component is linked to (its name), when R&D picked one. */
   pmItemName?: string | null;
   pmItem?: { name: string } | null;
 }
@@ -55,7 +55,7 @@ export interface BomPlanLineInput {
 export interface BomResultLine {
   category: BomCategory;
   component: string;
-  /** Store item name when the component is linked to one — what stock/PR matching should use. */
+  /** Warehouse item name when the component is linked to one — what stock/PR matching should use. */
   itemName?: string;
   spec: string;
   baseQty: number;
@@ -116,7 +116,7 @@ function cleanString(str: unknown): string {
     .replace(/\s+/g, " ");
 }
 
-/** Name to match against the Store item master: the linked item when there is one, else the generic component name. */
+/** Name to match against the Warehouse item master: the linked item when there is one, else the generic component name. */
 export function pmLineName(l: { component: string; itemName?: string }): string {
   return (l.itemName ?? l.component).trim();
 }

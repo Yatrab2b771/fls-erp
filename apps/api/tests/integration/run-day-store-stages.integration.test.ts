@@ -32,19 +32,19 @@ async function setup() {
 
 const forward = (token: string, runId: string) => request(app).patch(`/api/pre-productions/${runId}/stage`).set(authHeader(token)).send({ action: "FORWARD", grnNo: "RUN-GRN-1", grnDate: "2026-10-06" });
 
-describe("Material Received & GRN / Dispensing - done by the Day Store of the run's own Plant", () => {
-  it("only that Plant's Day Store moves the run (not the Warehouse, not another store); a run with no Plant is Admin's", async () => {
+describe("Material Received & GRN / Dispensing - done by the Store of the run's own Plant", () => {
+  it("only that Plant's Store moves the run (not the Warehouse, not another store); a run with no Plant is Admin's", async () => {
     const { warehouse, storeA, storeB, admin, runA, runNoPlant } = await setup();
 
     expect((await forward(warehouse, runA.id)).status).toBe(403); // the Warehouse does not do this step
     expect((await forward(storeB, runA.id)).status).toBe(403); // another store's Plant
-    expect((await forward(storeA, runNoPlant.id)).status).toBe(403); // no Plant: no Day Store to do it
+    expect((await forward(storeA, runNoPlant.id)).status).toBe(403); // no Plant: no Store to do it
     expect((await forward(storeA, runA.id)).status).toBe(200);
     expect((await prisma.preProduction.findUniqueOrThrow({ where: { id: runA.id } })).currentStageId).toBe("INDENT_ISSUE");
     expect((await forward(admin, runNoPlant.id)).status).toBe(200); // Admin can step in
   });
 
-  it("a Day Store login lists and opens only the runs at its own Plant; the Warehouse seat still reads every run", async () => {
+  it("a Store login lists and opens only the runs at its own Plant; the Warehouse seat still reads every run", async () => {
     const { warehouse, storeA, storeB, runA, runNoPlant } = await setup();
     const ids = async (token: string) => ((await request(app).get("/api/pre-productions").set(authHeader(token))).body as { id: string }[]).map((r) => r.id).sort();
 

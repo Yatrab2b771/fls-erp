@@ -84,7 +84,7 @@ async function loadRequestSources(rows: RequirementRow[]) {
     rndIds.length ? prisma.rndSampleRequest.findMany({ where: { id: { in: rndIds } }, select: { id: true } }) : [],
   ]);
   const byId = new Map<string, { kind: "DAY_STORE" | "RND"; label: string }>();
-  for (const r of storeReqs) byId.set(r.id, { kind: "DAY_STORE", label: r.requestingDayStore?.name ?? "Day Store" });
+  for (const r of storeReqs) byId.set(r.id, { kind: "DAY_STORE", label: r.requestingDayStore?.name ?? "Store" });
   for (const r of rndReqs) byId.set(r.id, { kind: "RND", label: "R&D Store" });
   return byId;
 }

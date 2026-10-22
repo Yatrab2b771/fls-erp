@@ -29,6 +29,7 @@ import { useToast } from "../components/Toast";
 import { fmtQty } from "../lib/format";
 import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport";
 import { CustomerName } from "../components/CustomerName";
+import { TransporterPicker } from "../components/TransporterPicker";
 import { customerTypeLabel } from "../lib/customerTags";
 
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
@@ -135,7 +136,7 @@ export function FgDispatchPage() {
       {isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : rows.length === 0 ? (
-        <EmptyState icon={PackageCheck} title={isFiltered ? "Nothing matches these filters" : tab === "send" ? "No finished goods with Dispatch" : "Nothing sent to a customer yet"} hint={tab === "send" ? "They show here once the Day Store has handed over what QA approved." : "A batch shows here once you have sent some of it to the customer."} />
+        <EmptyState icon={PackageCheck} title={isFiltered ? "Nothing matches these filters" : tab === "send" ? "No finished goods with Dispatch" : "Nothing sent to a customer yet"} hint={tab === "send" ? "They show here once the Store has handed over what QA approved." : "A batch shows here once you have sent some of it to the customer."} />
       ) : (
         <div className="card overflow-hidden">
           <div className="overflow-x-auto">
@@ -266,7 +267,7 @@ function ShipmentDetailFields({ d, set, customerName }: { d: ShipDetailState; se
         <label className="mb-0.5 block text-micro text-slate-400">Customer</label>
         <input className="field !py-1.5 text-xs" value={customerName} readOnly disabled />
       </div>
-      {input("Transport name", "transportName")}
+      <TransporterPicker value={d.transportName} onChange={(transportName) => change({ transportName })} />
       {input("Vehicle no.", "vehicleNo")}
       {input("LR no.", "lrNo")}
       {input("Weight (Kg)", "weightKg", "number")}

@@ -115,7 +115,7 @@ export function computeRm(name: string, snap: RmSlotSnapshot, batchKg: number): 
   return calculateMasterRMBOM([rmLineOf(name, snap, batchKg)]);
 }
 
-/** The packaging components of a version as the BOM engine reads them (a linked Store item gives the line its name). */
+/** The packaging components of a version as the BOM engine reads them (a linked Warehouse item gives the line its name). */
 async function pmComponentsOf(snap: PmSlotSnapshot): Promise<PackagingComponentInput[]> {
   const ids = [...new Set(snap.components.map((c) => c.pmItemId).filter((x): x is string => !!x))];
   const names = new Map((ids.length ? await prisma.inventoryItem.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : []).map((i) => [i.id, i.name]));

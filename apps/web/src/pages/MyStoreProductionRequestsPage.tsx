@@ -3,21 +3,19 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as XLSX from "xlsx";
 import { AlarmClock, ArrowLeft, Check, Download, PackageOpen, Send, X } from "lucide-react";
+import { useReviewInventoryRequest } from "../lib/hooks";
 import { ApiError, api, apiAll } from "../lib/api";
 import { appendParams, useTileFilters } from "../lib/tileFilters";
-import { useIssueInventoryRequest, useReviewInventoryRequest } from "../lib/hooks";
 import { fmtQty } from "../lib/format";
 import { addReportSheet, describeFilters, stampedName } from "../lib/excelReport";
 import { groupBundles, type Bundle, type BundleLine } from "../lib/bundles";
 import { useClientPaging } from "../lib/useClientPaging";
 import { ClientPager } from "../components/Pagination";
-import { ActionMenu } from "../components/ActionMenu";
 import { BundleCard } from "../components/BundleCard";
 import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import type { OptionPage } from "../components/MultiSelectDropdown";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
-import { STATUS_STYLE } from "./MaterialRequestsPage";
 
 const BASE = "/api/inventory/my-store/production-requests";
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
@@ -45,6 +43,10 @@ interface ProductionRequestRow extends BundleLine {
   isExtra: boolean;
   supplyLabel: string | null;
   refProduct: string | null;
+  /** The batch an extra request is for. */
+  batchNo?: string | null;
+  /** Production typed the material in (it was not in the item list). */
+  newMaterial?: boolean;
   short: boolean;
   askedFromWarehouse: number;
   toAsk: number;
@@ -62,7 +64,6 @@ const FIELDS: FilterField[] = [
   serverList("product", "Product"),
   serverList("po", "PO Number"),
   serverList("item", "Item"),
-  { key: "status", label: "Status", options: ["Pending", "Approved", "Partly issued", "Issued", "Rejected"] },
   { key: "short", label: "Short at my store", options: ["Yes", "No"] },
 ];
 
@@ -74,19 +75,17 @@ const TRAIL_STYLE: Record<ProductionRequestRow["stage"], string> = {
   CLOSED: "border-slate-200 bg-slate-50 text-slate-500",
 };
 
-const isIssuable = (r: ProductionRequestRow) => (r.statusKey === "APPROVED" || r.statusKey === "PARTIALLY_ISSUED") && r.storeStock > 0 && r.remainingQty > 0;
-const hasShare = (r: ProductionRequestRow) => isIssuable(r) && r.storeShare > 0;
 const isAskable = (r: ProductionRequestRow) => r.open && r.toAsk > 0 && r.askedFromWarehouse === 0;
 
-// The material a production plan needs at this store's Plant, one card per product. The store approves, fills what it
-// holds into its Plant, and asks the Warehouse for what is short - for a whole product at once (the header buttons) or
-// line by line. Trail: With Day Store -> Requested from Warehouse -> Issued to Day Store -> Issued to Plant.
+// The material a production plan needs, one card per product, and whether the Store has it. This page only SHOWS that (and where the rest is: the
+// Warehouse's stock, Purchase's ETA) and lets the Store ask the Warehouse for what it is short of - for a whole product at once or line by line. The
+// requests are approved from the start, and the material goes on to the Plant at Dispensing (which closes these lines as it goes), not from here.
+// Trail: With Store -> Requested from Warehouse -> Issued to Store -> Issued to Plant.
 export function MyStoreProductionRequestsPage() {
   const toast = useToast();
   const qc = useQueryClient();
   const tileFilters = useTileFilters();
   const review = useReviewInventoryRequest();
-  const issue = useIssueInventoryRequest();
   const askWarehouse = useMutation({ mutationFn: (id: string) => api<{ id: string; requestedQty: number }>(`${BASE}/${id}/request-from-warehouse`, { method: "POST" }) });
   const qs = appendParams(new URLSearchParams(), tileFilters.params).toString();
   const { data: rows, isLoading } = useQuery({
@@ -99,28 +98,11 @@ export function MyStoreProductionRequestsPage() {
 
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [panel, setPanel] = useState<{ id: string; mode: "issue" | "reject" } | null>(null);
-  const [issueQty, setIssueQty] = useState("");
-  const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [reason, setReason] = useState("");
-  const [formError, setFormError] = useState<string | null>(null);
 
   const refresh = async () => {
     await qc.invalidateQueries({ queryKey: ["inventory", "my-store"] });
     await qc.invalidateQueries({ queryKey: ["inventory", "material-requests"] });
   };
-  const closePanel = () => {
-    setPanel(null);
-    setFormError(null);
-    setReason("");
-  };
-  const openPanel = (r: ProductionRequestRow, mode: "issue" | "reject") => {
-    setFormError(null);
-    setReason("");
-    setIssueQty(String(Math.max(0, Math.min(r.remainingQty, r.storeShare > 0 ? r.storeShare : r.storeStock))));
-    setPanel({ id: r.id, mode });
-  };
-
   // Runs one call per line, one after the other, and says how many went through.
   async function runAll(key: string, lines: ProductionRequestRow[], doOne: (r: ProductionRequestRow) => Promise<unknown>, doneWord: string) {
     setBusyKey(key);
@@ -142,9 +124,6 @@ export function MyStoreProductionRequestsPage() {
     else toast.error(`${ok} ${doneWord}, ${failed} could not be done — ${lastError}`);
   }
 
-  const approveLine = (r: ProductionRequestRow) => review.mutateAsync({ id: r.id, action: "APPROVE" });
-  const issueLine = (r: ProductionRequestRow) =>
-    issue.mutateAsync({ id: r.id, date: new Date().toISOString().slice(0, 10), unit: r.unit, quantity: Math.min(r.remainingQty, r.storeShare), dayStoreId: r.storeId });
   const askLine = (r: ProductionRequestRow) => askWarehouse.mutateAsync(r.id);
   const toggle = (id: string) => setSelected((cur) => (cur.has(id) ? new Set([...cur].filter((x) => x !== id)) : new Set([...cur, id])));
   // Bulk request: every short material across the plans, or just the ticked ones. The Warehouse sees them together, material by material.
@@ -155,39 +134,29 @@ export function MyStoreProductionRequestsPage() {
     setSelected(new Set());
   };
 
+  // An extra request is the Store's call (is it justified?): approve it, or reject it with a reason. Approved, it is dispensed from Dispensing.
   async function approveOne(r: ProductionRequestRow) {
     try {
-      await approveLine(r);
+      await review.mutateAsync({ id: r.id, action: "APPROVE" });
       await refresh();
-      toast.success("Approved.");
+      toast.success("Approved. Dispense it from Dispensing.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not approve this request");
     }
   }
-  async function submitReject(r: ProductionRequestRow) {
-    if (!reason.trim()) return setFormError("A reason is required to reject a request.");
+  async function rejectOne(r: ProductionRequestRow) {
+    const reason = window.prompt(`Why do you reject ${r.itemName}?`)?.trim();
+    if (!reason) return;
     try {
-      await review.mutateAsync({ id: r.id, action: "REJECT", rejectionReason: reason.trim() });
+      await review.mutateAsync({ id: r.id, action: "REJECT", rejectionReason: reason });
       await refresh();
       toast.success("Request rejected.");
-      closePanel();
     } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : "Could not reject this request");
+      toast.error(err instanceof ApiError ? err.message : "Could not reject this request");
     }
   }
-  async function submitIssue(r: ProductionRequestRow) {
-    const qty = Number(issueQty);
-    if (!qty || qty <= 0) return setFormError("Enter a quantity greater than zero.");
-    if (qty > r.remainingQty + 1e-9) return setFormError(`Only ${fmtQty(r.remainingQty)} ${r.unit} is still owed.`);
-    if (qty > r.storeStock + 1e-9) return setFormError(`Your store holds only ${fmtQty(r.storeStock)} ${r.unit}.`);
-    try {
-      await issue.mutateAsync({ id: r.id, date: issueDate, unit: r.unit, quantity: qty, dayStoreId: r.storeId });
-      await refresh();
-      toast.success(`${fmtQty(qty)} ${r.unit} issued to ${r.plantName ?? "the Plant"}.`);
-      closePanel();
-    } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : "Could not issue this request");
-    }
+  async function approveAllExtra(lines: ProductionRequestRow[]) {
+    await runAll("page", lines, (r) => review.mutateAsync({ id: r.id, action: "APPROVE" }), "approved");
   }
   async function askOne(r: ProductionRequestRow) {
     try {
@@ -260,9 +229,8 @@ export function MyStoreProductionRequestsPage() {
 
   function renderBundle(b: Bundle<ProductionRequestRow>) {
     const lines = b.lines;
-    const pending = lines.filter((l) => l.statusKey === "PENDING");
-    const issuable = lines.filter(hasShare);
     const askable = lines.filter(isAskable);
+    const pendingExtra = lines.filter((l) => l.isExtra && l.statusKey === "PENDING");
     const done = lines.filter((l) => !l.open).length;
     const shortLines = lines.filter((l) => l.short).length;
     const openLines = lines.filter((l) => l.open);
@@ -283,14 +251,9 @@ export function MyStoreProductionRequestsPage() {
         ]}
         actions={
           <>
-            {pending.length > 0 && (
-              <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => runAll(b.key, pending, approveLine, "approved")}>
-                <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Approve all ({pending.length})
-              </button>
-            )}
-            {issuable.length > 0 && (
-              <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => runAll(b.key, issuable, issueLine, "issued to the Plant")} title="Issues what your store holds for each material, up to what is owed">
-                <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> Issue what we have ({issuable.length})
+            {pendingExtra.length > 0 && (
+              <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => void approveAllExtra(pendingExtra)}>
+                <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Approve all ({pendingExtra.length})
               </button>
             )}
             {askable.length > 0 && (
@@ -306,11 +269,9 @@ export function MyStoreProductionRequestsPage() {
             <tr className="border-b border-slate-100 text-left text-micro font-bold uppercase tracking-wide text-slate-500">
               <th className="w-8 px-3 py-2.5"></th>
               <th className="px-4 py-2.5">Item</th>
-              <th className="px-4 py-2.5">Status</th>
-              <th className="px-4 py-2.5 text-right">Requested</th>
-              <th className="px-4 py-2.5 text-right">Issued</th>
-              <th className="px-4 py-2.5 text-right">Remaining</th>
-              <th className="px-4 py-2.5 text-right">My Store Stock</th>
+              <th className="px-4 py-2.5 text-right">Plan needs</th>
+              <th className="px-4 py-2.5 text-right" title="Sent on to the Plant (at Dispensing)">Given to Plant</th>
+              <th className="px-4 py-2.5 text-right">At my Store</th>
               <th className="px-4 py-2.5 text-right">In Warehouse</th>
               <th className="px-4 py-2.5">Purchase ETA</th>
               <th className="px-4 py-2.5">Trail</th>
@@ -327,18 +288,15 @@ export function MyStoreProductionRequestsPage() {
                   <td className="whitespace-normal px-4 py-2.5 font-bold text-slate-800">
                     {r.itemName}
                     {r.open && !r.short && <span className="ml-1.5 rounded-full bg-emerald-100 px-1.5 py-0.5 align-middle text-micro font-bold uppercase text-emerald-700">Covered</span>}
-                    {r.isExtra && <span className="ml-1.5 rounded-full bg-violet-100 px-1.5 py-0.5 align-middle text-micro font-bold uppercase text-violet-700">Extra</span>}
+                    {r.isExtra && <span className="ml-1.5 rounded-full bg-violet-100 px-1.5 py-0.5 align-middle text-micro font-bold uppercase text-violet-700">{r.newMaterial ? "New material" : "Extra"}</span>}
+                    {r.isExtra && r.batchNo && <span className="block text-micro font-bold text-orange-800">For batch {r.batchNo}</span>}
                     {r.isExtra && r.note && <span className="block text-micro font-normal text-slate-500">{r.note} · asked by {r.requestedBy}</span>}
                     {r.isExtra && r.supplyLabel && r.supplyLabel !== "—" && <span className="block text-micro font-bold text-amber-600">{r.supplyLabel}</span>}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className={`pill ${STATUS_STYLE[r.status] ?? ""}`}>{r.status}</span>
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono text-slate-700">
                     {fmtQty(r.requestedQty)} {r.unit}
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono text-emerald-700">{r.issuedQty ? fmtQty(r.issuedQty) : "—"}</td>
-                  <td className={`px-4 py-2.5 text-right font-mono ${r.remainingQty > 0 ? "font-bold text-slate-900" : "text-slate-300"}`}>{r.remainingQty > 0 ? fmtQty(r.remainingQty) : "—"}</td>
                   <td className="px-4 py-2.5 text-right">
                     <span className="font-mono text-slate-700">{fmtQty(r.storeStock)}</span>
                     {r.short && <span className="block text-micro font-bold text-rose-600">{fmtQty(Math.max(0, r.remainingQty - r.storeShare))} short</span>}
@@ -373,62 +331,24 @@ export function MyStoreProductionRequestsPage() {
                     )}
                   </td>
                   <td className="px-4 py-2.5">
-                    <ActionMenu
-                      busy={review.isPending || askWarehouse.isPending || busy}
-                      items={[
-                        ...(r.statusKey === "PENDING"
-                          ? [
-                              { key: "approve", label: "Approve", icon: Check, tone: "primary" as const, onClick: () => approveOne(r) },
-                              { key: "reject", label: "Reject", icon: X, tone: "danger" as const, onClick: () => openPanel(r, "reject") },
-                            ]
-                          : []),
-                        ...(isIssuable(r) ? [{ key: "issue", label: "Issue to Plant", icon: Send, tone: "primary" as const, onClick: () => openPanel(r, "issue") }] : []),
-                        ...(isAskable(r) ? [{ key: "ask", label: "Request from Warehouse", icon: Send, onClick: () => askOne(r), title: "Your store is short - ask the Warehouse (urgent)" }] : []),
-                      ]}
-                    />
+                    {r.isExtra && r.statusKey === "PENDING" && (
+                      <div className="mb-1 flex gap-1.5">
+                        <button type="button" className="btn-primary btn-sm" disabled={review.isPending || busy} onClick={() => approveOne(r)}>
+                          <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Approve
+                        </button>
+                        <button type="button" className="btn-ghost btn-sm text-rose-600" disabled={review.isPending || busy} onClick={() => rejectOne(r)}>
+                          <X className="h-3.5 w-3.5" strokeWidth={2.5} /> Reject
+                        </button>
+                      </div>
+                    )}
+                    {r.isExtra && r.open && r.statusKey !== "PENDING" && r.storeStock > 0 && <p className="mb-1 text-micro font-bold text-violet-700">Dispense it from Dispensing</p>}
+                    {isAskable(r) && (
+                      <button type="button" className="btn-ghost btn-sm" disabled={askWarehouse.isPending || busy} onClick={() => askOne(r)} title="Your store is short - ask the Warehouse (urgent)">
+                        <Send className="h-3.5 w-3.5" strokeWidth={2.5} /> Request from Warehouse
+                      </button>
+                    )}
                   </td>
                 </tr>
-                {panel?.id === r.id && (
-                  <tr>
-                    <td colSpan={11} className="whitespace-normal bg-slate-50/70 px-4 py-3">
-                      {panel.mode === "reject" ? (
-                        <div className="flex flex-wrap items-end gap-3">
-                          <div className="min-w-[260px] flex-1">
-                            <label className="label">Reason for rejecting</label>
-                            <input className="field" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. plan changed" />
-                          </div>
-                          <button type="button" className="btn-ghost btn-sm" onClick={closePanel}>
-                            Cancel
-                          </button>
-                          <button type="button" className="btn-primary btn-sm" disabled={review.isPending} onClick={() => submitReject(r)}>
-                            Reject request
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap items-end gap-3">
-                          <div>
-                            <label className="label">
-                              Quantity to issue ({r.unit}) — {fmtQty(r.remainingQty)} owed, {fmtQty(r.storeStock)} in your store{r.storeShare < r.storeStock - 1e-6 ? ` (${fmtQty(r.storeShare)} counted for this plan)` : ""}
-                            </label>
-                            <input className="field w-40 font-mono" type="number" min="0" step="any" value={issueQty} onChange={(e) => setIssueQty(e.target.value)} />
-                          </div>
-                          <div>
-                            <label className="label">Date</label>
-                            <input className="field" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} />
-                          </div>
-                          <span className="pb-2 text-tiny text-slate-500">Goes straight into {r.plantName ?? "your Plant"}.</span>
-                          <button type="button" className="btn-ghost btn-sm" onClick={closePanel}>
-                            Cancel
-                          </button>
-                          <button type="button" className="btn-primary btn-sm" disabled={issue.isPending} onClick={() => submitIssue(r)}>
-                            {issue.isPending ? "Issuing…" : "Confirm issue"}
-                          </button>
-                        </div>
-                      )}
-                      {formError && <p className="mt-2 text-xs font-bold text-rose-600">{formError}</p>}
-                    </td>
-                  </tr>
-                )}
               </Fragment>
             ))}
           </tbody>
@@ -451,7 +371,7 @@ export function MyStoreProductionRequestsPage() {
         <div>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">Production Requests</h1>
           <p className="text-sm text-slate-500">
-            {bundles.length.toLocaleString()} product{bundles.length === 1 ? "" : "s"} ({(rows ?? []).length.toLocaleString()} material request{(rows ?? []).length === 1 ? "" : "s"}){isFiltered ? " match" : ""} for your Plant — one card per product. Late ones come first.
+            {bundles.length.toLocaleString()} product{bundles.length === 1 ? "" : "s"} ({(rows ?? []).length.toLocaleString()} material request{(rows ?? []).length === 1 ? "" : "s"}){isFiltered ? " match" : ""} for your Plant — one card per product, with whether your store has the material. Late ones come first.
           </p>
         </div>
        </div>

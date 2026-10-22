@@ -22,8 +22,8 @@ async function setup() {
   return { warehouse, storeA, ppic, purchase, cocoa, a };
 }
 
-describe("Material Requests from Day Stores - Warehouse issue, short -> PPIC -> Purchase", () => {
-  it("a Day Store asks, the Warehouse approves and part-issues, then the short balance goes PPIC -> Purchase -> On order", async () => {
+describe("Material Requests from Stores - Warehouse issue, short -> PPIC -> Purchase", () => {
+  it("a Store asks, the Warehouse approves and part-issues, then the short balance goes PPIC -> Purchase -> On order", async () => {
     const { warehouse, storeA, ppic, purchase, cocoa, a } = await setup();
     const get = (token: string, path: string) => request(app).get(`/api/inventory${path}`).set(authHeader(token));
 

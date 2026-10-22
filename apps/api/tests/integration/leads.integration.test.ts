@@ -22,13 +22,25 @@ describe("Lead management (BD)", () => {
       const r = request(app)[method](path).set(authHeader(token));
       return body ? r.send(body) : r;
     };
-    expect((await call(store, "get", "/api/leads")).status).toBe(403);
+    // Every department has the page (a lead is handed to whoever follows it up), but adding leads is BD's
+    expect((await call(store, "get", "/api/leads")).body).toEqual([]);
+    expect((await call(store, "post", "/api/leads", lead())).status).toBe(403);
 
     // A lead needs a customer type, a product format, and a powder type when Powder is chosen
     expect((await call(bd, "post", "/api/leads", lead({ customerTypes: [] }))).status).toBe(400);
     expect((await call(bd, "post", "/api/leads", lead({ productFormats: [] }))).status).toBe(400);
     expect((await call(bd, "post", "/api/leads", lead({ powderTypes: [] }))).status).toBe(400);
-    expect((await call(bd, "post", "/api/leads", lead({ customerTypes: ["Nobody"] }))).status).toBe(400);
+    // A name typed under "Others" is kept (2 to 40 letters); a listed name in another case takes the list's spelling; it joins the lists for everyone
+    expect((await call(bd, "post", "/api/leads", lead({ customerTypes: ["N"] }))).status).toBe(400);
+    expect((await call(bd, "post", "/api/leads", lead({ productFormats: ["x".repeat(41)], powderTypes: [] }))).status).toBe(400);
+    const typed = await call(bd, "post", "/api/leads", lead({ customerTypes: ["  hospital   chains ", "d2c", "D2C"], productFormats: ["Softgel Premium", "gummies"], powderTypes: [] }));
+    expect(typed.status).toBe(201);
+    expect(typed.body).toMatchObject({ customerTypes: ["Hospital chains", "D2C"], productFormats: ["Softgel Premium", "Gummies"], powderTypes: [] });
+    const lists = (await call(store, "get", "/api/leads/options/lists")).body;
+    expect(lists.customerTypes).toEqual(["D2C", "Exports", "Distribution", "MLM", "Medical", "Sports", "Hospital chains", "Others"]);
+    expect(lists.productFormats).toContain("Softgel Premium");
+    expect(lists.productFormats.at(-1)).toBe("Others");
+    expect((await call(bd, "patch", `/api/leads/${typed.body.id}`, { powderTypes: ["Black Lentil"], productFormats: ["Powder"] })).body.powderTypes).toEqual(["Black Lentil"]);
     expect((await call(bd, "post", "/api/leads", lead({ status: "CONVERTED" }))).status).toBe(400);
 
     // Powder types are dropped when Powder is not a format
@@ -107,10 +119,11 @@ describe("Lead management (BD)", () => {
     expect((await call(admin, "get", `/api/leads/${overdue.id}`)).status).toBe(200);
     expect((await call(admin, "get", "/api/leads")).body.length).toBeGreaterThanOrEqual(5);
 
-    // A visiting card becomes a lead once, and only for the salesman who collected it
+    // A visiting card becomes a lead once, and only through BD
     const card = await call(bd, "post", "/api/business-cards", { name: "Dr. Neha Singh", company: "LD Medivita Pharma", phones: ["+91 98215 67890"], email: "neha@ld-medivita.com", categories: ["Capsule", "Powder"] });
     expect(card.status).toBe(201);
-    expect((await call(other, "post", "/api/leads", lead({ brandName: "LD Medivita Pharma", businessCardId: card.body.id }))).status).toBe(404);
+    const { token: storeUser } = await createUser(["STORE"]);
+    expect((await call(storeUser, "post", "/api/leads", lead({ brandName: "LD Medivita Pharma", businessCardId: card.body.id }))).status).toBe(403);
     const fromCard = await call(bd, "post", "/api/leads", lead({ brandName: "LD Medivita Pharma", businessCardId: card.body.id }));
     expect(fromCard.status).toBe(201);
     expect(fromCard.body.businessCardId).toBe(card.body.id);
@@ -195,5 +208,64 @@ describe("Lead management (BD)", () => {
     expect(forecast.byMonth).toEqual([expect.objectContaining({ key: "none", leads: 1, converted: 1, valueLac: 14 })]);
     expect(forecast.bySource).toEqual([expect.objectContaining({ key: "Not set", leads: 1 })]);
     expect((await call(other.token, "get", "/api/leads/forecast")).body.totals.leads).toBe(0); // each salesman's own
+  });
+});
+
+describe("Leads handed to any department", () => {
+  it("BD makes a lead from someone else's card and hands it over; that person follows it up, nobody else sees it, and adding, handing on and Convert stay with BD", async () => {
+    const { token: bd, user: bdUser } = await createUser(["BD"]);
+    const { token: otherBd } = await createUser(["BD"]);
+    const { token: store, user: storeUser } = await createUser(["STORE"]);
+    const { token: production, user: productionUser } = await createUser(["PRODUCTION"]);
+    const { token: nobody } = await createUser(["QA_QC"]);
+    const call = (token: string, method: "get" | "post" | "patch", path: string, body?: object) => {
+      const r = request(app)[method](path).set(authHeader(token));
+      return body ? r.send(body) : r;
+    };
+
+    // A Store person collected the card at an event; BD makes the lead from it and hands it to a Production person
+    const card = await call(store, "post", "/api/business-cards", { name: "Asha Rao", company: "LD Event Foods", phones: ["+91 97000 11122"], categories: ["Powder"], event: "Expo Delhi 2026" });
+    expect(card.status).toBe(201);
+    expect((await call(store, "get", "/api/leads/assignees")).status).toBe(403); // BD picks the person
+    const people = (await call(bd, "get", "/api/leads/assignees")).body as { id: string; name: string; department: string }[];
+    expect(people.find((p) => p.id === productionUser.id)).toMatchObject({ department: "Production" });
+    expect((await call(bd, "post", "/api/leads", lead({ brandName: "LD Event Foods", businessCardId: card.body.id, assignToId: "00000000-0000-0000-0000-000000000000" }))).status).toBe(400); // not a user
+    const made = await call(bd, "post", "/api/leads", lead({ brandName: "LD Event Foods", businessCardId: card.body.id, assignToId: productionUser.id }));
+    expect(made.status).toBe(201);
+    expect(made.body).toMatchObject({ pocId: productionUser.id, businessCardId: card.body.id });
+    const id = made.body.id as string;
+    const told = await prisma.notification.findMany({ where: { recipientId: productionUser.id } });
+    expect(told.some((n) => n.title.includes("LD Event Foods") && n.link === `/leads/${id}`)).toBe(true);
+
+    // The person it was handed to sees it and works on it: meetings, status, follow-up date
+    expect(((await call(production, "get", "/api/leads")).body as { id: string }[]).map((l) => l.id)).toEqual([id]);
+    expect((await call(production, "get", `/api/leads/${id}`)).status).toBe(200);
+    const meeting = await call(production, "post", `/api/leads/${id}/meetings`, { meetingDate: new Date().toISOString(), notes: "Called her, sending samples", statusAfter: "WARM", nextFollowUpAt: inDays(4) });
+    expect(meeting.status).toBe(201);
+    expect((await call(production, "patch", `/api/leads/${id}`, { city: "Delhi" })).body).toMatchObject({ city: "Delhi", status: "WARM" });
+    expect((await call(production, "get", "/api/leads/summary")).body.total).toBe(1);
+
+    // BD who made it still sees it; another BD, the card's collector and other departments do not
+    expect((await call(bd, "get", `/api/leads/${id}`)).status).toBe(200);
+    expect(((await call(bd, "get", "/api/leads")).body as { id: string }[]).map((l) => l.id)).toContain(id);
+    expect((await call(otherBd, "get", `/api/leads/${id}`)).status).toBe(404);
+    expect((await call(store, "get", `/api/leads/${id}`)).status).toBe(404);
+    expect((await call(nobody, "get", `/api/leads/${id}`)).status).toBe(404);
+
+    // Adding a lead, handing it on and Convert are BD's
+    expect((await call(production, "post", "/api/leads", lead())).status).toBe(403);
+    expect((await call(production, "patch", `/api/leads/${id}`, { pocId: storeUser.id })).status).toBe(403);
+    expect((await call(production, "post", `/api/leads/${id}/convert`, {})).status).toBe(403);
+
+    // BD hands it on to someone else: it moves to them, and the first person no longer has it
+    const moved = await call(bd, "patch", `/api/leads/${id}`, { pocId: storeUser.id });
+    expect(moved.status).toBe(200);
+    expect(moved.body.pocId).toBe(storeUser.id);
+    expect((await call(production, "get", `/api/leads/${id}`)).status).toBe(404);
+    expect((await call(store, "get", `/api/leads/${id}`)).status).toBe(200);
+    expect((await call(bd, "patch", `/api/leads/${id}`, { pocId: "00000000-0000-0000-0000-000000000000" })).status).toBe(400);
+    await prisma.user.update({ where: { id: productionUser.id }, data: { isActive: false } });
+    expect((await call(bd, "patch", `/api/leads/${id}`, { pocId: productionUser.id })).status).toBe(400); // a switched-off user cannot follow it up
+    void bdUser;
   });
 });

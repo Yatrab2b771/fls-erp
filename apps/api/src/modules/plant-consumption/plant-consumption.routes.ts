@@ -49,7 +49,7 @@ plantConsumptionRouter.post(
       if (!item) return res.status(400).json({ error: "Unknown inventory item" });
       if (input.destDayStoreId) {
         const destStore = await prisma.dayStore.findUnique({ where: { id: input.destDayStoreId }, select: { id: true } });
-        if (!destStore) return res.status(400).json({ error: "Unknown destination Day Store" });
+        if (!destStore) return res.status(400).json({ error: "Unknown destination Store" });
       }
 
       if (input.productionBatchId) {

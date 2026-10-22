@@ -186,7 +186,7 @@ async function switchInProduction(item: SwitchItem, p: { itemId: string; slot: P
   const notDispensed = batches.filter((b) => isOpenBatch(b) && !b.dispensedAt).length;
   const body = `${item.purchaseOrder.poNumber ?? "PO"}: R&D changed the BOM to ${SLOT_LABEL[p.slot]} (${p.reason}). ${notDispensed} batch(es) not dispensed yet follow it; ${openDispensed.length} dispensed batch(es) keep their material${extraRequests.length ? ` and ${extraRequests.length} extra request(s) were raised for what they still need` : ""}.`;
   await notifyRoles(["PRODUCTION"], { title: `${item.productName}: R&D changed the BOM to ${SLOT_LABEL[p.slot]}`, body, link: "/batches" }, p.actorId).catch((err) => p.log?.error({ err }, "notify failed: bom switch production"));
-  await notifyPlantDayStore(item.plannedPlant?.dayStoreId, { title: `${item.productName}: BOM changed to ${SLOT_LABEL[p.slot]}`, body, link: "/batch-dispensing" }, p.actorId).catch((err) => p.log?.error({ err }, "notify failed: bom switch day store"));
+  await notifyPlantDayStore(item.plannedPlant?.dayStoreId, { title: `${item.productName}: BOM changed to ${SLOT_LABEL[p.slot]}`, body, link: "/batch-dispensing" }, p.actorId).catch((err) => p.log?.error({ err }, "notify failed: bom switch store"));
 
   return {
     ok: true,

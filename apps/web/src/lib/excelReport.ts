@@ -24,16 +24,18 @@ export function addReportSheet(
   title: string,
   filterText: string,
   rows: Record<string, unknown>[],
-  options: { totals?: string[]; headers?: string[] } = {},
+  // `totalValues` are the Total row's own figures for columns that cannot simply be summed (a ratio, like yield)
+  options: { totals?: string[]; headers?: string[]; totalValues?: Record<string, number | string> } = {},
 ): void {
   const headers = options.headers ?? (rows[0] ? Object.keys(rows[0]) : []);
   const generated = new Date().toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const table: unknown[][] = [headers, ...rows.map((r) => headers.map((h) => r[h] ?? ""))];
 
-  if (options.totals?.length && rows.length) {
+  if ((options.totals?.length || options.totalValues) && rows.length) {
     const sums = headers.map((h, i) => {
       if (i === 0) return "Total";
-      if (!options.totals!.includes(h)) return "";
+      if (options.totalValues && h in options.totalValues) return options.totalValues[h]!;
+      if (!options.totals?.includes(h)) return "";
       return Math.round(rows.reduce((s, r) => s + (typeof r[h] === "number" ? (r[h] as number) : 0), 0) * 1000) / 1000;
     });
     table.push(sums);

@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { ApiError } from "../lib/api";
+import { useAuth } from "../lib/auth";
+import { useBackTo } from "../lib/backTo";
 import { useBusinessCards } from "../lib/businessCardHooks";
-import { LEAD_STATUS_META, LEAD_STATUS_ORDER, closureMonthOptions, fromLocalInput, useCreateLead, type LeadStatus } from "../lib/leadHooks";
+import { LEAD_STATUS_META, LEAD_STATUS_ORDER, closureMonthOptions, fromLocalInput, useCreateLead, useLeadAssignees, type LeadStatus } from "../lib/leadHooks";
 import { LeadKindFields, LeadSourceSelect } from "../components/LeadPickers";
 import { useToast } from "../components/Toast";
 
-// Add a lead by hand, or from a saved visiting card (?card=<id>: the card's details come in filled).
+// Add a lead by hand, or from a saved visiting card (?card=<id>: the card's details come in filled). Only BD adds leads; BD chooses who follows each one up.
 
 const CARD_FORMATS: Record<string, string> = { Bar: "Bars", Gummy: "Gummies", Powder: "Powder", Liquid: "Liquid", Tablet: "Tablets", Capsule: "Capsules", Bars: "Bars", Gummies: "Gummies", Tablets: "Tablets", Capsules: "Capsules", Omega: "Omega", "Soft gel": "Soft gel", Others: "Others" };
 
@@ -15,9 +17,13 @@ export function LeadFormPage() {
   const toast = useToast();
   const navigate = useNavigate();
   const [params] = useSearchParams();
+  const back = useBackTo({ from: "/leads", label: "Leads" }); // a lead made from a card goes back to the cards
   const cardId = params.get("card");
+  const { hasRole } = useAuth();
   const { data: cards } = useBusinessCards();
+  const { data: assignees } = useLeadAssignees({ enabled: hasRole("BD") });
   const create = useCreateLead();
+  const [assignToId, setAssignToId] = useState(""); // "" = BD themself
 
   const [brandName, setBrandName] = useState("");
   const [contactPerson, setContactPerson] = useState("");
@@ -70,18 +76,30 @@ export function LeadFormPage() {
         nextFollowUpAt: status === "DROPPED" ? undefined : fromLocalInput(followUp),
         closureMonth: closureMonth || undefined,
         businessCardId: card?.id,
+        assignToId: assignToId || undefined,
       });
       toast.success(`${lead.brandName} is added as a lead.`);
-      navigate(`/leads/${lead.id}`);
+      navigate(`/leads/${lead.id}`, back.from === "/leads" ? undefined : { state: { backTo: back } });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save");
     }
   }
 
+  if (!hasRole("BD")) {
+    return (
+      <div className="mx-auto max-w-3xl space-y-3">
+        <Link to={back.from} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+          <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {back.label}
+        </Link>
+        <p className="card p-5 text-sm text-slate-600">Only BD adds leads. BD hands you a lead to follow up; it then shows in your Leads list.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto max-w-3xl space-y-5">
-      <Link to="/leads" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
-        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Leads
+      <Link to={back.from} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+        <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> {back.label}
       </Link>
       <div>
         <h1 className="text-2xl font-black tracking-tight text-slate-900">Add lead</h1>
@@ -164,12 +182,24 @@ export function LeadFormPage() {
             </select>
           </div>
         </div>
-        <p className="text-xs text-slate-400">The salesman (POC) is you. Converted is not offered here: it comes after the sample is approved.</p>
+        <div className="max-w-sm">
+          <label className="label">Who follows this lead up</label>
+          <select className="field" value={assignToId} onChange={(e) => setAssignToId(e.target.value)}>
+            <option value="">Me</option>
+            {(assignees ?? []).map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}{u.department ? ` (${u.department})` : ""}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-slate-400">Any department. They see the lead in their Leads list and log its meetings; you can hand it to someone else later.</p>
+        </div>
+        <p className="text-xs text-slate-400">Converted is not offered here: it comes after the sample is approved, and only BD converts a lead.</p>
       </div>
 
       {error && <p className="text-sm font-bold text-rose-600">{error}</p>}
       <div className="flex justify-end gap-2">
-        <Link to="/leads" className="btn-ghost btn-sm">
+        <Link to={back.from} className="btn-ghost btn-sm">
           Cancel
         </Link>
         <button type="button" className="btn-primary btn-sm" disabled={create.isPending} onClick={submit}>

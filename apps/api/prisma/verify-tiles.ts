@@ -103,9 +103,9 @@ async function main() {
   const atPackaging = await prisma.productionBatch.findMany({ where: { status: "COMPLETED", currentStageId: "PACKAGING" }, select: { preProduction: { select: { purchaseOrderItem: { select: { productName: true, purchaseOrder: { select: { poNumber: true } } } } } } } });
   report("Packaging (batches at Packaging)", uniq(atPackaging.map((b) => keyOf(b.preProduction.purchaseOrderItem.purchaseOrder.poNumber, b.preProduction.purchaseOrderItem.productName))), await prodKeys("/api/production-batches/packaging-board", (r) => keyOf(r.preProduction.purchaseOrderItem.purchaseOrder.poNumber, r.preProduction.purchaseOrderItem.productName)));
   report("Plans sent to Production (tracker)", keys(at(...SENT)), uniq(await prodKeys("/api/pre-productions/plans-board")));
-  report("Handover to QA (packaging running / done / handed)", keys(rows.filter((r) => r.batchStages.some((b) => b === "PACKAGING" || b === "QA_GATE_PACKAGING"))), await prodKeys("/api/production-batches/handover-board"));
+  report("Handover to Store (packaging running / waiting for QA / approved)", keys(rows.filter((r) => r.batchStages.some((b) => b === "PACKAGING" || b === "QA_GATE_PACKAGING" || b === "FG_STORE") && !r.fgStoreHandedOver)), await prodKeys("/api/production-batches/handover-board"));
 
-  console.log("Day Store tiles (each Day Store sees only its own plant's work)");
+  console.log("Store tiles (each Store sees only its own plant's work)");
   const assignments = await prisma.dayStoreAssignment.findMany({ select: { userId: true, dayStoreId: true, dayStore: { select: { name: true } } }, distinct: ["dayStoreId"] });
   for (const a of assignments) {
     const user = await prisma.user.findUniqueOrThrow({ where: { id: a.userId }, include: { roles: { include: { role: true } } } });
@@ -113,7 +113,7 @@ async function main() {
     const mine = rows.filter((r) => r.dayStoreId === a.dayStoreId);
     const ds = async (path: string) => (await getAll(t, path)).map((r) => keyOf(r.poNumber, r.productName));
     report(`${a.dayStore.name}: Dispensing (batches with a batch number)`, await prepExpected("DISPENSING", a.dayStoreId), await prepShown(t, "DISPENSING"));
-    report(`${a.dayStore.name}: FG Store (to receive)`, keys(mine.filter((r) => r.batchStages.includes("FG_STORE"))), await ds("/api/fg/store-board?stage=FG_STORE"));
+    report(`${a.dayStore.name}: FG Store (to receive)`, keys(mine.filter((r) => r.fgStoreHandedOver)), await ds("/api/fg/store-board?stage=FG_STORE"));
     report(`${a.dayStore.name}: FG Handover (to Dispatch)`, keys(mine.filter((r) => r.batchStages.includes("FG_HANDOVER") && !r.handedOver)), await ds("/api/fg/store-board?stage=FG_HANDOVER"));
   }
   void store;

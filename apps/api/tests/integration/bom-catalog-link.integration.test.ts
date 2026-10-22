@@ -5,8 +5,8 @@ import { authHeader, createUser } from "./helpers";
 
 const app = createApp();
 
-describe("R&D's customer-wise BOM with Store item links", () => {
-  it("R&D adds a customer, a product and a BOM linked to Store items; the plan uses the Store item name; PPIC can view but not edit", async () => {
+describe("R&D's customer-wise BOM with Warehouse item links", () => {
+  it("R&D adds a customer, a product and a BOM linked to Warehouse items; the plan uses the Warehouse item name; PPIC can view but not edit", async () => {
     const { token: rnd } = await createUser(["RND"]);
     const { token: ppic } = await createUser(["PPIC"]);
     const { token: store } = await createUser(["STORE"]);
@@ -37,7 +37,7 @@ describe("R&D's customer-wise BOM with Store item links", () => {
     const list = await request(app).get(`/api/catalog/skus?customerId=${customer.body.id}`).set(authHeader(ppic));
     expect(list.body[0].packagingComponents).toHaveLength(2);
 
-    // The plan's line carries the Store item name
+    // The plan's line carries the Warehouse item name
     const plan = await request(app).post("/api/bom/plans").set(authHeader(rnd)).send({ name: "BL Plan" });
     await request(app).post(`/api/bom/plans/${plan.body.id}/items`).set(authHeader(rnd)).send({ skuId: sku.body.id, targetYield: 100 });
     const calc = await request(app).post(`/api/bom/plans/${plan.body.id}/calculate`).set(authHeader(rnd));

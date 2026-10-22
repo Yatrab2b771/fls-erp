@@ -189,3 +189,12 @@ export function getBatchRejectTarget(stage: CombinedLotStageId): CombinedLotStag
   const idx = PRODUCTION_BATCH_STAGE_ORDER.indexOf(stage);
   return idx > 0 ? PRODUCTION_BATCH_STAGE_ORDER[idx - 1]! : null;
 }
+
+const DEPARTMENT_LABEL: Record<string, string> = { QA_QC: "QA", RND: "R&D", PRODUCTION: "Production", STORE: "Store", ACCOUNTS: "Accounts", DISPATCH: "Dispatch" };
+
+/** A stage as the Batch tile shows where a batch is: its name and, in brackets, the department that has it ("In-Process QA (QA)"). */
+export function stageWithDepartment(stage: CombinedLotStageId): string {
+  const name = COMBINED_LOT_STAGE_LABEL[stage].replace(/\s*\([^)]*\)\s*$/, "");
+  const dept = (COMBINED_LOT_STAGE_ROLE[stage] ?? []).map((r) => DEPARTMENT_LABEL[r] ?? r).join(" / ");
+  return dept ? `${name} (${dept})` : name;
+}

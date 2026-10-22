@@ -42,7 +42,8 @@ export function LogEntryForm({ initialType, onDone, lockType = false }: { initia
   const [size, setSize] = useState("");
   const [vendorName, setVendorName] = useState("");
   const [dayStoreId, setDayStoreId] = useState("");
-  const [isTransitTracked, setIsTransitTracked] = useState(false);
+  // What the Warehouse issues to a Store is always in transit: it counts at the Store once the Store has received it (Stock Received)
+  const isTransitTracked = type === "ISSUED_DAY_STORE";
   const [batchNo, setBatchNo] = useState("");
   const [grnNo, setGrnNo] = useState("");
   const [mfgDate, setMfgDate] = useState("");
@@ -125,7 +126,7 @@ export function LogEntryForm({ initialType, onDone, lockType = false }: { initia
         size: size.trim() || undefined,
         vendorName: vendorName.trim() || undefined,
         dayStoreId: type === "ISSUED_DAY_STORE" && dayStoreId ? dayStoreId : undefined,
-        isTransitTracked: type === "ISSUED_DAY_STORE" && isTransitTracked ? true : undefined,
+        isTransitTracked: isTransitTracked ? true : undefined,
         batchNo: batchNo.trim() || undefined,
         grnNo: grnNo.trim() || undefined,
         mfgDate: mfgDate || undefined,
@@ -172,22 +173,14 @@ export function LogEntryForm({ initialType, onDone, lockType = false }: { initia
 
       {type === "RECEIVED" && (
         <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Store accepts it.
+          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> This won't count as stock until QA/QC approves it and Warehouse accepts it.
         </p>
       )}
 
       {type === "ISSUED_DAY_STORE" && (
-        <div className="space-y-2">
-          <label className="flex w-fit cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">
-            <input type="checkbox" className="h-3.5 w-3.5" checked={isTransitTracked} onChange={(e) => setIsTransitTracked(e.target.checked)} />
-            Track as In-Transit — takes real travel time to get there
-          </label>
-          {isTransitTracked && (
-            <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
-              <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Leaves the Warehouse right away, but won't count at the destination until someone there confirms it arrived (see the Transit tab).
-            </p>
-          )}
-        </div>
+        <p className="flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-700">
+          <ShieldAlert className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} /> Goes to the Store as In Transit: it leaves the Warehouse right away, but counts in the Store's stock only when the Store receives it (Stock Received)
+        </p>
       )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">

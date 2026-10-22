@@ -51,7 +51,7 @@ export async function getScopedDayStoreIds(userId: string, roles: RoleName[]): P
 export async function requireWarehouseSeat(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     if ((await getScopedDayStoreIds(req.user!.id, req.user!.roles)) !== null) {
-      return res.status(403).json({ error: "This list is for the Warehouse. A Day Store login sees its own store only." });
+      return res.status(403).json({ error: "This list is for the Warehouse. A Store login sees its own store only." });
     }
     next();
   } catch (err) {
@@ -89,7 +89,7 @@ export async function assertRunDayStoreAccess(userId: string, roles: RoleName[],
   const viewing = adminViewScope(roles)?.dayStoreIds;
   if (!viewing && (roles.includes("ADMIN") || !roles.includes("STORE"))) return;
   const scope = await getScopedDayStoreIds(userId, roles);
-  if (scope === null) throw new RouteError(403, "This step is done by the Day Store of the run's Plant, not by the Warehouse.");
+  if (scope === null) throw new RouteError(403, "This step is done by the Store of the run's Plant, not by the Warehouse.");
   const plant = plantId ? await prisma.plant.findUnique({ where: { id: plantId }, select: { dayStoreId: true } }) : null;
-  if (!plant?.dayStoreId || !scope.includes(plant.dayStoreId)) throw new RouteError(403, "This run belongs to another Plant - this step is done by that Plant's Day Store.");
+  if (!plant?.dayStoreId || !scope.includes(plant.dayStoreId)) throw new RouteError(403, "This run belongs to another Plant - this step is done by that Plant's Store.");
 }

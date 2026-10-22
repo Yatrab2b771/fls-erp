@@ -65,13 +65,13 @@ export interface MaterialRequestRow {
   source: "store" | "rnd";
   id: string;
   requestedAt: string;
-  requesterType: "Day Store" | "R&D Store";
+  requesterType: "Store" | "R&D Store";
   requesterName: string;
   requesterStoreId: string | null;
   requestedBy: string;
   itemId: string;
   itemName: string;
-  category: "RM" | "PM";
+  category: "RM" | "PM" | "OTHER";
   unit: string;
   requestedQty: number;
   issuedQty: number;
@@ -93,6 +93,8 @@ export interface MaterialRequestRow {
   forPlan: boolean;
   // The production request behind it is Production's "extra material" (not part of any plan).
   forExtra: boolean;
+  // ... and Production typed that material in because it was not in the item list.
+  forNewMaterial: boolean;
   forProductionRequestId: string | null;
   purchaseOrderItemId: string | null;
   productName: string | null;
@@ -134,11 +136,12 @@ export async function loadRows(): Promise<MaterialRequestRow[]> {
   const forIds = [...new Set(storeRequests.map((r) => r.forRequestId).filter((id): id is string => !!id))];
   const [poItems, productionRequests] = await Promise.all([
     poItemIds.length ? prisma.purchaseOrderItem.findMany({ where: { id: { in: poItemIds } }, select: { id: true, productName: true, purchaseOrder: { select: { poNumber: true, customer: { select: { companyName: true } } } } } }) : [],
-    forIds.length ? prisma.inventoryRequest.findMany({ where: { id: { in: forIds } }, select: { id: true, isExtra: true, plant: { select: { name: true } } } }) : [],
+    forIds.length ? prisma.inventoryRequest.findMany({ where: { id: { in: forIds } }, select: { id: true, isExtra: true, newMaterial: true, plant: { select: { name: true } } } }) : [],
   ]);
   const poItemById = new Map(poItems.map((p) => [p.id, p]));
   const plantByProductionRequest = new Map(productionRequests.map((p) => [p.id, p.plant?.name ?? null]));
   const extraProductionRequests = new Set(productionRequests.filter((p) => p.isExtra).map((p) => p.id));
+  const newMaterialRequests = new Set(productionRequests.filter((p) => p.newMaterial).map((p) => p.id));
   const startOfToday = new Date(new Date().toDateString()).getTime();
 
   const requirements = await prisma.preInventoryRequirement.findMany({
@@ -162,7 +165,7 @@ export async function loadRows(): Promise<MaterialRequestRow[]> {
       source: "store",
       id: r.id,
       requestedAt: r.createdAt.toISOString(),
-      requesterType: "Day Store",
+      requesterType: "Store",
       requesterName: r.requestingDayStore?.name ?? "—",
       requesterStoreId: r.requestingDayStoreId,
       requestedBy: r.requestedBy.fullName,
@@ -188,6 +191,7 @@ export async function loadRows(): Promise<MaterialRequestRow[]> {
       note: r.note,
       forPlan: !!r.forRequestId,
       forExtra: !!r.forRequestId && extraProductionRequests.has(r.forRequestId),
+      forNewMaterial: !!r.forRequestId && newMaterialRequests.has(r.forRequestId),
       forProductionRequestId: r.forRequestId,
       purchaseOrderItemId: r.purchaseOrderItemId,
       productName: r.purchaseOrderItemId ? (poItemById.get(r.purchaseOrderItemId)?.productName ?? null) : null,
@@ -233,6 +237,7 @@ export async function loadRows(): Promise<MaterialRequestRow[]> {
       note: r.note,
       forPlan: false,
       forExtra: false,
+      forNewMaterial: false,
       forProductionRequestId: null,
       purchaseOrderItemId: null,
       productName: null,
@@ -341,7 +346,7 @@ async function escalateRow(row: MaterialRequestRow, actorId: string, requesterNo
   await recordAudit({ actorId, action: "material_request.escalated", entityType: "PreInventoryRequirement", entityId: requirement.id, metadata: { source: row.source, requestId: row.id, shortBy: row.shortBy, automatic: auto || undefined } });
   await notifyRoles(
     ["PPIC"],
-    { title: `${row.requesterName} needs ${row.itemName}${row.forExtra ? " (extra material)" : ""}`, body: `${row.shortBy} ${row.unit} short at the Warehouse - review and send to Purchase.`, link: "/pre-inventory" },
+    { title: `${row.requesterName} needs ${row.itemName}${row.forNewMaterial ? " (new material)" : row.forExtra ? " (extra material)" : ""}`, body: `${row.shortBy} ${row.unit} short at the Warehouse - review and send to Purchase.`, link: "/pre-inventory" },
     actorId,
   ).catch(() => {});
   return requirement.id;
@@ -360,7 +365,7 @@ export async function autoEscalateExtraAsks(): Promise<number> {
   for (const row of rows) {
     const actorId = askers.get(row.id);
     if (!actorId) continue;
-    await escalateRow(row, actorId, `Extra material for ${row.plantName ?? row.requesterName}`, true);
+    await escalateRow(row, actorId, `Extra material for ${row.plantName ?? row.requesterName}${row.forNewMaterial ? " (new material)" : ""}`, true);
     done += 1;
   }
   return done;

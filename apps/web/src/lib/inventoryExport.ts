@@ -469,7 +469,7 @@ export function exportPurchaseAgingReport(rows: PreInventoryRequirement[]) {
 export function exportItemStockByLocation(data: ItemStockByLocation) {
   const rows: Record<string, unknown>[] = [{ Location: "Warehouse", Type: "Warehouse", "Received / In": "", "Issued / Out": "", "On Hand": data.warehouse }];
   for (const ds of data.dayStores) {
-    rows.push({ Location: ds.name, Type: "Day Store", "Received / In": ds.receivedFromWarehouse, "Issued / Out": ds.issuedToProduction, "On Hand": ds.onHand });
+    rows.push({ Location: ds.name, Type: "Store", "Received / In": ds.receivedFromWarehouse, "Issued / Out": ds.issuedToProduction, "On Hand": ds.onHand });
   }
   for (const p of data.plants) {
     rows.push({ Location: p.name, Type: "Plant", "Received / In": "", "Issued / Out": "", "On Hand": p.onHand });
@@ -869,7 +869,7 @@ export interface StockIssuedRow {
   category: "RM" | "PM";
   unit: string;
   quantity: number;
-  locationType: "Day Store" | "R&D Store";
+  locationType: "Store" | "R&D Store";
   locationName: string | null;
   batchNo: string | null;
   grnNo: string | null;
@@ -914,6 +914,7 @@ export interface MyStoreRow {
   batchNo: string | null;
   grnNo: string | null;
   viaRequest: boolean;
+  isExtra: boolean;
   status: "Delivered" | "In Transit";
   issuedBy: string;
 }
@@ -921,7 +922,7 @@ export interface MyStoreRow {
 export function exportMyStoreReport(kind: "received" | "issued-to-plant", rows: MyStoreRow[]) {
   const toPlant = kind === "issued-to-plant";
   download(
-    toPlant ? "Issued to Plant" : "Received from Warehouse",
+    toPlant ? "Dispensed to Plant" : "Received from Warehouse",
     rows.map((r) => ({
       Date: day(r.date),
       Status: r.status,
@@ -929,14 +930,14 @@ export function exportMyStoreReport(kind: "received" | "issued-to-plant", rows: 
       Category: CATEGORY_LABEL[r.category] ?? r.category,
       Quantity: r.quantity,
       Unit: r.unit,
-      "Day Store": r.storeName ?? "",
+      "Store": r.storeName ?? "",
       ...(toPlant ? { Plant: r.plantName ?? "" } : {}),
       "Batch No": r.batchNo ?? "",
       "GRN No": r.grnNo ?? "",
-      Against: r.viaRequest ? "Material Request" : "Direct",
+      Against: r.isExtra ? "Extra material" : r.viaRequest ? "Material Request" : "Direct",
       [toPlant ? "Issued By" : "Issued By (Warehouse)"]: r.issuedBy,
     })),
-    `FLS_${toPlant ? "Issued_To_Plant" : "Received_From_Warehouse"}_${todayStamp()}.xlsx`,
+    `FLS_${toPlant ? "Dispensed_To_Plant" : "Received_From_Warehouse"}_${todayStamp()}.xlsx`,
   );
 }
 
@@ -946,7 +947,7 @@ export interface MaterialRequestRow {
   source: "store" | "rnd";
   id: string;
   requestedAt: string;
-  requesterType: "Day Store" | "R&D Store";
+  requesterType: "Store" | "R&D Store";
   requesterName: string;
   requesterStoreId: string | null;
   requestedBy: string;

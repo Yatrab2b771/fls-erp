@@ -20,7 +20,7 @@ import {
   useVerifyConsumption,
 } from "../lib/hooks";
 import { PRE_PRODUCTION_STAGE_FIELDS, PRE_PRODUCTION_STAGE_LABEL, PRE_PRODUCTION_STAGE_ORDER, PRE_PRODUCTION_STAGE_ROLE, getForwardTarget, getRejectTarget } from "../lib/preProductionStage";
-import { COMBINED_LOT_STAGE_LABEL } from "../lib/combinedLotStage";
+import { COMBINED_LOT_STAGE_LABEL , stageWithDepartment } from "../lib/combinedLotStage";
 import { FieldGrid } from "../components/FieldGrid";
 import { PlanFromPpic } from "../components/PlanFromPpic";
 import { ItemPicker } from "../components/ItemPicker";
@@ -460,7 +460,7 @@ function MaterialCoveragePanel({ preProductionId }: { preProductionId: string })
         {data.allCovered ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" strokeWidth={2.5} /> : <ArrowRight className="h-3.5 w-3.5 text-amber-600" strokeWidth={2.5} />}
         Material for {data.releasedQty} {data.unit}
         {partial ? ` (part of ${data.orderQty} ${data.unit} released so far)` : ""}
-        {data.allCovered ? " — all with the Day Store" : " — must reach the Day Store before this stage can be recorded"}
+        {data.allCovered ? " — all with the Store" : " — must reach the Store before this stage can be recorded"}
       </p>
       <div className="space-y-1">
         {data.lines.map((l) => (
@@ -471,7 +471,7 @@ function MaterialCoveragePanel({ preProductionId }: { preProductionId: string })
             <span className={`font-mono font-bold ${l.covered ? "text-emerald-600" : "text-amber-700"}`}>
               {Math.round((l.receivedQty + l.atDayStoreQty) * 1000) / 1000} / {l.requiredQty} {l.unit}
               <span className="ml-1 font-sans text-micro font-bold text-slate-400">
-                ({l.atDayStoreQty} at Day Store{l.receivedQty > 0 ? `, ${l.receivedQty} at Plant` : ""})
+                ({l.atDayStoreQty} at Store{l.receivedQty > 0 ? `, ${l.receivedQty} at Plant` : ""})
               </span>
               {!l.covered && l.inTransitQty > 0 && <span className="ml-1 font-sans text-micro font-bold text-sky-600">({l.inTransitQty} on the way)</span>}
             </span>
@@ -993,9 +993,8 @@ function PlanDetails({ run }: { run: PreProduction }) {
 }
 
 // Material utilisation for the run, per material: A Production (used), B Wastage, C Rejected, D Sample, E Return to Store.
-// Read from the Plant's consumption log (Plant Consumption page), which is kept per run, not per batch.
+// Read from the Plant's consumption log, which is kept per run, not per batch. Production logs it in the batch's RM Utilization.
 function MaterialUtilization({ runId }: { runId: string }) {
-  const { hasRole } = useAuth();
   const { data } = usePlantConsumptionBalance(runId);
   const items = data?.items ?? [];
   if (!data?.plant) return null;
@@ -1003,11 +1002,6 @@ function MaterialUtilization({ runId }: { runId: string }) {
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-3 py-2.5">
         <p className="text-micro font-bold uppercase tracking-wide text-slate-400">Material utilization (this run)</p>
-        {hasRole("PRODUCTION", "STORE") && (
-          <Link to="/plant-consumption" className="text-tiny font-bold text-brand-600 hover:underline">
-            Log usage →
-          </Link>
-        )}
       </div>
       {items.length === 0 ? (
         <p className="px-3 py-3 text-xs text-slate-400">Nothing used yet. It fills in as material is used, wasted, rejected, sampled or returned.</p>
@@ -1095,7 +1089,8 @@ export function NewProductionBatchForm({ preProductionId, remainingQty, shortfal
  */
 export function ProductionBatchesTable({ preProductionId, batches, renderUtilization }: { preProductionId: string; batches: ProductionBatch[]; renderUtilization?: (batch: ProductionBatch) => ReactNode }) {
   if (batches.length === 0) return null;
-  // Per-batch flow: the bulk output is typed here; the batch's final input and output come from its RM Utilization, filled after Bulk QC at Packaging.
+  // Per-batch flow: after the start fields the batch goes through In-Process QA, the QA Gate and Bulk QC (its Pipeline column says where it is); then it
+  // comes back here for the RM Utilization (what it says was produced is the batch's output), the end time and Send to Packaging.
   const flow = batches.some((b) => b.preProduction?.batchFlow);
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -1110,9 +1105,9 @@ export function ProductionBatchesTable({ preProductionId, batches, renderUtiliza
               <th className="px-3 py-2.5">Manpower</th>
               <th className="px-3 py-2.5">Start date &amp; time</th>
               {!flow && <th className="px-3 py-2.5">Input qty</th>}
-              {!flow && <th className="px-3 py-2.5">Utilization (RM)</th>}
+              <th className="px-3 py-2.5">Utilization (RM)</th>
               <th className="px-3 py-2.5">End date &amp; time</th>
-              <th className="px-3 py-2.5">{flow ? "Bulk output" : "Output qty"}</th>
+              <th className="px-3 py-2.5">{flow ? "Produced" : "Output qty"}</th>
               <th className="px-3 py-2.5">Mfg status</th>
               <th className="px-3 py-2.5">Remarks</th>
               {!flow && <th className="px-3 py-2.5 text-right">Wastage</th>}
@@ -1143,14 +1138,19 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
   const [showUtil, setShowUtil] = useState(false);
   const isDone = batch.status === "COMPLETED";
   const locked = isDone || !canAct;
-  // The finishing fields (end, output, status, remarks) open only once every plan material has its Production quantity on this batch
-  // (a per-batch-flow batch is finished without it: its RM Utilization comes after Bulk QC, at Packaging).
+  // The finishing fields (end, status, remarks) open only once the RM Utilization is filled: every plan material has its Production quantity on this
+  // batch (and, per-batch flow, the four numbers of the whole batch are saved: Produced is the batch's output).
   const util = batch.utilization;
-  const utilDone = flow ? true : util ? util.complete : true;
+  const utilDone = flow ? !!util && util.complete && !!util.sheets.RM : util ? util.complete : true;
   // Per-batch flow: the start fields (shift, manpower, start date & time) must be in first, too.
   const startFilled = !!batch.shift && !!batch.manpowerCount && !!batch.shiftStartAt;
-  const finishLocked = locked || !utilDone || (flow && !startFilled);
-  const finishTip = isDone ? undefined : !startFilled && flow ? "Fill and Save the start fields first (shift, manpower, start date & time)" : !utilDone ? "Fill the Utilization first" : undefined;
+  // Per-batch flow: once started the batch is at In-Process QA, then the QA Gate and Bulk QC (still in production); only after Bulk QC has passed is it
+  // back with Production, which fills the RM Utilization and the end time and sends it to Packaging.
+  const backWithProduction = flow && !isDone && batch.currentStageId === "PACKAGING";
+  const withQa = flow && !isDone && startFilled && !backWithProduction;
+  const whereTip = `With ${stageWithDepartment(batch.currentStageId)}: the Utilization and end time open once Bulk QC has passed`;
+  const finishLocked = locked || !utilDone || (flow && !startFilled) || withQa;
+  const finishTip = isDone ? undefined : !startFilled && flow ? "Fill and Save the start fields first (shift, manpower, start date & time)" : withQa ? whereTip : !utilDone ? (flow ? "Fill the RM Utilization first (open it in the Utilization column)" : "Fill the Utilization first") : undefined;
 
   // A date-time input wants the local "yyyy-MM-ddTHH:mm"; the API stores it as a full timestamp.
   const toLocalInput = (iso: string | null) => {
@@ -1177,8 +1177,8 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
       const body: Record<string, unknown> = { id: batch.id };
       for (const [k, v] of Object.entries(values)) {
         if (v === "") continue;
-        if ((!utilDone || (flow && !startFilled)) && FINISHING.includes(k)) continue; // shut until the Utilization is complete and the start fields are saved
-        if (flow && k === "inputQty") continue; // worked out from the RM Utilization later
+        if ((!utilDone || (flow && (!startFilled || withQa))) && FINISHING.includes(k)) continue; // shut until the Utilization is complete, the start fields are saved and (per-batch flow) Bulk QC has passed
+        if (flow && (k === "inputQty" || k === "outputQty")) continue; // worked out from the RM Utilization (Produced, and everything accounted for)
         body[k] = k === "inputQty" || k === "outputQty" || k === "manpowerCount" ? Number(v) : k === "shiftStartAt" || k === "shiftEndAt" ? new Date(v).toISOString() : v;
       }
       await update.mutateAsync(body as never);
@@ -1189,8 +1189,12 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
   }
 
   async function handleComplete() {
+    if (withQa) {
+      toast.error(whereTip);
+      return;
+    }
     if (!utilDone) {
-      toast.error(`Fill the Utilization first: ${util!.missing.length} of ${util!.required} materials have no Production quantity on this batch yet.`);
+      toast.error(flow ? "Fill the RM Utilization first: Produced, Waste, Reject, Sample and each material, then Save it." : `Fill the Utilization first: ${util!.missing.length} of ${util!.required} materials have no Production quantity on this batch yet.`);
       setShowUtil(true);
       return;
     }
@@ -1199,13 +1203,13 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
       return;
     }
     if (batch.outputQty == null || (flow && !(batch.outputQty > 0))) {
-      toast.error("Record the output quantity (the bulk made) and Save before completing this batch.");
+      toast.error(flow ? "Fill the RM Utilization (what the batch produced) before completing this batch." : "Record the output quantity (the bulk made) and Save before completing this batch.");
       return;
     }
-    if (!window.confirm("Mark this batch completed? It'll then have its own QC/Packaging/Dispatch pipeline to go through, independent of any other batch on this run.")) return;
+    if (!window.confirm(flow ? "Send this batch to Packaging? Its RM Utilization and end time are final once Packaging starts." : "Mark this batch completed? It'll then have its own QC/Packaging/Dispatch pipeline to go through, independent of any other batch on this run.")) return;
     try {
       await complete.mutateAsync(batch.id);
-      toast.success("Completed. This batch now has its own pipeline to go through.");
+      toast.success(flow ? "Sent to Packaging." : "Completed. This batch now has its own pipeline to go through.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not complete");
     }
@@ -1216,7 +1220,7 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
       ? []
       : [
           { key: "save", label: update.isPending ? "Saving…" : "Save", icon: Save, onClick: handleSave, disabled: update.isPending },
-          { key: "complete", label: complete.isPending ? "Completing…" : "Mark Completed", icon: Check, tone: "primary", onClick: handleComplete, disabled: complete.isPending || !utilDone || (flow && !startFilled), title: finishTip },
+          { key: "complete", label: complete.isPending ? (flow ? "Sending…" : "Completing…") : flow ? "Send to Packaging" : "Mark Completed", icon: Check, tone: "primary", onClick: handleComplete, disabled: complete.isPending || !utilDone || (flow && !startFilled) || withQa, title: finishTip },
         ];
 
   return (
@@ -1251,16 +1255,16 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
             <input disabled={locked} className={`${CELL} w-24 font-mono`} type="number" min="0" step="any" value={values.inputQty} onChange={set("inputQty")} />
           </td>
         )}
-        {!flow && (
+        {(
         <td className="px-3 py-1.5">
-          {util && util.required > 0 ? (
+          {util && (flow || util.required > 0) ? (
             <button
               type="button"
               onClick={() => setShowUtil((o) => !o)}
               className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-tiny font-bold ${utilDone ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}
-              title={utilDone ? "Every plan material has its Production quantity on this batch" : `Missing: ${util.missing.join(", ")}`}
+              title={utilDone ? "The Utilization is filled" : util.missing.length > 0 ? `Missing: ${util.missing.join(", ")}` : "Save the four numbers of the whole batch"}
             >
-              {util.logged} of {util.required} {showUtil ? "▴" : "▾"}
+              {flow && (util.required === 0 || utilDone) ? (utilDone ? "Done" : "Fill") : `${util.logged} of ${util.required}`} {showUtil ? "▴" : "▾"}
             </button>
           ) : (
             <span className="text-slate-300">—</span>
@@ -1271,7 +1275,11 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
           <input disabled={finishLocked} title={finishTip} className={`${CELL} w-44`} type="datetime-local" value={values.shiftEndAt} onChange={set("shiftEndAt")} />
         </td>
         <td className="px-3 py-1.5">
-          <input disabled={finishLocked} title={finishTip} className={`${CELL} w-24 font-mono`} type="number" min="0" step="any" value={values.outputQty} onChange={set("outputQty")} />
+          {flow ? (
+            <span className="font-mono text-slate-700" title="What the RM Utilization says the batch produced">{batch.outputQty != null && batch.outputQty > 0 ? batch.outputQty : "—"}</span>
+          ) : (
+            <input disabled={finishLocked} title={finishTip} className={`${CELL} w-24 font-mono`} type="number" min="0" step="any" value={values.outputQty} onChange={set("outputQty")} />
+          )}
         </td>
         <td className="px-3 py-1.5">
           <input disabled={finishLocked} title={finishTip} className={`${CELL} w-32`} placeholder="e.g. Completed" value={values.manufacturingStatus} onChange={set("manufacturingStatus")} />
@@ -1285,6 +1293,8 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
             <Link to={`/production-batches/${batch.id}`} className="inline-flex items-center gap-1 font-bold text-brand-700 hover:underline" title="This batch's own QC / Packaging / Dispatch pipeline">
               <Truck className="h-3.5 w-3.5" strokeWidth={2.25} /> {COMBINED_LOT_STAGE_LABEL[batch.currentStageId]} <ArrowRight className="h-3 w-3" strokeWidth={2.5} />
             </Link>
+          ) : flow && startFilled ? (
+            <span className="pill border-sky-200 bg-sky-50 text-sky-700" title="Where this batch is now">{stageWithDepartment(batch.currentStageId)}</span>
           ) : (
             <span className="text-slate-300">—</span>
           )}
@@ -1295,8 +1305,8 @@ function ProductionBatchRow({ preProductionId, batch, flow, renderUtilization }:
       </tr>
       {showUtil && renderUtilization && (
         <tr className="bg-slate-50/70">
-          <td colSpan={flow ? 12 : 15} className="whitespace-normal px-4 py-3">
-            {renderUtilization(batch)}
+          <td colSpan={flow ? 13 : 15} className="whitespace-normal px-4 py-3">
+            {flow && !startFilled ? <p className="text-xs text-slate-500">Fill and Save the start fields first (shift, manpower, start date &amp; time). The batch then goes to In-Process QA, the QA Gate and Bulk QC.</p> : withQa ? <p className="text-xs text-slate-500">This batch is with <b>{stageWithDepartment(batch.currentStageId)}</b>. Once Bulk QC has passed it comes back here: fill the RM Utilization and the end time, then Send to Packaging.</p> : renderUtilization(batch)}
           </td>
         </tr>
       )}

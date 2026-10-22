@@ -225,7 +225,7 @@ export function AvailableStockPage() {
 
   const { data: meta } = useQuery({ queryKey: ["inventory", "available-stock", "meta"], queryFn: () => api<{ locations: AvailableLocation[]; scoped: boolean }>(`${BASE}/meta`), staleTime: 60_000 });
   const locations = meta?.locations ?? [];
-  const warehouseSide = meta ? !meta.scoped : false; // a Day Store login does not see the Warehouse's batches / quarantine / purchases
+  const warehouseSide = meta ? !meta.scoped : false; // a Store login does not see the Warehouse's batches / quarantine / purchases
 
   // The filter shows location names; the server wants their keys.
   const picked = (key: string) => tileFilters.applied.picks[key] ?? [];
@@ -350,7 +350,7 @@ export function AvailableStockPage() {
                 </>
               ) : (
                 <>
-                  {paged.total.toLocaleString()} item(s){isFiltered ? " match" : " with stock"} — {meta?.scoped ? "in your store and its Plant" : "across Warehouse, Day Stores, R&D Store and Plants"}
+                  {paged.total.toLocaleString()} item(s){isFiltered ? " match" : " with stock"} — {meta?.scoped ? "in your store and its Plant" : "across Warehouse, Stores, R&D Store and Plants"}
                 </>
               )}
             </p>

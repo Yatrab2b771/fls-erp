@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { Fragment, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { AgingCell } from "./AgingCell";
@@ -72,7 +73,7 @@ export function ReceivedTable({
                     {showPo && <td className="px-4 py-3 font-bold text-slate-700">{vendorPoOf(t) ?? <span className="font-normal text-slate-400">No PO (direct / opening stock)</span>}</td>}
                     <td className="px-4 py-3">{st ? <span className={`pill ${st.pill}`}>{st.label}</span> : <span className="text-slate-400">-</span>}</td>
                     <td className="px-4 py-3 font-bold text-slate-800">{t.item.name}</td>
-                    <td className="px-4 py-3 text-slate-500">{t.item.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                    <td className="px-4 py-3 text-slate-500">{materialKindName(t.item.category)}</td>
                     <td className="px-4 py-3 text-right font-mono text-slate-700">
                       {fmtQty(t.quantity)} {t.unit}
                     </td>

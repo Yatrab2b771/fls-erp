@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { Fragment, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ClipboardList, Download, Truck } from "lucide-react";
@@ -192,7 +193,7 @@ function PurchasePlanningTable({
                         )}
                       </td>
                       <td className="max-w-[200px] whitespace-normal px-4 py-3 text-slate-600">{r.sourcePo?.productName ?? <span className="text-slate-300">—</span>}</td>
-                      <td className="px-4 py-3 text-slate-500">{r.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                      <td className="px-4 py-3 text-slate-500">{materialKindName(r.category)}</td>
                       <td className={`px-4 py-3 text-right font-mono tabular-nums ${r.shortQty > 0 ? "font-bold text-rose-600" : "text-slate-300"}`}>{r.shortQty > 0 ? `${r.shortQty} ${r.unit}` : "—"}</td>
                       <td className="px-4 py-3 text-right">
                         <span className={`font-mono tabular-nums ${r.onOrderQty > 0 ? "font-bold text-emerald-700" : "text-slate-300"}`}>{r.onOrderQty > 0 ? `${r.onOrderQty} ${r.unit}` : "—"}</span>

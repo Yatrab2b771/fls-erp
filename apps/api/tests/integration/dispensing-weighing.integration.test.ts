@@ -160,13 +160,13 @@ describe("Dispensing records what was weighed, and the lots it came from", () =>
   });
 });
 
-describe("Production receives what the Day Store dispensed, material by material", () => {
+describe("Production receives what the Store dispensed, material by material", () => {
   const receive = (s: Awaited<ReturnType<typeof setup>>, token: string, lines: object[]) => s.call(token, "post", `/api/production-batches/${s.batch.id}/receive`, { lines });
   const pendingOf = (s: Awaited<ReturnType<typeof setup>>) => prisma.batchDispensingLine.findMany({ where: { productionBatchId: s.batch.id, deliveryStatus: "PENDING" } });
   const plantOnHand = async (s: Awaited<ReturnType<typeof setup>>, itemId: string) => (await getOnHandByPlantAndItem(s.plant.id, [itemId])).get(itemId) ?? 0;
   const storeOnHand = async (s: Awaited<ReturnType<typeof setup>>, itemId: string) => (await getOnHandByDayStoreAndItem(s.dayStore.id, [itemId])).get(itemId)?.onHand ?? 0;
 
-  it("keeps the material on its way (out of the Day Store, not yet in the Plant) and tells Production", async () => {
+  it("keeps the material on its way (out of the Store, not yet in the Plant) and tells Production", async () => {
     const s = await setup();
     const res = await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
     expect(res.body.prepStageId).toBe("RECEIVE");
@@ -222,9 +222,11 @@ describe("Production receives what the Day Store dispensed, material by material
     expect(rest.body.prepStageId).toBe("READY");
   });
 
-  it("a refused material goes back to the Day Store; the batch returns to Dispensing for that material only, then goes on", async () => {
+  it("a refused material goes back to the Store; the batch returns to Dispensing for that material only, then goes on", async () => {
     const s = await setup();
     await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
+    const firstGrn = (await prisma.productionBatch.findUniqueOrThrow({ where: { id: s.batch.id }, select: { grnNo: true } })).grnNo!;
+    expect(firstGrn).toMatch(/^FLS-[A-Z]{3}-.+-\d{2,}$/);
     const whey = s.whey.id;
     const tub = s.tub.id;
     const lines = await pendingOf(s);
@@ -238,7 +240,7 @@ describe("Production receives what the Day Store dispensed, material by material
     ]);
     expect(out.status).toBe(200);
     expect(out.body.prepStageId).toBe("DISPENSING");
-    expect(await storeOnHand(s, whey)).toBe(60); // the whey is back with the Day Store
+    expect(await storeOnHand(s, whey)).toBe(60); // the whey is back with the Store
     expect(await plantOnHand(s, tub)).toBe(40);
 
     // The Day Store sees why, and dispenses only what is missing (the tubs are already there)
@@ -250,6 +252,7 @@ describe("Production receives what the Day Store dispensed, material by material
     const again = await s.call(s.dayStoreLogin.token, "post", `/api/production-batches/${s.batch.id}/dispense`, dispense);
     expect(again.status).toBe(200);
     expect(again.body.prepStageId).toBe("RECEIVE");
+    expect(again.body.grnNo).toBe(`${firstGrn}-A`); // the same GRN with a letter added: the batch was dispensed again
     expect(await prisma.inventoryTransaction.count({ where: { itemId: tub, type: "ISSUED_PRODUCTION", deletedAt: null } })).toBe(1); // the tubs were not sent twice
     const second = await pendingOf(s);
     expect(second.map((l) => l.itemId)).toEqual([whey]);

@@ -53,6 +53,8 @@ export interface BatchUtilizationStatus extends UtilizationPart {
   sheets: { RM: UtilizationSheetValues | null; PM: UtilizationSheetValues | null };
   /** What is saved material by material on the batch (so the form opens with it). */
   entries: UtilizationEntry[];
+  /** Material the Store issued as an extra request for this batch that is not in its plan (givenQty is what was issued): listed so Production fills in what it used. */
+  extraItems: UtilizationItem[];
   /** How many finished packs this batch is planned to make (the PM plan's target yield, scaled to the batch): the basis the PM sheet is shared on. Null = no PM plan. */
   pmPacks: number | null;
 }
@@ -94,10 +96,15 @@ export async function utilizationOfBatches(purchaseOrderItemId: string, batches:
   const givenBy = new Map(given.map((r) => [`${r.productionBatchId}::${r.itemId}`, r._sum.quantity ?? 0]));
   // Material the Day Store issued as an extra request for the batch (R&D's change after it was dispensed) is part of what the batch was given.
   const extraIssued = await prisma.inventoryRequest.findMany({ where: { productionBatchId: { in: ids }, deletedAt: null }, select: { productionBatchId: true, itemId: true, fulfillments: { where: { deletedAt: null }, select: { quantity: true } } } });
+  const planItemIds = new Set(itemIds);
+  const extraGiven = new Map<string, number>(); // batch::item -> issued, for material outside the plan
   for (const x of extraIssued) {
     const key = `${x.productionBatchId}::${x.itemId}`;
-    givenBy.set(key, (givenBy.get(key) ?? 0) + x.fulfillments.reduce((t, f) => t + f.quantity, 0));
+    const qty = x.fulfillments.reduce((t, f) => t + f.quantity, 0);
+    givenBy.set(key, (givenBy.get(key) ?? 0) + qty);
+    if (!planItemIds.has(x.itemId)) extraGiven.set(key, (extraGiven.get(key) ?? 0) + qty);
   }
+  const extraInfo = extraGiven.size ? new Map((await prisma.inventoryItem.findMany({ where: { id: { in: [...new Set([...extraGiven.keys()].map((k) => k.split("::")[1]!))] } }, select: { id: true, name: true, category: true, unit: true } })).map((i) => [i.id, i])) : new Map<string, { id: string; name: string; category: string; unit: string | null }>();
   for (const b of batches) {
     const requiredOfBatch = requiredBySlot.get(slotOf.get(b.id) ?? "BASE") ?? [];
     const rm = requiredOfBatch.filter((r) => r.category === "RM").map((r) => ({ id: r.itemId, name: r.itemName }));
@@ -117,6 +124,12 @@ export async function utilizationOfBatches(purchaseOrderItemId: string, batches:
     result.set(b.id, {
       sheets: { RM: sheetOf("RM"), PM: sheetOf("PM") },
       entries,
+      extraItems: [...extraGiven.entries()].flatMap(([key, qty]) => {
+        const [batchId, itemId] = key.split("::") as [string, string];
+        const item = extraInfo.get(itemId);
+        if (batchId !== b.id || qty <= 0 || !item || (item.category !== "RM" && item.category !== "PM")) return [];
+        return [{ itemId, itemName: item.name, category: item.category as "RM" | "PM", unit: item.unit ?? (item.category === "RM" ? "Kg" : "Count"), requiredQty: 0, givenQty: Math.round(qty * 1000) / 1000 }];
+      }),
       pmPacks: totalPacks > 0 ? Math.round(totalPacks * scale * 1000) / 1000 : null,
       ...part(rm, logged, b.id),
       pm: part(pm, logged, b.id),

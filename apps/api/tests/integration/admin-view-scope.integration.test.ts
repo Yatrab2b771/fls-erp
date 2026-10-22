@@ -6,7 +6,7 @@ import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
-describe("An admin viewing as one Day Store / Plant is scoped like that store's own login", () => {
+describe("An admin viewing as one Store / Plant is scoped like that store's own login", () => {
   it("scopes the admin by X-View-As-Scope, and ignores the header for anyone who is not an admin", async () => {
     const { token: admin } = await createUser(["ADMIN"]);
     const { token: store, user: storeUser } = await createUser(["STORE"]);

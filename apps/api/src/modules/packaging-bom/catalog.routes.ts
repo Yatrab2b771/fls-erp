@@ -193,7 +193,7 @@ catalogRouter.put(
       const itemIds = [...new Set(components.map((c) => c.pmItemId).filter((id): id is string => !!id))];
       if (itemIds.length) {
         const found = await prisma.inventoryItem.count({ where: { id: { in: itemIds }, category: "PM" } });
-        if (found !== itemIds.length) return res.status(400).json({ error: "One of the linked items is not a Packaging Material in the Store list." });
+        if (found !== itemIds.length) return res.status(400).json({ error: "One of the linked items is not a Packaging Material in the Warehouse list." });
       }
 
       const version = await savePmBom(skuId, { header: header ?? {}, components }, note, req.user!.id);

@@ -33,7 +33,7 @@ export const recordPlantConsumptionSchema = z
     path: ["destinationType"],
   })
   .refine((data) => (data.returnedQty > 0 && !data.productionBatchId && data.destinationType === "DAY_STORE" ? !!data.destDayStoreId : true), {
-    message: "Select a destination Day Store",
+    message: "Select a destination Store",
     path: ["destDayStoreId"],
   });
 

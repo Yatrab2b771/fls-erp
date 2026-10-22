@@ -23,7 +23,7 @@ async function main() {
     const email = `${slug}@fls.local`;
     let user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      user = await prisma.user.create({ data: { email, passwordHash: await bcrypt.hash(PASSWORD, 12), fullName: `${store.name} (Day Store login)` } });
+      user = await prisma.user.create({ data: { email, passwordHash: await bcrypt.hash(PASSWORD, 12), fullName: `${store.name} (Store login)` } });
       await prisma.userRole.create({ data: { userId: user.id, roleId: storeRole.id } });
       console.log(`Created ${email} / ${PASSWORD}`);
     }

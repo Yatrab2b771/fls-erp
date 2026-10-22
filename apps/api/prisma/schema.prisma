@@ -402,6 +402,20 @@ model ProductCategory {
   @@map("product_categories")
 }
 
+// The transporters Dispatch ships with: a shipment's Transport name is picked from this list (Dispatch adds a new one inline, right where it
+// picks). The Transporter ID is the 15-character GST-style id the e-way bill asks for. A shipment keeps the transporter's NAME as text, so
+// renaming or removing one here never changes a shipment already sent.
+model Transporter {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  transporterId String?
+  createdById   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("transporters")
+}
+
 // The PO *header* — BD receives this from a company/brand. Product-level
 // detail lives on PurchaseOrderItem, not here, because one PO can list
 // several distinct products (e.g. Medicine A, B, C) each needing its own
@@ -890,6 +904,11 @@ model BatchDispensingLine {
   itemId            String
   // What the Day Store actually weighed out and gave (the plan quantity when nothing different was entered).
   quantity          Float
+  // What the Day Store gave in this round, before any short receipt reduced `quantity`. A material can be dispensed in several rounds
+  // (partial dispensing); what is still to give counts these. Null on lines made before rounds existed (then `quantity` is used).
+  givenQty          Float?
+  // The GRN of the round this line was dispensed in (see nextGrnNo): the batch's first round, then the same number with A, B, ... added.
+  grnNo             String?
   // What the plan asked for, kept so the weighing difference stays visible. Null on lines made before this existed.
   plannedQty        Float?
   unit              String
@@ -1088,6 +1107,9 @@ model ProductionBatch {
   // FG Store, release, billing, dispatch) belongs to other departments; this only marks the batch as "from Production" for Dispatch.
   handedOverToDispatchAt DateTime?
   handedOverById         String?
+  // Production's hand-over to the Day Store: once QA has approved the packed goods (the batch is then at FG Store) Production hands them over, and only
+  // then do they show in the Day Store's finished goods. Null until then.
+  handedToStoreAt        DateTime?
   fgShipments            FgShipment[]
   customerReturns        CustomerReturn[]
   reworks                Rework[]
@@ -1972,6 +1994,9 @@ model RecipeRequest {
 enum InventoryCategory {
   RM
   PM
+  // Consumables that are neither raw nor packaging material (gloves, masks, cleaning material ...): typed in by Production on an extra request,
+  // then the same Store -> Warehouse -> PPIC -> Purchase chain. They have no Utilization sheet.
+  OTHER
 }
 
 enum InventoryTxnType {
@@ -2529,8 +2554,10 @@ model InventoryRequest {
   // extraForPoItemId is an optional note of which product it is for - it does not make the request a plan request.
   isExtra          Boolean @default(false)
   extraForPoItemId String?
-  // The batch an extra request is for (R&D changed the BOM after the batch was dispensed: what the new version needs beyond what it was given).
+  // The batch an extra request is for (Production's extra material, or R&D's BOM change after the batch was dispensed: what the new version needs beyond what it was given).
   productionBatchId String?
+  // Production typed the material in because it was not in the item list: the item was created by this request (the Store, Warehouse and PPIC see it flagged).
+  newMaterial Boolean @default(false)
 
   // Soft delete — this is the "withdraw" action on a request Store hasn't
   // issued anything against yet.
@@ -3509,6 +3536,8 @@ model SampleRound {
 // what the OCR read; BD checks every field and saves it as VERIFIED. `confidence` is the OCR's 0..1 per field (the screen highlights the unsure
 // ones), `ocrLines` the raw lines it read (BD can tap one to fill a field). `customerId` is set once the card has been turned into a Customer.
 enum BusinessCardStatus {
+  // A scan whose photo is still being read in the background (the fields fill in when it is done)
+  READING
   NEEDS_VERIFY
   VERIFIED
 }
@@ -3536,13 +3565,22 @@ model BusinessCard {
   verifiedAt  DateTime?
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt
+  // The event the card was collected at (every department can collect cards there); "" = none.
+  event       String             @default("")
+  // Why the photo could not be read (the card then waits for its fields to be typed in)
+  readError   String?
+  // The earlier card this one may duplicate (same email or phone): flagged, never blocked. BD keeps one and deletes the other.
+  duplicateOfId String?
 
-  customer  Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  createdBy User      @relation("BusinessCardCreatedBy", fields: [createdById], references: [id])
-  lead      Lead?
+  customer    Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy   User           @relation("BusinessCardCreatedBy", fields: [createdById], references: [id])
+  lead        Lead?
+  duplicateOf BusinessCard?  @relation("CardDuplicate", fields: [duplicateOfId], references: [id], onDelete: SetNull)
+  duplicates  BusinessCard[] @relation("CardDuplicate")
 
   @@index([createdById, status])
   @@index([company])
+  @@index([event])
   @@map("business_cards")
 }
 

@@ -110,7 +110,7 @@ rndStoreRouter.post("/transfers", validateBody(createRndTransferSchema), async (
       // (POST /requests/:id/fulfill) — Store can no longer push a sample
       // out of thin air any more than it can issue to Production without
       // an InventoryRequest. ADMIN keeps a direct override for edge cases.
-      if (!isAdmin) return res.status(403).json({ error: "Store can no longer send a sample directly — fulfill an R&D request instead." });
+      if (!isAdmin) return res.status(403).json({ error: "Warehouse can no longer send a sample directly — fulfill an R&D request instead." });
 
       const item = await prisma.inventoryItem.findUnique({ where: { id: itemId } });
       if (!item) return res.status(400).json({ error: "Unknown inventory item" });

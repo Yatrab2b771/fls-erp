@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock, issueToPlant } from "./helpers";
 import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
@@ -59,7 +59,7 @@ describe("Inventory module", () => {
     expect(txns.body[0].item.name).toBe("Whey Protein");
   });
 
-  it("computes stock on hand as sum(RECEIVED) - sum(ISSUED_DAY_STORE) - sum(ISSUED_PRODUCTION) per item", async () => {
+  it("computes the Warehouse's stock on hand as sum(RECEIVED) - sum(ISSUED_DAY_STORE) per item (what goes on from a Store to a Plant is not a Warehouse issue)", async () => {
     const { token } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: rndToken } = await createUser(["RND"]);
@@ -77,21 +77,22 @@ describe("Inventory module", () => {
 
     await request(app).post("/api/inventory/transactions").set(authHeader(token)).send({ itemId, type: "ISSUED_DAY_STORE", date: "2026-08-03", unit: "Kg", quantity: 30 });
 
-    // ISSUED_PRODUCTION can only reach the ledger through an approved
-    // Material Request — see the dedicated describe block below.
+    // Material for a Plant can only reach it through an approved Material Request, issued from a Day Store (the Warehouse sends it to the Day
+    // Store first) — see the dedicated describe block below.
     const req = await request(app).post("/api/inventory/requests").set(authHeader(ppicToken)).send({ itemId, category: "RM", requestedQty: 20, purpose: "ISSUED_PRODUCTION" });
     await request(app).patch(`/api/inventory/requests/${req.body.id}/review`).set(authHeader(token)).send({ action: "APPROVE" });
-    await request(app).post(`/api/inventory/requests/${req.body.id}/issue`).set(authHeader(token)).send({ date: "2026-08-04", unit: "Kg", quantity: 20, dayStoreId: null });
+    await issueToPlant(token, req.body.id, { date: "2026-08-04", unit: "Kg", quantity: 20 });
 
     const stock = await request(app).get("/api/inventory/stock").set(authHeader(token));
     expect(stock.status).toBe(200);
     expect(stock.body).toEqual([
-      expect.objectContaining({ receivedQty: 150, issuedDayStoreQty: 30, issuedProductionQty: 20, issuedQty: 50, onHand: 100 }),
+      // 30 sent to a Day Store by hand + 20 sent to the Plant's own Day Store for the request: 50 left the Warehouse, none as a production issue
+      expect.objectContaining({ receivedQty: 150, issuedDayStoreQty: 50, issuedProductionQty: 0, issuedQty: 50, onHand: 100 }),
     ]);
   });
 
   describe("concurrent issues can't jointly overdraw stock (SERIALIZABLE gate)", () => {
-    it("two Store users issuing the same item to a Day Store at once: exactly one succeeds, the other is rejected, stock never goes negative", async () => {
+    it("two Store users issuing the same item to a Store at once: exactly one succeeds, the other is rejected, stock never goes negative", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
       const { token: rndToken } = await createUser(["RND"]);
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
@@ -180,10 +181,7 @@ describe("Inventory module", () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
-    const received = await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
+    const received = await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 100, isOpeningStock: true });
     await request(app)
       .post("/api/inventory/transactions")
       .set(authHeader(storeToken))
@@ -198,10 +196,7 @@ describe("Inventory module", () => {
     expect(stock.body[0].onHand).toBe(20); // untouched — the delete never happened
 
     // A second RECEIVED row not otherwise depended on deletes cleanly.
-    const spare = await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-03", unit: "Kg", quantity: 5, isOpeningStock: true });
+    const spare = await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-03", unit: "Kg", quantity: 5, isOpeningStock: true });
     const okDelete = await request(app).delete(`/api/inventory/transactions/${spare.body.id}`).set(authHeader(storeToken));
     expect(okDelete.status).toBe(204);
 
@@ -270,7 +265,7 @@ describe("Inventory module", () => {
         .set(authHeader(adminToken))
         .send({ itemId: item.body.id, type: "ISSUED_PRODUCTION", date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: dayStore.body.id });
       expect(asAdmin.status).toBe(201);
-      expect(asAdmin.body.plantId).toBeTruthy(); // landed in the Day Store's own paired Plant
+      expect(asAdmin.body.plantId).toBeTruthy(); // landed in the Store's own paired Plant
     });
 
     it("only PPIC can raise a request; only Store can review or issue it", async () => {
@@ -278,10 +273,7 @@ describe("Inventory module", () => {
       const { token: ppicToken } = await createUser(["PPIC"]);
       const { token: plainToken } = await createUser([]);
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-      await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
+      await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
 
       const deniedCreate = await request(app)
         .post("/api/inventory/requests")
@@ -306,17 +298,11 @@ describe("Inventory module", () => {
       const deniedIssue = await request(app).post(`/api/inventory/requests/${created.body.id}/issue`).set(authHeader(ppicToken)).send({ date: "2026-08-01", unit: "Kg", quantity: 10 });
       expect(deniedIssue.status).toBe(403);
 
-      const issued = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: null });
+      const issued = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 10 });
       expect(issued.status).toBe(201);
       expect(issued.body.type).toBe("ISSUED_PRODUCTION");
 
-      const doubleIssue = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: null });
+      const doubleIssue = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 10 });
       expect(doubleIssue.status).toBe(409);
     });
 
@@ -327,10 +313,7 @@ describe("Inventory module", () => {
 
       // Issuing checks live stock, not just the request's own remaining
       // balance — give the item real stock via Opening Stock first.
-      await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 300, isOpeningStock: true });
+      await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 300, isOpeningStock: true });
 
       const created = await request(app)
         .post("/api/inventory/requests")
@@ -341,16 +324,10 @@ describe("Inventory module", () => {
       await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
 
       // Can't issue more than what's actually left.
-      const tooMuch = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 301, dayStoreId: null });
+      const tooMuch = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 301 }, { fund: 300 });
       expect(tooMuch.status).toBe(400);
 
-      const firstIssue = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 150, dayStoreId: null });
+      const firstIssue = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 150 });
       expect(firstIssue.status).toBe(201);
 
       const afterFirst = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
@@ -361,20 +338,14 @@ describe("Inventory module", () => {
       expect(row.fulfillments).toHaveLength(1);
 
       // Still can't exceed the new remaining balance.
-      const stillTooMuch = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-05", unit: "Kg", quantity: 151, dayStoreId: null });
+      const stillTooMuch = await issueToPlant(storeToken, created.body.id, { date: "2026-08-05", unit: "Kg", quantity: 151 }, { fund: 150 });
       expect(stillTooMuch.status).toBe(400);
 
       // Withdrawing a partially-issued request is blocked — real ledger transactions exist against it.
       const deniedDelete = await request(app).delete(`/api/inventory/requests/${created.body.id}`).set(authHeader(ppicToken));
       expect(deniedDelete.status).toBe(409);
 
-      const secondIssue = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-05", unit: "Kg", quantity: 150, dayStoreId: null });
+      const secondIssue = await issueToPlant(storeToken, created.body.id, { date: "2026-08-05", unit: "Kg", quantity: 150 });
       expect(secondIssue.status).toBe(201);
 
       const afterSecond = await request(app).get("/api/inventory/requests").set(authHeader(ppicToken));
@@ -384,8 +355,10 @@ describe("Inventory module", () => {
       expect(finalRow.remainingQty).toBe(0);
       expect(finalRow.fulfillments).toHaveLength(2);
 
+      // The material reached the Plant from its Day Store, so on the Warehouse's books it is what the Warehouse sent to that Day Store
       const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
-      expect(stock.body[0].issuedProductionQty).toBe(300);
+      expect(stock.body[0].issuedDayStoreQty).toBe(300);
+      expect(stock.body[0].issuedProductionQty).toBe(0);
     });
 
     it("blocks issuing more than what's actually on hand, even when the request's own remaining balance allows it", async () => {
@@ -401,24 +374,15 @@ describe("Inventory module", () => {
         .send({ itemId: item.body.id, category: "RM", requestedQty: 5, purpose: "ISSUED_DAY_STORE" });
       await request(app).patch(`/api/inventory/requests/${created.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
 
-      const blocked = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 5, dayStoreId: null });
+      const blocked = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 5 });
       expect(blocked.status).toBe(409);
 
       const stockAfter = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
       expect(stockAfter.body[0].onHand).toBe(0); // still 0 — nothing actually moved
 
       // Once real stock exists, the same request can be issued for real.
-      await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 5, isOpeningStock: true });
-      const allowed = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-02", unit: "Kg", quantity: 5, dayStoreId: null });
+      await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 5, isOpeningStock: true });
+      const allowed = await issueToPlant(storeToken, created.body.id, { date: "2026-08-02", unit: "Kg", quantity: 5 });
       expect(allowed.status).toBe(201);
     });
 
@@ -441,10 +405,7 @@ describe("Inventory module", () => {
       expect(rejected.status).toBe(200);
       expect(rejected.body.status).toBe("REJECTED");
 
-      const issueRejected = await request(app)
-        .post(`/api/inventory/requests/${created.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-01", unit: "Kg", quantity: 10, dayStoreId: null });
+      const issueRejected = await issueToPlant(storeToken, created.body.id, { date: "2026-08-01", unit: "Kg", quantity: 10 });
       expect(issueRejected.status).toBe(409);
     });
 
@@ -754,9 +715,12 @@ describe("Inventory module", () => {
     });
   });
 
-  describe("Opening Stock — one-time go-live migration, skips the inward QC gate", () => {
-    it("a single entry counts toward stock immediately, already ACCEPTED, no QC step needed", async () => {
+  // There is no Opening Stock shortcut any more (see POST /transactions): a Received entry always waits for R&D's inward QC, and only then counts as
+  // stock. The old isOpeningStock flag is just ignored, wherever it is sent.
+  describe("No Opening Stock shortcut - every Received entry goes through inward QC", () => {
+    it("an entry sent with isOpeningStock is an ordinary one: PENDING_QC, not stock until R&D approves it", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
+      const { token: rndToken } = await createUser(["RND"]);
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
       const created = await request(app)
@@ -764,36 +728,27 @@ describe("Inventory module", () => {
         .set(authHeader(storeToken))
         .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 250, isOpeningStock: true });
       expect(created.status).toBe(201);
-      expect(created.body.isOpeningStock).toBe(true);
-      expect(created.body.receiptStatus).toBe("ACCEPTED");
-      expect(created.body.acceptedBy.id).toBeTruthy();
+      expect(created.body.isOpeningStock).toBe(false);
+      expect(created.body.receiptStatus).toBe("PENDING_QC");
 
-      const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
-      expect(stock.body[0]).toEqual(expect.objectContaining({ receivedQty: 250, onHand: 250 }));
+      const before = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(before.body[0] ?? { onHand: 0 }).toEqual(expect.objectContaining({ onHand: 0 }));
 
-      // A normal (non-opening-stock) entry still goes through PENDING_QC as usual.
-      const normal = await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 10 });
-      expect(normal.body.isOpeningStock).toBe(false);
-      expect(normal.body.receiptStatus).toBe("PENDING_QC");
+      await request(app).patch(`/api/inventory/transactions/${created.body.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
+      const after = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
+      expect(after.body[0]).toEqual(expect.objectContaining({ receivedQty: 250, onHand: 250 }));
     });
 
-    it("is rejected for any non-RECEIVED type", async () => {
+    it("the flag does not let an issue skip the stock check", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
-      const res = await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "ISSUED_DAY_STORE", date: "2026-08-21", unit: "Kg", quantity: 10, isOpeningStock: true });
-      expect(res.status).toBe(400);
+      const res = await request(app).post("/api/inventory/transactions").set(authHeader(storeToken)).send({ itemId: item.body.id, type: "ISSUED_DAY_STORE", date: "2026-08-21", unit: "Kg", quantity: 10, isOpeningStock: true });
+      expect(res.status).toBe(409); // nothing on hand
     });
 
-    it("bulk import loads every row as ACCEPTED, counts toward stock immediately, and never notifies R&D", async () => {
+    it("a bulk import with isOpeningStock loads every row as PENDING_QC: nothing counts as stock until R&D approves it", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
-      const { token: rndToken } = await createUser(["RND"]);
 
       const imported = await request(app)
         .post("/api/inventory/transactions/import")
@@ -810,18 +765,8 @@ describe("Inventory module", () => {
       expect(imported.body).toEqual({ transactionsCreated: 2, itemsCreated: 2, dayStoresCreated: 0 });
 
       const stock = await request(app).get("/api/inventory/stock").set(authHeader(storeToken));
-      expect(stock.body).toEqual(
-        expect.arrayContaining([expect.objectContaining({ receivedQty: 300, onHand: 300 }), expect.objectContaining({ receivedQty: 1000, onHand: 1000 })]),
-      );
-
-      const rndInbox = await request(app).get("/api/notifications").set(authHeader(rndToken));
-      expect(rndInbox.body.unreadCount).toBe(0);
-
-      const rejected = await request(app)
-        .post("/api/inventory/transactions/import")
-        .set(authHeader(storeToken))
-        .send({ type: "ISSUED_DAY_STORE", isOpeningStock: true, rows: [{ category: "RM", itemName: "Whey Protein", date: "2026-08-21", unit: "Kg", quantity: 10 }] });
-      expect(rejected.status).toBe(400);
+      expect(stock.body.every((s: { onHand: number }) => s.onHand === 0)).toBe(true);
+      expect(await prisma.inventoryTransaction.count({ where: { type: "RECEIVED", receiptStatus: "PENDING_QC", isOpeningStock: false } })).toBeGreaterThanOrEqual(2);
     });
   });
 
@@ -897,7 +842,7 @@ describe("Inventory module", () => {
       expect(rejectedAfterHold.body.qcStatus).toBe("QC_REJECTED");
     });
 
-    it("two QA_QC users acting on the same reviewable transfer at once (one Hold, one Approve): exactly one lands", async () => {
+    it("two QA_QC users giving a final decision on the same reviewable transfer at once (one Approve, one Reject): exactly one lands", async () => {
       const { token: storeToken } = await createUser(["STORE"]);
       const { token: qaToken1 } = await createUser(["QA_QC"]);
       const { token: qaToken2 } = await createUser(["QA_QC"]);
@@ -909,7 +854,8 @@ describe("Inventory module", () => {
         .send({ type: "FG", date: "2026-08-10", customerId: customer.body.id, productName: "Whey Protein 1Kg Jar", quantity: 200 });
 
       const [a, b] = await Promise.all([
-        request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(qaToken1)).send({ action: "HOLD", note: "Checking something" }),
+        // (A Hold is not a final decision - a held transfer is still reviewable - so a Hold and an Approve can both land, in that order.)
+        request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(qaToken1)).send({ action: "REJECT", note: "Checking something" }),
         request(app).patch(`/api/inventory/dispatch-transfers/${fg.body.id}/qc`).set(authHeader(qaToken2)).send({ action: "APPROVE" }),
       ]);
       expect([a.status, b.status].sort()).toEqual([200, 409]);
@@ -960,10 +906,7 @@ describe("Inventory module", () => {
       const { token: ppicToken } = await createUser(["PPIC"]);
       const { token: bdToken } = await createUser(["BD"]);
       const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
-      await request(app)
-        .post("/api/inventory/transactions")
-        .set(authHeader(storeToken))
-        .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
+      await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
       const customer = await request(app).post("/api/customers").set(authHeader(bdToken)).send({ companyName: "Acme Nutrition Pvt. Ltd." });
 
       const pendingRequest = await request(app)
@@ -984,10 +927,7 @@ describe("Inventory module", () => {
       expect(linkToBill.status).toBe(400);
 
       await request(app).patch(`/api/inventory/requests/${pendingRequest.body.id}/review`).set(authHeader(storeToken)).send({ action: "APPROVE" });
-      await request(app)
-        .post(`/api/inventory/requests/${pendingRequest.body.id}/issue`)
-        .set(authHeader(storeToken))
-        .send({ date: "2026-08-09", unit: "Kg", quantity: 10, dayStoreId: null });
+      await issueToPlant(storeToken, pendingRequest.body.id, { date: "2026-08-09", unit: "Kg", quantity: 10 });
 
       const linkToIssued = await request(app)
         .post("/api/inventory/dispatch-transfers")
@@ -1158,24 +1098,20 @@ describe("Inventory item pricing", () => {
     expect(asAccounts.body.costPrice).toBe(300);
   });
 
-  it("GET /items and GET /stock strip pricing for every role except Purchase/Accounts/Admin", async () => {
+  it("GET /items and GET /stock strip pricing for every role except Purchase/Accounts/Store/Admin", async () => {
     const { token: storeToken } = await createUser(["STORE"]);
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: purchaseToken } = await createUser(["PURCHASE"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Pricing Visibility Item" });
     await request(app).patch(`/api/inventory/items/${item.body.id}/pricing`).set(authHeader(purchaseToken)).send({ costPrice: 300, mrp: 450, purchasePrice: 280, salesPrice: 400 });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: item.body.id, type: "RECEIVED", date: "2026-08-01", unit: "Kg", quantity: 10, isOpeningStock: true });
 
-    // Store — created the item, still doesn't see the price.
+    // Store sees it too (read only): it handles the stock and wants the value on the ledger.
     const asStore = await request(app).get("/api/inventory/items?category=RM").set(authHeader(storeToken));
     const storeItem = asStore.body.find((i: { id: string }) => i.id === item.body.id);
-    expect("costPrice" in storeItem).toBe(false);
-    expect("mrp" in storeItem).toBe(false);
+    expect(storeItem).toMatchObject({ costPrice: 300, mrp: 450 });
 
-    // PPIC via the stock view either.
+    // PPIC doesn't, in the stock view either.
     const stockAsPpic = await request(app).get("/api/inventory/stock?category=RM").set(authHeader(ppicToken));
     const stockRow = stockAsPpic.body.find((r: { item: { id: string } }) => r.item.id === item.body.id);
     expect("salesPrice" in stockRow.item).toBe(false);

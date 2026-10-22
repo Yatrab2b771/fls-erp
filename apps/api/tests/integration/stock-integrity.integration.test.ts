@@ -36,7 +36,7 @@ const issueToStore = (s: Awaited<ReturnType<typeof setup>>, quantity: number) =>
   prisma.inventoryTransaction.create({ data: { ...s.base, type: "ISSUED_DAY_STORE", quantity, dayStoreId: s.storeA.id, deliveredAt: new Date() } });
 
 describe("Expiry is applied first-expiry-first-out: stock issued before it expired never turns the Warehouse negative", () => {
-  it("receive 100, issue 60, the rest expires: Warehouse 0 (not -60), 40 sits in Quarantine, the Day Store still has its 60", async () => {
+  it("receive 100, issue 60, the rest expires: Warehouse 0 (not -60), 40 sits in Quarantine, the Store still has its 60", async () => {
     const s = await setup(100);
     await issueToStore(s, 60);
     await prisma.inventoryTransaction.update({ where: { id: s.receipt!.id }, data: { expiryDate: inDays(-1) } }); // time passes
@@ -95,7 +95,7 @@ describe("Stock corrections: raised by the place, approved by a second person, o
     expect((await raise(s.accounts.token, { itemId: s.item.id, locationType: "WAREHOUSE", mode: "DELTA", quantityDelta: 1, note: "Accounts cannot raise" })).status).toBe(403);
   });
 
-  it("only the right seat corrects a place: a Day Store login its own store, not the Warehouse", async () => {
+  it("only the right seat corrects a place: a Store login its own store, not the Warehouse", async () => {
     const s = await setup(100);
     await issueToStore(s, 30);
     const own = await raise(s.storeAUser.token, { itemId: s.item.id, locationType: "DAY_STORE", dayStoreId: s.storeA.id, mode: "COUNT", countedQty: 28, note: "Two sacks short" });
@@ -198,7 +198,7 @@ describe("Material in transit: short receipt, refusal, and it is never in no led
 });
 
 describe("The Material Reconciliation no longer raises false alarms", () => {
-  it("returns from R&D / a Day Store, expired stock and material in transit all reconcile to a variance of 0", async () => {
+  it("returns from R&D / a Store, expired stock and material in transit all reconcile to a variance of 0", async () => {
     const s = await setup(100);
     await issueToStore(s, 50);
     // A Day Store returns 10 to the Warehouse (confirmed), and sends 5 more that is still on its way
@@ -293,7 +293,7 @@ describe("Lots: stock is issued oldest-expiry first, never from an expired lot, 
     const expiring = await request(app).get("/api/inventory/lots/expiring?days=60").set(authHeader(s.warehouse.token));
     const keys = expiring.body.map((l: { grnNo: string; place: string }) => `${l.grnNo}@${l.place}`);
     expect(keys).toContain("L-EXPIRED@Warehouse");
-    expect(keys).toContain(`L-SOON@Day Store: ${s.storeA.name}`);
+    expect(keys).toContain(`L-SOON@Store: ${s.storeA.name}`);
   });
 
   it("deleting an issue gives its lots back", async () => {

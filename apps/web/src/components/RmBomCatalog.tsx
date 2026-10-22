@@ -492,7 +492,7 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
           <table className="w-full min-w-[46rem] text-left text-xs">
             <thead className="bg-slate-50 text-micro font-bold uppercase tracking-wide text-slate-400">
               <tr>
-                <th className="px-2 py-2">Ingredient (Store RM item)</th>
+                <th className="px-2 py-2">Ingredient (Warehouse RM item)</th>
                 <th className="px-2 py-2">Make</th>
                 <th className="w-14 px-2 py-2">UOM</th>
                 <th className="w-28 px-2 py-2 text-right">{unit ? "Qty / gummy" : "Qty / Kg"}</th>
@@ -511,9 +511,9 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
                   <td className="min-w-[15rem] px-2 py-1.5">
                     {canEdit ? (
                       <>
-                        <ItemPicker items={itemOptions} value={r.itemId} onChange={(id) => pickItem(r.key, id)} placeholder="- Pick Store item -" />
+                        <ItemPicker items={itemOptions} value={r.itemId} onChange={(id) => pickItem(r.key, id)} placeholder="- Pick Warehouse item -" />
                         {!r.itemId && (
-                          <input className="field mt-1 !py-1 text-xs" placeholder="Ingredient name (not in Store list)" value={r.name} onChange={(e) => setRow(r.key, { name: e.target.value })} />
+                          <input className="field mt-1 !py-1 text-xs" placeholder="Ingredient name (not in Warehouse list)" value={r.name} onChange={(e) => setRow(r.key, { name: e.target.value })} />
                         )}
                       </>
                     ) : (
@@ -521,7 +521,7 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
                     )}
                     {!r.itemId && r.name.trim() && (
                       <p className="mt-0.5 flex items-center gap-1 text-micro font-semibold text-amber-600">
-                        <AlertTriangle className="h-3 w-3" /> Not in Store list: {r.name}
+                        <AlertTriangle className="h-3 w-3" /> Not in Warehouse list: {r.name}
                       </p>
                     )}
                   </td>
@@ -567,7 +567,7 @@ function RecipeEditor({ productName, customerId, customerLabel, canEdit: canEdit
               <Plus className="h-3 w-3" strokeWidth={2.5} /> Add ingredient
             </button>
             <div className="flex flex-wrap items-center gap-2">
-              {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Store item</span>}
+              {unlinked > 0 && <span className="text-micro text-amber-600">{unlinked} row(s) not linked to a Warehouse item</span>}
               <input className="field !h-7 !w-48 !py-0 text-xs" placeholder="What changed? (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
               <button type="button" className="btn-primary btn-sm" disabled={importRecipes.isPending || saveSlot.isPending || !dirty} onClick={handleSave}>
                 {importRecipes.isPending || saveSlot.isPending ? "Saving..." : slot ? `Save ${slot}` : "Save recipe"}

@@ -49,6 +49,9 @@ async function call<T = any>(role: RoleName, method: "get" | "post" | "patch" | 
 }
 
 const day = (offset = 0) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+/** The Store receives what the Warehouse issued it (it is in transit until then): Admin acts as the Store. */
+const receiveAtStore = (txn: { id: string }) => call("ADMIN", "post", `/api/inventory/transactions/${txn.id}/confirm-delivery`, {});
+
 
 // ---------------------------------------------------------------------------------------------------------------------
 // masters: items, stock, recipes, packaging BOMs
@@ -96,7 +99,7 @@ async function main() {
   let plants = await prisma.plant.findMany({ where: { dayStoreId: { not: null } }, orderBy: { name: "asc" }, take: 2, select: { id: true, name: true, dayStoreId: true } });
   if (plants.length < 2) {
     for (const n of [1, 2]) {
-      const ds = await prisma.dayStore.create({ data: { name: `DEMO Day Store ${n}`, createdById: admin.id } });
+      const ds = await prisma.dayStore.create({ data: { name: `DEMO Store ${n}`, createdById: admin.id } });
       await prisma.plant.create({ data: { name: `DEMO Plant ${n}`, createdById: admin.id, dayStoreId: ds.id } });
     }
     plants = await prisma.plant.findMany({ where: { dayStoreId: { not: null } }, orderBy: { name: "asc" }, take: 2, select: { id: true, name: true, dayStoreId: true } });
@@ -107,7 +110,7 @@ async function main() {
     if (await prisma.dayStoreAssignment.findFirst({ where: { dayStoreId: p.dayStoreId! } })) continue;
     const store = await prisma.dayStore.findUniqueOrThrow({ where: { id: p.dayStoreId! }, select: { name: true } });
     const role = await prisma.role.upsert({ where: { name: "STORE" }, create: { name: "STORE" }, update: {} });
-    const u = await prisma.user.create({ data: { email: `daystore-${p.dayStoreId!.slice(0, 6)}@fls.local`, fullName: `${store.name} (Day Store login)`, passwordHash: await bcrypt.hash("Password123!", 10) } });
+    const u = await prisma.user.create({ data: { email: `daystore-${p.dayStoreId!.slice(0, 6)}@fls.local`, fullName: `${store.name} (Store login)`, passwordHash: await bcrypt.hash("Password123!", 10) } });
     await prisma.userRole.create({ data: { userId: u.id, roleId: role.id } });
     await prisma.dayStoreAssignment.create({ data: { userId: u.id, dayStoreId: p.dayStoreId! } });
   }
@@ -225,7 +228,7 @@ async function main() {
   await call("PURCHASE", "patch", `/api/inventory/requirements/${gelatin.id}/purchase`, { poNumber: "DEMO-PI-001", vendorName: "DEMO Gelatin Traders", eta: day(14), quantity: Math.round(gelatin.requiredQty * 0.6) });
 
   // ---- Production and after: a second PO whose products each go one step further
-  const names = ["Run: waiting for Production to open the run", "Run: material at the Day Store", "Run: indent", "Run: dispensing", "Run: line clearance with QA", "Run: line clearance done", "Batch: IPQC", "Batch: QA gate (manufacturing)", "Batch: bulk QC", "Batch: packaging", "Batch: QA gate (packaging)", "Batch: FG store", "Batch: FG QC release", "Batch: handover", "Dispatch: with Dispatch", "Dispatch: part sent", "Completed", "Held by PPIC after it was sent", "Cancelled after the run was opened", "Batch: QA gate (manufacturing) on QA hold", "More: Material Received", "More: IPQC", "More: Dispensing", "More: QA gate (packaging)", "More: FG store", "More: FG QC release", "More: FG handover", "More: material covered at the Day Store (1)", "More: material covered at the Day Store (2)"];
+  const names = ["Run: waiting for Production to open the run", "Run: material at the Store", "Run: indent", "Run: dispensing", "Run: line clearance with QA", "Run: line clearance done", "Batch: IPQC", "Batch: QA gate (manufacturing)", "Batch: bulk QC", "Batch: packaging", "Batch: QA gate (packaging)", "Batch: FG store", "Batch: FG QC release", "Batch: handover", "Dispatch: with Dispatch", "Dispatch: part sent", "Completed", "Held by PPIC after it was sent", "Cancelled after the run was opened", "Batch: QA gate (manufacturing) on QA hold", "More: Material Received", "More: IPQC", "More: Dispensing", "More: QA gate (packaging)", "More: FG store", "More: FG QC release", "More: FG handover", "More: material covered at the Store (1)", "More: material covered at the Store (2)", "More: FG store (handed over to the store)"];
   const prodProducts = names.map((n, i) => powder(`DEMO ${String(i + 1).padStart(2, "0")} ${n}`));
   const poB = await makePo(beta.id, "DEMO-PO-B", prodProducts.map((product) => ({ product, qty: 100 })), "APPROVED");
   for (const [i, product] of prodProducts.entries()) {
@@ -245,7 +248,7 @@ async function main() {
   await call("PPIC", "patch", `/api/purchase-orders/${poB.id}/items/${byName("Held by PPIC after it was sent")}/material-hold`, { held: true });
   await call("PPIC", "patch", `/api/purchase-orders/${poB.id}/items/${byName("Cancelled after the run was opened")}/cancel`, { reason: "DEMO: customer dropped it after the run was opened" });
   // BD asks PPIC to hold a product: waiting for PPIC's answer
-  await call("BD", "post", "/api/item-change-requests", { purchaseOrderItemId: byName("Run: material at the Day Store"), kind: "HOLD", reason: "DEMO: customer may change the formula" });
+  await call("BD", "post", "/api/item-change-requests", { purchaseOrderItemId: byName("Run: material at the Store"), kind: "HOLD", reason: "DEMO: customer may change the formula" });
   // ---- Dispatch -> Warehouse finished goods: one request at every step, so the Warehouse Finished Goods list and FG tiles have stock.
   // The batch "with Dispatch, nothing shipped" (100) sends 25 requested, 25 accepted, 20 sent and 20 received; the "part sent" one (70 left)
   // sends 20 that the Warehouse has received, and one it refused.
@@ -292,9 +295,11 @@ async function main() {
 
   // ---- Production: extra material (outside any plan), and what the Plant did with it (used / wasted / rejected / sample)
   const cocoa = itemIds.get("DEMO Cocoa Powder")!;
-  const extraOf = (quantity: number, reason: string) => call<{ id: string }>("PRODUCTION", "post", "/api/inventory/extra-requests", { itemId: cocoa, requestedQty: quantity, reason, plantId: pA.id, neededBy: day(3) });
+  // Extra material is asked for one batch: the one at In-Process QA, at Plant A
+  const extraBatch = madeOf("Batch: IPQC").batchId!;
+  const extraOf = (quantity: number, reason: string) => call<{ id: string }>("PRODUCTION", "post", "/api/inventory/extra-requests", { itemId: cocoa, requestedQty: quantity, reason, productionBatchId: extraBatch, neededBy: day(3) });
   const issued = await extraOf(60, "DEMO: the dispensed batch ran short, more cocoa needed");
-  await call("STORE", "post", "/api/inventory/transactions", { itemId: cocoa, type: "ISSUED_DAY_STORE", date: day(-2), unit: "Kg", quantity: 60, dayStoreId: pA.dayStoreId });
+  await receiveAtStore(await call<{ id: string }>("STORE", "post", "/api/inventory/transactions", { itemId: cocoa, type: "ISSUED_DAY_STORE", date: day(-2), unit: "Kg", quantity: 60, dayStoreId: pA.dayStoreId }));
   await call("ADMIN", "patch", `/api/inventory/requests/${issued.id}/review`, { action: "APPROVE" });
   await call("ADMIN", "post", `/api/inventory/requests/${issued.id}/issue`, { date: day(-1), unit: "Kg", quantity: 60, dayStoreId: pA.dayStoreId });
   await extraOf(25, "DEMO: sample runs for the customer"); // still open
@@ -392,7 +397,7 @@ async function main() {
   await prisma.requirementPurchaseLine.updateMany({ where: { piNumber: "DEMO-PI-001" }, data: { loggedAt: new Date(Date.now() - 5 * 86_400_000) } });
   await prisma.financeDecision.updateMany({ where: { purchaseLine: { piNumber: "DEMO-PI-002" } }, data: { remarksAt: new Date(Date.now() - 4 * 86_400_000) } });
   console.log("Finance vendor payments done.");
-  console.log("Day Store requests to the Warehouse done.");
+  console.log("Store requests to the Warehouse done.");
 
   // Some waiting items have been waiting a while (the Admin Alerts list flags anything waiting more than 3 days)
   const ago = (days: number) => new Date(Date.now() - days * 86_400_000);
@@ -426,15 +431,15 @@ async function materialToDayStore(purchaseOrderItemId: string, issueToPlant = tr
     const unit = r.item.unit ?? (r.category === "RM" ? "Kg" : "Nos");
     const plant = r.plantId ? await prisma.plant.findUnique({ where: { id: r.plantId }, select: { dayStoreId: true } }) : null;
     const dayStoreId = r.requestingDayStoreId ?? plant?.dayStoreId;
-    if (!dayStoreId) throw new Error(`Request ${r.id} has no Day Store to send the material to.`);
-    await call("STORE", "post", "/api/inventory/transactions", { itemId: r.itemId, type: "ISSUED_DAY_STORE", date: day(-9), unit, quantity: r.requestedQty, dayStoreId });
-    if (!issueToPlant) continue; // the Day Store holds it all but has not sent it to the Plant yet: the product is "covered" at the store
+    if (!dayStoreId) throw new Error(`Request ${r.id} has no Store to send the material to.`);
+    await receiveAtStore(await call<{ id: string }>("STORE", "post", "/api/inventory/transactions", { itemId: r.itemId, type: "ISSUED_DAY_STORE", date: day(-9), unit, quantity: r.requestedQty, dayStoreId }));
+    if (!issueToPlant) continue; // the Store holds it all but has not sent it to the Plant yet: the product is "covered" at the store
     if (r.status === "PENDING") await call("ADMIN", "patch", `/api/inventory/requests/${r.id}/review`, { action: "APPROVE" });
     await call("ADMIN", "post", `/api/inventory/requests/${r.id}/issue`, { date: day(-8), unit, quantity: r.requestedQty, dayStoreId });
   }
 }
 
-type Goal = { run: -1 | 0 | 1 | 2 | 3 | 4; batch: boolean; batchSteps: number; handover: boolean; ship: number; qaHold?: boolean; coverStore?: boolean };
+type Goal = { run: -1 | 0 | 1 | 2 | 3 | 4; batch: boolean; batchSteps: number; handover: boolean; ship: number; qaHold?: boolean; coverStore?: boolean; storeHandover?: boolean };
 type Made = { runId?: string; batchId?: string };
 
 const BATCH_STEPS = ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING", "QA_GATE_PACKAGING", "FG_STORE", "FG_QC_RELEASE", "FG_HANDOVER"] as const;
@@ -460,11 +465,12 @@ const PO_B_GOALS: Goal[] = [
   { run: 4, batch: true, batchSteps: 0, handover: false, ship: 0 }, // IPQC
   { run: 2, batch: false, batchSteps: 0, handover: false, ship: 0 }, // Dispensing
   { run: 4, batch: true, batchSteps: 4, handover: false, ship: 0 }, // QA gate (packaging)
-  { run: 4, batch: true, batchSteps: 5, handover: false, ship: 0 }, // FG store
+  { run: 4, batch: true, batchSteps: 5, handover: false, ship: 0, storeHandover: true }, // FG store: Production has handed the approved goods over to the store
   { run: 4, batch: true, batchSteps: 6, handover: false, ship: 0 }, // FG QC release
   { run: 4, batch: true, batchSteps: 7, handover: false, ship: 0 }, // FG handover
-  { run: -1, batch: false, batchSteps: 0, handover: false, ship: 0, coverStore: true }, // all its material is at the Day Store, not yet sent to the Plant
-  { run: -1, batch: false, batchSteps: 0, handover: false, ship: 0, coverStore: true }, // (the other Day Store)
+  { run: -1, batch: false, batchSteps: 0, handover: false, ship: 0, coverStore: true }, // all its material is at the Store, not yet sent to the Plant
+  { run: -1, batch: false, batchSteps: 0, handover: false, ship: 0, coverStore: true }, // (the other Store)
+  { run: 4, batch: true, batchSteps: 5, handover: false, ship: 0, storeHandover: true }, // FG store handed over (the other Plant, so both Stores have goods to receive)
 ];
 
 async function runProduction(po: PoRef, products: Product[], goals: Goal[], tag = "B"): Promise<Map<string, Made>> {
@@ -492,19 +498,26 @@ async function runProduction(po: PoRef, products: Product[], goals: Goal[], tag 
     if (goal.run === 2 && i % 2 === 1) continue; // waits at Batch No (R&D)
     await call("RND", "post", `/api/production-batches/${batch.id}/batch-no/allocate`, { batchNo: `DEMO-${tag}${String(i + 1).padStart(2, "0")}` });
     if (goal.run === 2) continue; // waits at Dispensing
-    await call("ADMIN", "post", `/api/production-batches/${batch.id}/dispense`, { rmDispensingDate: day(-4), pmIssuedDate: day(-4), grnNo: `DEMO-GRN-${tag}${i + 1}`, dispensingRemarks: "DEMO: batch material dispensed" });
-    await receiveAll(batch.id); // Production confirms what the Day Store sent
+    await call("ADMIN", "post", `/api/production-batches/${batch.id}/dispense`, { rmDispensingDate: day(-4), pmIssuedDate: day(-4), dispensingRemarks: "DEMO: batch material dispensed" });
+    await receiveAll(batch.id); // Production confirms what the Store sent
     if (!goal.batch) continue; // ready, production not started
 
-    // Production runs the batch: the start fields, then the end and the bulk made. The Utilization comes later, at Packaging.
+    // Production starts the batch (the start fields): it is then at In-Process QA, still in production, and QA and R&D take it through the QA Gate and
+    // Bulk QC. Once Bulk QC has passed it comes back to Production: the RM Utilization of the whole batch (what it produced, and each plan material
+    // used as it was given), the end time and Send to Packaging. The PM Utilization comes later, at Packaging.
     const start = new Date(Date.now() - 4 * 86_400_000);
     await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shift: "Day", manpowerCount: 8, shiftStartAt: start.toISOString() });
-    await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed", outputQty: 100 });
-    await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/complete`, {});
     const util = (await call<{ utilization: { items: { itemId: string; category: string; unit: string; givenQty: number }[] } }[]>("PRODUCTION", "get", `/api/pre-productions/${run.id}/production-batches`)).find((b: any) => b.id === batch.id)!.utilization.items;
     // The Utilization of the whole batch: what was produced, and each material of the plan used as it was given.
     const saveUtilization = async (category: "RM" | "PM") =>
       call("PRODUCTION", "put", `/api/production-batches/${batch.id}/utilization/${category}`, { producedQty: 100, wasteQty: 0, rejectQty: 0, sampleQty: 0, lines: util.filter((x) => x.category === category).map((n) => ({ itemId: n.itemId, consumedQty: n.givenQty })) });
+    let sent = false;
+    const sendToPackaging = async () => {
+      await saveUtilization("RM");
+      await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}`, { shiftEndAt: new Date(start.getTime() + 9 * 3_600_000).toISOString(), manufacturingStatus: "Completed" });
+      await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/complete`, {});
+      sent = true;
+    };
 
     const step = (role: RoleName, body: Record<string, unknown>) => call(role, "patch", `/api/production-batches/${batch.id}/stage`, { action: "FORWARD", ...body });
     const bodies: [RoleName, Record<string, unknown>][] = [
@@ -520,15 +533,19 @@ async function runProduction(po: PoRef, products: Product[], goals: Goal[], tag 
     // goal.batchSteps = how many steps are already DONE (the batch then waits at the next one)
     for (let s = 0; s < Math.min(goal.batchSteps, bodies.length); s++) {
       if (s === 3) {
-        // Packaging: the PM Utilization, the packaging sheet (shift, manpower, start and end), then hand over to QA
-        await saveUtilization("RM");
+        if (!sent) await sendToPackaging();
+        // Packaging: the PM Utilization and the packaging sheet (shift, manpower, start and end); saving the finished sheet sends the batch to QA's packaging gate
         await saveUtilization("PM");
         await call("PRODUCTION", "patch", `/api/production-batches/${batch.id}/packaging`, { packagingShift: "Day", packagingManpowerCount: 6, packagingStartAt: new Date(Date.now() - 3 * 86_400_000).toISOString(), packagingEndAt: new Date(Date.now() - 2 * 86_400_000).toISOString(), packagingStatus: "Completed", packagingRemarks: "DEMO: packed" });
-        await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/handover`, {});
       } else {
+        // QA approved the packed goods (step 4): Production hands them over to the store, which makes them the Day Store's finished goods to receive
+        if (s === 5) await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/handover-to-store`, {});
         await step(bodies[s]![0], bodies[s]![1]);
       }
     }
+    if (goal.batchSteps >= 3 && !sent) await sendToPackaging(); // Bulk QC has passed and the batch was sent to Packaging: it waits there
+    // QA approved the packed goods and Production handed them over to the store: they are the Day Store's finished goods to receive (without this flag they wait for Production)
+    if (goal.storeHandover) await call("PRODUCTION", "post", `/api/production-batches/${batch.id}/handover-to-store`, {});
     made.set(product.name, { runId: run.id, batchId: batch.id });
     // QA holds the manufacturing gate: the batch stays there, marked On Hold
     if (goal.qaHold) await step("QA_QC", { mfgQaStatus: "Hold", mfgQcStatus: "Approved", mfgApprovedQty: 0, mfgRejectedQty: 0, mfgWastageQty: 0 }).catch(() => step("QA_QC", { mfgQaStatus: "Hold", mfgQcStatus: "Hold" }));

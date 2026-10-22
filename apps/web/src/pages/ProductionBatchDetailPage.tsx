@@ -75,11 +75,18 @@ export function ProductionBatchDetailPage() {
         </div>
       </div>
 
-      {batch.status !== "COMPLETED" ? (
+      {batch.status !== "COMPLETED" && !(batch.preProduction?.batchFlow && batch.shiftStartAt) ? (
         <EmptyState
           icon={Lock}
           title="Not ready for QC/packaging/dispatch yet"
-          hint="This run needs to be completed (output quantity recorded, back on its Pre-Production page) before it can move through its own pipeline."
+          hint={batch.preProduction?.batchFlow ? "Production has to start this batch first (shift, manpower, start date and time on the Batch tile): it then goes to In-Process QA." : "This run needs to be completed (output quantity recorded, back on its Pre-Production page) before it can move through its own pipeline."}
+          accent="amber"
+        />
+      ) : batch.status !== "COMPLETED" && batch.currentStageId === "PACKAGING" ? (
+        <EmptyState
+          icon={Lock}
+          title="Back with Production"
+          hint="Bulk QC has passed. Production now fills the RM Utilization and the end time on the Batch tile and sends the batch to Packaging; it then comes back to QA at the packaging gate."
           accent="amber"
         />
       ) : (

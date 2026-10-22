@@ -46,6 +46,8 @@ export interface StageRow {
   /** The run is at Line Clearance and QA has not approved it yet. */
   pendingLineClearance: boolean;
   handedOver: boolean;
+  /** A batch is at FG Store and Production has handed it over to the Day Store (so it is the Day Store's finished goods to receive). */
+  fgStoreHandedOver: boolean;
   /** The Day Store of the run's Plant (where Material Received, Dispensing and the finished goods are handled). */
   dayStoreId: string | null;
   remainingWithDispatch: number;
@@ -131,11 +133,13 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
               status: true,
               prepStageId: true,
               currentStageId: true,
+              shiftStartAt: true,
               outputQty: true,
               packApprovedQty: true,
               packQaStatus: true,
               fgQaStatus: true,
               handedOverToDispatchAt: true,
+              handedToStoreAt: true,
               fgShipments: { select: { type: true, status: true, quantity: true } },
               customerReturns: { select: { quantity: true } },
             },
@@ -184,7 +188,9 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
 
     for (const b of batches) {
       const label = `batch ${b.batchNo ?? b.id.slice(0, 6)}`;
-      if (b.currentStageId !== "IPQC" && b.status !== "COMPLETED") bad("batch-stage-without-completion", `${label} is at ${b.currentStageId} but was never completed.`);
+      // A per-batch-flow batch is at In-Process QA, the QA Gate and Bulk QC while still in production, and back with Production at Packaging until sent
+      const inProductionStage = !!run?.batchFlow && !!b.shiftStartAt && ["IPQC", "QA_GATE_MFG", "BULK_QC", "PACKAGING"].includes(b.currentStageId);
+      if (b.currentStageId !== "IPQC" && b.status !== "COMPLETED" && !inProductionStage) bad("batch-stage-without-completion", `${label} is at ${b.currentStageId} but was never completed.`);
       if (past(b.currentStageId, "QA_GATE_PACKAGING") && !(b.packApprovedQty && b.packApprovedQty > 0 && b.packQaStatus === "Approved")) {
         bad("batch-fg-without-packaging-approval", `${label} is at ${b.currentStageId} without an approved packed quantity.`);
       }
@@ -218,12 +224,13 @@ export async function checkDataIntegrity(): Promise<IntegrityReport> {
       product: item.productName,
       stage,
       planSent: !!item.planSentToProductionAt,
-      batchStages: batches.filter((b) => b.status === "COMPLETED").map((b) => b.currentStageId), // a batch still in production has no pipeline stage yet
+      batchStages: batches.filter((b) => b.status === "COMPLETED" || (run?.batchFlow && b.shiftStartAt)).map((b) => b.currentStageId), // a batch that has not started has no pipeline stage yet
       // a held or cancelled product's run is not Production's or the Day Store's to work on, so it is not "at" a run stage
       runStarted: !!run,
       runStage: run && !run.batchFlow && batches.length === 0 && stage === "PRE_PRODUCTION" ? run.currentStageId : null,
       pendingLineClearance: !!run && !run.batchFlow && batches.length === 0 && stage === "PRE_PRODUCTION" && run.currentStageId === "SAMPLE_QC_APPROVAL" && run.sampleQcStatus !== "Approved",
       handedOver: batches.some((b) => b.handedOverToDispatchAt),
+      fgStoreHandedOver: batches.some((b) => b.currentStageId === "FG_STORE" && b.handedToStoreAt),
       dayStoreId: run?.plant?.dayStoreId ?? null,
       remainingWithDispatch: batches.filter((b) => b.handedOverToDispatchAt).reduce((a, b) => a + Math.max(0, (b.packApprovedQty ?? 0) - sentOutOf(b)), 0),
     });

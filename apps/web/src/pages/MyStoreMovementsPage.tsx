@@ -1,12 +1,15 @@
 import { fmtQty } from "../lib/format";
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowDownToLine, ArrowLeft, Download, PackageOpen, Send } from "lucide-react";
-import { ApiError, api, apiAll } from "../lib/api";
+import { ArrowDownToLine, ArrowLeft, Check, Download, PackageOpen, Route, Send } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, api, apiAll, apiPage } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { usePagedList } from "../lib/usePagedList";
 import { appendParams, useTileFilters } from "../lib/tileFilters";
 import { exportMyStoreReport, type MyStoreRow } from "../lib/inventoryExport";
-import { useMyStoreInfo } from "../lib/hooks";
+import { useConfirmDelivery, useMyStoreInfo, useRejectDelivery } from "../lib/hooks";
+import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { Pagination } from "../components/Pagination";
 import { TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import type { OptionPage } from "../components/MultiSelectDropdown";
@@ -22,14 +25,14 @@ const COPY = {
     icon: ArrowDownToLine,
     dateLabel: "Received",
     by: "Issued By (Warehouse)",
-    empty: "Material shows here once the Warehouse issues it to your store.",
+    empty: "Material shows here once the Warehouse issues it to your store. Receive it here: it counts in your stock only after you do.",
   },
   "issued-to-plant": {
-    title: "Stock Issued to Plant",
+    title: "Dispensed to Plant",
     icon: Send,
     dateLabel: "Issued",
     by: "Issued By",
-    empty: "Issues show here once your store sends material to its Plant.",
+    empty: "What your store dispenses to its Plant shows here, batch and GRN wise (extra material too).",
   },
 } as const;
 
@@ -40,11 +43,25 @@ export function MyStoreMovementsPage({ kind }: { kind: "received" | "issued-to-p
   const Icon = copy.icon;
   const BASE = `/api/inventory/my-store/${kind}`;
   const toast = useToast();
+  const { hasRole } = useAuth();
+  const qc = useQueryClient();
+  const confirmDelivery = useConfirmDelivery();
+  const rejectDelivery = useRejectDelivery();
+  // What the Warehouse issues to a store is in transit until the store receives it, here: how much, or that it is refused (back to the Warehouse)
+  const canReceive = kind === "received" && hasRole("STORE");
+  const [receivingId, setReceivingId] = useState<string | null>(null);
   const { data: info } = useMyStoreInfo();
   const tileFilters = useTileFilters();
   const [exporting, setExporting] = useState(false);
   const paged = usePagedList<MyStoreRow>({ key: ["inventory", "my-store", kind, "list"], path: BASE, params: tileFilters.params, noSearch: true });
   const isFiltered = tileFilters.activeCount > 0;
+  // How many are still on the way to the store(s) this login sees (the same list, filtered to In Transit)
+  const { data: waiting } = useQuery({
+    queryKey: ["inventory", "my-store", kind, "in-transit-count"],
+    queryFn: async () => (await apiPage<MyStoreRow>(`${BASE}?status=In%20Transit&pageSize=1`)).total,
+    enabled: canReceive,
+  });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["inventory"] });
   const storeNames = (info?.stores ?? []).map((s) => s.name).join(", ");
 
   const serverList = (key: string, label: string): FilterField => ({
@@ -53,13 +70,35 @@ export function MyStoreMovementsPage({ kind }: { kind: "received" | "issued-to-p
     load: (q) => api<OptionPage>(`${BASE}/options?field=${key}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   });
   const fields: FilterField[] = [
-    ...(info?.scoped && info.stores.length === 1 ? [] : [serverList("store", "Day Store")]),
+    ...(info?.scoped && info.stores.length === 1 ? [] : [serverList("store", "Store")]),
     { key: "category", label: "Category", options: ["RM", "PM"] },
     serverList("item", "Item"),
     { key: "status", label: "Status", options: ["Delivered", "In Transit"] },
     serverList("batchNo", "Batch No"),
     serverList("grnNo", "GRN No"),
   ];
+
+  async function receive(id: string, got: ReceiveResult) {
+    try {
+      await confirmDelivery.mutateAsync({ id, note: got.note, receivedQty: got.receivedQty });
+      await refresh();
+      toast.success(got.receivedQty ? "Received. The shortage is recorded." : "Received. It now counts in your stock.");
+      setReceivingId(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not receive it");
+    }
+  }
+
+  async function refuse(id: string, reason: string) {
+    try {
+      await rejectDelivery.mutateAsync({ id, reason });
+      await refresh();
+      toast.success("Refused. It is back with the Warehouse.");
+      setReceivingId(null);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not refuse it");
+    }
+  }
 
   async function exportAll() {
     setExporting(true);
@@ -97,6 +136,16 @@ export function MyStoreMovementsPage({ kind }: { kind: "received" | "issued-to-p
         </button>
       </div>
 
+      {canReceive && !!waiting && (
+        <button
+          type="button"
+          onClick={() => tileFilters.applyPick("status", ["In Transit"])}
+          className="flex w-full items-center gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm font-bold text-amber-800 hover:bg-amber-100"
+        >
+          <Route className="h-4 w-4 shrink-0" strokeWidth={2.5} /> {waiting} entr{waiting === 1 ? "y is" : "ies are"} in transit: waiting for you to receive. Tap to show them.
+        </button>
+      )}
+
       <TileFilterBar filters={tileFilters} tileKey={`my-store-${kind}`} fields={fields} dateLabel={copy.dateLabel} />
 
       {paged.isLoading ? (
@@ -113,12 +162,13 @@ export function MyStoreMovementsPage({ kind }: { kind: "received" | "issued-to-p
                 <th className="px-4 py-3">Item</th>
                 <th className="px-4 py-3">Category</th>
                 <th className="px-4 py-3 text-right">Quantity</th>
-                <th className="px-4 py-3">Day Store</th>
+                <th className="px-4 py-3">Store</th>
                 {kind === "issued-to-plant" && <th className="px-4 py-3">Plant</th>}
                 <th className="px-4 py-3">Batch No</th>
                 <th className="px-4 py-3">GRN No</th>
                 <th className="px-4 py-3">Against</th>
                 <th className="px-4 py-3">{copy.by}</th>
+                {canReceive && <th className="px-4 py-3" />}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -137,8 +187,30 @@ export function MyStoreMovementsPage({ kind }: { kind: "received" | "issued-to-p
                   {kind === "issued-to-plant" && <td className="px-4 py-3 text-slate-700">{r.plantName ?? "—"}</td>}
                   <td className="px-4 py-3 text-slate-600">{r.batchNo ?? "—"}</td>
                   <td className="px-4 py-3 text-slate-600">{r.grnNo ?? "—"}</td>
-                  <td className="px-4 py-3 text-slate-500">{r.viaRequest ? "Material Request" : "Direct"}</td>
+                  <td className="px-4 py-3 text-slate-500">{r.isExtra ? "Extra material" : r.viaRequest ? "Material Request" : "Direct"}</td>
                   <td className="px-4 py-3 text-slate-500">{r.issuedBy}</td>
+                  {canReceive && (
+                    <td className="px-4 py-3 text-right">
+                      {r.status === "In Transit" && (
+                        <>
+                          <button type="button" className="btn-primary btn-sm" disabled={confirmDelivery.isPending || rejectDelivery.isPending} onClick={() => setReceivingId(r.id)}>
+                            <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> Receive
+                          </button>
+                          <ReceiveDialog
+                            open={receivingId === r.id}
+                            itemName={r.itemName}
+                            sentQty={r.quantity}
+                            unit={r.unit}
+                            from="the Warehouse"
+                            busy={confirmDelivery.isPending || rejectDelivery.isPending}
+                            onReceive={(got) => void receive(r.id, got)}
+                            onRefuse={(reason) => void refuse(r.id, reason)}
+                            onCancel={() => setReceivingId(null)}
+                          />
+                        </>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

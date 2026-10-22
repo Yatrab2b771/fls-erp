@@ -239,7 +239,7 @@ export function RndStorePage() {
       {isRnd && pendingRequests.length > 0 && (
         <div>
           <h2 className="mb-2 flex items-center gap-1.5 text-tiny font-bold uppercase tracking-wider text-slate-400">
-            <Clock className="h-3.5 w-3.5" /> Your Requests — Awaiting Store ({pendingRequests.length})
+            <Clock className="h-3.5 w-3.5" /> Your Requests — Awaiting Warehouse ({pendingRequests.length})
           </h2>
           <ListTable
             rows={pendingRequests}
@@ -296,7 +296,7 @@ export function RndStorePage() {
           <Beaker className="h-3.5 w-3.5" /> R&D Store — Current Stock
         </h2>
         {!stock || stock.length === 0 ? (
-          <EmptyState icon={Beaker} title="Nothing on hand" hint="Once Store sends a sample and R&D confirms it, it'll show here." accent="violet" />
+          <EmptyState icon={Beaker} title="Nothing on hand" hint="Once Warehouse sends a sample and R&D confirms it, it'll show here." accent="violet" />
         ) : (
           <div className="card overflow-x-auto">
             <table className="table-modern w-full">
@@ -471,7 +471,7 @@ export function RequestSampleForm() {
     const failedCount = valid.length - succeededKeys.size;
 
     if (succeededKeys.size) {
-      toast.success(`Sent ${succeededKeys.size} request${succeededKeys.size === 1 ? "" : "s"} to Store${failedCount ? ` (${failedCount} failed — still in the form below)` : ""}.`);
+      toast.success(`Sent ${succeededKeys.size} request${succeededKeys.size === 1 ? "" : "s"} to Warehouse${failedCount ? ` (${failedCount} failed — still in the form below)` : ""}.`);
     }
     if (!succeededKeys.size) return setError("Could not send any of the requests.");
 
@@ -499,7 +499,7 @@ export function RequestSampleForm() {
       }
       const result = await importRequests.mutateAsync({ rows: parsedRows });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
-      toast.success(`Sent ${result.requestsCreated} request${result.requestsCreated === 1 ? "" : "s"} to Store${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
+      toast.success(`Sent ${result.requestsCreated} request${result.requestsCreated === 1 ? "" : "s"} to Warehouse${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
     }
@@ -511,7 +511,7 @@ export function RequestSampleForm() {
     <div className="card space-y-3 p-4 lg:col-span-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="label flex items-center gap-1.5">
-          <Send className="h-3.5 w-3.5" /> Request Samples from Store
+          <Send className="h-3.5 w-3.5" /> Request Samples from Warehouse
         </p>
         <div className="flex gap-2">
           <button type="button" className="btn-ghost btn-sm" onClick={downloadRndSampleRequestImportTemplate} title="Download a blank template with the correct columns">

@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { CardScanner } from "../components/CardScanner";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { fromVisitingCards } from "../lib/backTo";
 import * as XLSX from "xlsx";
 import { AlertTriangle, ArrowLeft, Check, Contact, Download, Loader2, Pencil, ScanLine, Search, Trash2, UserPlus, Users, X } from "lucide-react";
 import { ApiError } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { useLeads } from "../lib/leadHooks";
 import {
   CARD_CATEGORIES,
@@ -12,6 +14,7 @@ import {
   findDuplicateCards,
   useBusinessCards,
   useCardPhoto,
+  useClearDuplicate,
   useCreateCard,
   useCreateCustomerFromCard,
   useDeleteCard,
@@ -28,20 +31,28 @@ import { useTileFilters } from "../lib/tileFilters";
 import { AGING_FIELD, TileFilterBar, type FilterField } from "../components/TileFilterBar";
 import { agingDays, inAgingBuckets } from "../components/AgingCell";
 
-// BD's visiting-card book. Take a photo of a card (or pick one from the gallery): the server reads it, BD checks every field and saves it.
-// The fields the reader was not sure about are highlighted. A card can also be typed in by hand. Saved cards can be searched, filtered by
-// category, downloaded as Excel, added to the phone's contacts, or turned into a Customer.
+// The visiting-card book. Every department collects cards (an event, say): take a photo of a card (or pick one from the gallery), the server reads it in
+// the background, and the collector checks the fields and saves it. The fields the reader was not sure about are highlighted. A card can also be typed in
+// by hand. Each person sees their own cards; BD sees everyone's (with who collected each and the possible duplicates), makes leads from them (handing
+// each to whoever follows it up) and turns them into Customers. Cards can be filtered, downloaded as Excel and added to the phone's contacts.
 
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "-");
-type Tab = "scan" | "saved" | "verify";
+type Tab = "scan" | "saved" | "verify" | "duplicates";
 
 export function VisitingCardsPage() {
+  const { hasRole } = useAuth();
+  const canFollow = hasRole("BD"); // BD (and Admin): everyone's cards, leads, customers, duplicates
   const { data, isLoading } = useBusinessCards();
-  const [tab, setTab] = useState<Tab>("scan");
+  // The tab is in the address (?tab=saved), so coming back from a lead (or a refresh) lands on the same list, not on the scanner
+  const [params, setParams] = useSearchParams();
+  const tab: Tab = (["saved", "verify", "duplicates"] as const).find((t) => t === params.get("tab")) ?? "scan";
+  const setTab = (t: Tab) => setParams(t === "scan" ? {} : { tab: t });
   const [editing, setEditing] = useState<BusinessCard | null>(null);
+  const [creating, setCreating] = useState(false);
   const cards = data ?? [];
   const saved = cards.filter((c) => c.status === "VERIFIED");
-  const toVerify = cards.filter((c) => c.status === "NEEDS_VERIFY");
+  const toVerify = cards.filter((c) => c.status === "NEEDS_VERIFY" || c.status === "READING");
+  const duplicates = cards.filter((c) => !!c.duplicateOf);
 
   // The scanner (like the phone app) is the front door: scan, check, save as a lead. The list of saved cards is behind "View Saved Cards".
   if (tab === "scan") {
@@ -50,7 +61,17 @@ export function VisitingCardsPage() {
         <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
           <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Dashboard
         </Link>
-        <CardScanner onShowSaved={() => setTab("saved")} />
+        <CardScanner
+          onShowSaved={() => setTab("saved")}
+          onOpenCard={(c) => {
+            setTab(c.status === "VERIFIED" ? "saved" : "verify");
+            setEditing(c);
+          }}
+          onNewCard={() => {
+            setTab("saved");
+            setCreating(true);
+          }}
+        />
       </div>
     );
   }
@@ -58,11 +79,12 @@ export function VisitingCardsPage() {
   const tabs: [Tab, string, number][] = [
     ["saved", "Saved cards", saved.length],
     ["verify", "Needs verify", toVerify.length],
+    ...(canFollow ? ([["duplicates", "Possible duplicates", duplicates.length]] as [Tab, string, number][]) : []),
   ];
 
   return (
     <div className="space-y-5">
-      <button type="button" onClick={() => { setTab("scan"); setEditing(null); }} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
+      <button type="button" onClick={() => { setTab("scan"); setEditing(null); setCreating(false); }} className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-500 hover:text-brand-600">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2.5} /> Scan a card
       </button>
       <div className="flex items-center gap-3.5">
@@ -70,9 +92,10 @@ export function VisitingCardsPage() {
           <ScanLine className="h-5 w-5" strokeWidth={2} />
         </div>
         <div>
-          <h1 className="text-2xl font-black tracking-tight text-slate-900">Saved cards</h1>
+          <h1 className="text-2xl font-black tracking-tight text-slate-900">Visiting cards</h1>
           <p className="text-sm text-slate-500">
-            {saved.length} saved{toVerify.length ? `, ${toVerify.length} waiting to be verified` : ""}. A card you save is also a lead: open it from the Leads list.
+            {saved.length} saved{toVerify.length ? `, ${toVerify.length} waiting to be verified` : ""}.{" "}
+            {canFollow ? "Make a lead from a card and choose who follows it up." : "Cards you collect: BD follows them up."}
           </p>
         </div>
       </div>
@@ -85,6 +108,7 @@ export function VisitingCardsPage() {
             onClick={() => {
               setTab(k);
               setEditing(null);
+              setCreating(false);
             }}
             className={`pill cursor-pointer ${k === tab ? "border-brand-300 bg-brand-50 text-brand-700 ring-2 ring-brand-200" : "border-slate-200 bg-white text-slate-500 hover:bg-slate-50"}`}
           >
@@ -93,12 +117,14 @@ export function VisitingCardsPage() {
         ))}
       </div>
 
-      {editing ? (
+      {creating ? (
+        <CardForm key="new" card={null} initialCategories={[]} onClose={() => setCreating(false)} onSaved={() => setCreating(false)} />
+      ) : editing ? (
         <CardForm key={editing.id} card={editing} initialCategories={editing.categories} onClose={() => setEditing(null)} onSaved={() => setEditing(null)} />
       ) : isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : (
-        <CardList rows={tab === "saved" ? saved : toVerify} mode={tab} onOpen={(c) => setEditing(c)} />
+        <CardList rows={tab === "saved" ? saved : tab === "duplicates" ? duplicates : toVerify} mode={tab as "saved" | "verify" | "duplicates"} canFollow={canFollow} onOpen={(c) => setEditing(c)} />
       )}
     </div>
   );
@@ -148,7 +174,7 @@ function CategoryPicker({ value, onChange }: { value: string[]; onChange: (v: st
 // Step 2: check the details and save (also used to edit a saved card, or to type one in)
 // ---------------------------------------------------------------------------------------------------------------------
 
-type FormState = { name: string; designation: string; company: string; phones: string[]; email: string; website: string; address: string; gstNo: string; notes: string; categories: string[] };
+type FormState = { name: string; designation: string; company: string; phones: string[]; email: string; website: string; address: string; gstNo: string; notes: string; categories: string[]; event: string };
 type FieldKey = "name" | "designation" | "company" | "phone" | "email" | "website" | "address" | "gstNo";
 
 function CardForm({ card, initialCategories, onClose, onSaved }: { card: BusinessCard | null; initialCategories: string[]; onClose: () => void; onSaved: (c: BusinessCard) => void }) {
@@ -168,6 +194,7 @@ function CardForm({ card, initialCategories, onClose, onSaved }: { card: Busines
     gstNo: card?.gstNo ?? "",
     notes: card?.notes ?? "",
     categories: initialCategories,
+    event: card?.event ?? "",
   });
   const [focus, setFocus] = useState<{ key: FieldKey; index?: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -245,6 +272,8 @@ function CardForm({ card, initialCategories, onClose, onSaved }: { card: Busines
         <div>
           <p className="text-lg font-black text-slate-900">{card ? (isVerified ? "Card details" : "Verify details") : "New card"}</p>
           {card && !isVerified && card.source === "SCAN" && <p className="text-xs font-bold text-amber-600">The reader can make mistakes: please check every field. Highlighted ones it was not sure about.</p>}
+          {card?.readError && <p className="text-xs font-bold text-rose-600">{card.readError}</p>}
+          {card?.duplicateOf && <p className="text-xs font-bold text-amber-700">Possible duplicate of {card.duplicateOf.name || card.duplicateOf.company} (added by {card.duplicateOf.addedBy}). Save it anyway if it is a different person.</p>}
         </div>
         <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100" aria-label="Close">
           <X className="h-5 w-5" />
@@ -316,6 +345,10 @@ function CardForm({ card, initialCategories, onClose, onSaved }: { card: Busines
               <label className="label">Notes</label>
               <input className="field" placeholder="e.g. met at the expo, wants Whey samples" value={f.notes} onChange={(e) => set("notes", e.target.value)} />
             </div>
+            <div>
+              <label className="label">Event</label>
+              <input className="field" placeholder="e.g. Expo Delhi 2026" value={f.event} onChange={(e) => set("event", e.target.value)} />
+            </div>
           </div>
 
           <div>
@@ -379,9 +412,10 @@ function CardForm({ card, initialCategories, onClose, onSaved }: { card: Busines
 // Saved cards / Needs verify
 // ---------------------------------------------------------------------------------------------------------------------
 
-function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "saved" | "verify"; onOpen: (c: BusinessCard) => void }) {
+function CardList({ rows: all, mode, canFollow, onOpen }: { rows: BusinessCard[]; mode: "saved" | "verify" | "duplicates"; canFollow: boolean; onOpen: (c: BusinessCard) => void }) {
   const toast = useToast();
   const del = useDeleteCard();
+  const clearDuplicate = useClearDuplicate();
   const makeCustomer = useCreateCustomerFromCard();
   const navigate = useNavigate();
   const { data: leads } = useLeads();
@@ -394,7 +428,13 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
     { key: "name", label: "Name", options: distinct(all.map((c) => c.name)) },
     { key: "designation", label: "Designation", options: distinct(all.map((c) => c.designation)) },
     { key: "category", label: "Category", options: distinct(all.flatMap((c) => c.categories)) },
-    { key: "addedBy", label: "Added by", options: distinct(all.map((c) => c.createdByName)) },
+    { key: "event", label: "Event", options: distinct(all.map((c) => c.event)) },
+    ...(canFollow
+      ? [
+          { key: "addedBy", label: "Collected by", options: distinct(all.map((c) => c.createdByName)) },
+          { key: "department", label: "Department", options: distinct(all.map((c) => c.collectedBy.department)) },
+        ]
+      : []),
     AGING_FIELD,
   ];
 
@@ -406,6 +446,8 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
         (!picked("name").length || picked("name").includes(c.name)) &&
         (!picked("designation").length || picked("designation").includes(c.designation)) &&
         (!picked("category").length || c.categories.some((x) => picked("category").includes(x))) &&
+        (!picked("event").length || picked("event").includes(c.event)) &&
+        (!picked("department").length || picked("department").includes(c.collectedBy.department)) &&
         (!picked("addedBy").length || picked("addedBy").includes(c.createdByName)) &&
         inAgingBuckets(agingDays(c.createdAt), picked("aging")) &&
         (!dateFrom || c.createdAt.slice(0, 10) >= dateFrom) &&
@@ -429,11 +471,14 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
       "GST No.": c.gstNo,
       Categories: c.categories.join(", "),
       Notes: c.notes,
-      "Added By": c.createdByName,
+      Event: c.event,
+      "Collected By": c.createdByName,
+      Department: c.collectedBy.department,
+      "Possible Duplicate Of": c.duplicateOf ? `${c.duplicateOf.name || c.duplicateOf.company} (${c.duplicateOf.addedBy})` : "",
       "Added On": day(c.createdAt),
     }));
     const wb = XLSX.utils.book_new();
-    addReportSheet(wb, "Visiting Cards", "FLS BD: Visiting Cards", describeFilters(filters, fields, "Added"), lines);
+    addReportSheet(wb, "Visiting Cards", "FLS Visiting Cards", describeFilters(filters, fields, "Added"), lines);
     XLSX.writeFile(wb, stampedName("FLS_Visiting_Cards"));
   }
 
@@ -447,6 +492,15 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
     }
   }
 
+  async function notDuplicate(c: BusinessCard) {
+    try {
+      await clearDuplicate.mutateAsync(c.id);
+      toast.success("Marked as a different person.");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not update the card");
+    }
+  }
+
   async function toCustomer(c: BusinessCard) {
     try {
       const r = await makeCustomer.mutateAsync(c.id);
@@ -456,7 +510,7 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
     }
   }
 
-  if (all.length === 0) return <EmptyState icon={Contact} title={mode === "saved" ? "No saved cards yet" : "Nothing waiting to be verified"} hint={mode === "saved" ? "Scan a card from the “Scan / Add” tab." : "A scanned card you did not finish shows here."} />;
+  if (all.length === 0) return <EmptyState icon={Contact} title={mode === "saved" ? "No saved cards yet" : mode === "duplicates" ? "No possible duplicates" : "Nothing waiting to be verified"} hint={mode === "saved" ? "Scan a card from the “Scan / Add” tab." : mode === "duplicates" ? "A card with the same email or phone as an earlier one shows here." : "A scanned card you did not finish shows here."} />;
 
   return (
     <div className="space-y-3">
@@ -483,6 +537,8 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
                   <th className="px-3 py-2.5">Phone</th>
                   <th className="px-3 py-2.5">Email</th>
                   <th className="px-3 py-2.5">Categories</th>
+                  <th className="px-3 py-2.5">Event</th>
+                  {canFollow && <th className="px-3 py-2.5">Collected by</th>}
                   <th className="px-3 py-2.5">Added</th>
                   <th className="sticky right-0 bg-white px-3 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.15)]">Action</th>
                 </tr>
@@ -491,9 +547,21 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
                 {pg.rows.map((c) => (
                   <tr key={c.id} className="border-b border-slate-50">
                     <td className="px-3 py-2.5 font-bold text-slate-800">
-                      <button type="button" className="text-left hover:text-brand-600" onClick={() => onOpen(c)}>
-                        {c.name || "(no name)"}
-                      </button>
+                      {c.status === "READING" ? (
+                        <span className="inline-flex items-center gap-1.5 text-slate-400">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Reading…
+                        </span>
+                      ) : (
+                        <button type="button" className="text-left hover:text-brand-600" onClick={() => onOpen(c)}>
+                          {c.name || "(no name)"}
+                        </button>
+                      )}
+                      {c.duplicateOf && (
+                        <span className="mt-0.5 block text-micro font-bold text-amber-700">
+                          Possible duplicate of {c.duplicateOf.name || c.duplicateOf.company} · added by {c.duplicateOf.addedBy}
+                        </span>
+                      )}
+                      {c.readError && <span className="mt-0.5 block whitespace-normal text-micro font-normal text-rose-600">{c.readError}</span>}
                     </td>
                     <td className="px-3 py-2.5 text-slate-600">{c.designation || "-"}</td>
                     <td className="px-3 py-2.5 text-slate-700">
@@ -503,14 +571,22 @@ function CardList({ rows: all, mode, onOpen }: { rows: BusinessCard[]; mode: "sa
                     <td className="px-3 py-2.5 font-mono text-slate-600">{c.phones.join(", ") || "-"}</td>
                     <td className="px-3 py-2.5 text-slate-600">{c.email || "-"}</td>
                     <td className="px-3 py-2.5 text-slate-600">{c.categories.join(", ") || "-"}</td>
+                    <td className="px-3 py-2.5 text-slate-600">{c.event || "-"}</td>
+                    {canFollow && (
+                      <td className="px-3 py-2.5 text-slate-600">
+                        {c.collectedBy.name}
+                        <span className="block text-micro text-slate-400">{c.collectedBy.department}</span>
+                      </td>
+                    )}
                     <td className="px-3 py-2.5 text-slate-600">{day(c.createdAt)}</td>
                     <td className="sticky right-0 bg-white px-3 py-2.5 text-right shadow-[-8px_0_8px_-8px_rgba(15,23,42,0.15)]">
                       <RowActionMenu
                         actions={[
-                          { label: mode === "verify" ? "Check & verify" : "View / edit", icon: mode === "verify" ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : <Pencil className="h-3.5 w-3.5" strokeWidth={2.5} />, onClick: () => onOpen(c) },
-                          { label: "Save to phone contacts", icon: <Contact className="h-3.5 w-3.5" strokeWidth={2.5} />, hidden: mode === "verify", onClick: () => downloadVcf(c) },
-                          { label: "Create customer", icon: <UserPlus className="h-3.5 w-3.5" strokeWidth={2.5} />, tone: "text-emerald-700", hidden: mode === "verify" || !!c.customerId || !c.company, onClick: () => void toCustomer(c) },
-                          { label: leadOfCard.has(c.id) ? "Open lead" : "Make lead", icon: <Users className="h-3.5 w-3.5" strokeWidth={2.5} />, tone: "text-brand-700", hidden: mode === "verify", onClick: () => navigate(leadOfCard.has(c.id) ? `/leads/${leadOfCard.get(c.id)}` : `/leads/new?card=${c.id}`) },
+                          { label: c.status !== "VERIFIED" ? "Check & verify" : "View / edit", icon: c.status !== "VERIFIED" ? <Check className="h-3.5 w-3.5" strokeWidth={2.5} /> : <Pencil className="h-3.5 w-3.5" strokeWidth={2.5} />, hidden: c.status === "READING", onClick: () => onOpen(c) },
+                          { label: "Save to phone contacts", icon: <Contact className="h-3.5 w-3.5" strokeWidth={2.5} />, hidden: c.status !== "VERIFIED", onClick: () => downloadVcf(c) },
+                          { label: "Create customer", icon: <UserPlus className="h-3.5 w-3.5" strokeWidth={2.5} />, tone: "text-emerald-700", hidden: !canFollow || c.status !== "VERIFIED" || !!c.customerId || !c.company, onClick: () => void toCustomer(c) },
+                          { label: leadOfCard.has(c.id) ? "Open lead" : "Make lead", icon: <Users className="h-3.5 w-3.5" strokeWidth={2.5} />, tone: "text-brand-700", hidden: !canFollow || c.status !== "VERIFIED", onClick: () => navigate(leadOfCard.has(c.id) ? `/leads/${leadOfCard.get(c.id)}` : `/leads/new?card=${c.id}`, fromVisitingCards("saved")) },
+                          { label: "Not a duplicate", icon: <X className="h-3.5 w-3.5" strokeWidth={2.5} />, hidden: !canFollow || !c.duplicateOf, onClick: () => void notDuplicate(c) },
                           { label: "Delete", icon: <Trash2 className="h-3.5 w-3.5" strokeWidth={2.5} />, tone: "text-rose-600", onClick: () => void remove(c) },
                         ]}
                       />

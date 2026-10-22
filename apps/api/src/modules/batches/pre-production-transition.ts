@@ -73,7 +73,7 @@ export async function transitionPreProductionStage(params: {
       return {
         ok: false,
         status: 409,
-        error: `The material for ${coverage.releasedQty} ${coverage.unit} has not all reached the Day Store yet: ${shown}${missing.length > 4 ? ` and ${missing.length - 4} more` : ""}.`,
+        error: `The material for ${coverage.releasedQty} ${coverage.unit} has not all reached the Store yet: ${shown}${missing.length > 4 ? ` and ${missing.length - 4} more` : ""}.`,
         details: { materialShortfall: missing },
       };
     }
@@ -191,7 +191,7 @@ export async function transitionPreProductionStage(params: {
         if (stillShort.length > 0) {
           throw new RouteError(
             409,
-            `The Plant and its Day Store together don't hold enough: ${stillShort.map((s) => `${nameById.get(s.itemId)} (needs ${s.requestedQty}, Plant has ${s.available}, Day Store has ${Math.round((shelf.get(s.itemId)?.onHand ?? 0) * 1000) / 1000})`).join("; ")}`,
+            `The Plant and its Store together don't hold enough: ${stillShort.map((s) => `${nameById.get(s.itemId)} (needs ${s.requestedQty}, Plant has ${s.available}, Store has ${Math.round((shelf.get(s.itemId)?.onHand ?? 0) * 1000) / 1000})`).join("; ")}`,
           );
         }
         for (const s of shortfalls) {

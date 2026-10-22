@@ -8,6 +8,7 @@ import { NewProductionBatchForm, ProductionBatchesTable } from "../pages/PreProd
 import { PRE_PRODUCTION_STAGE_LABEL, PRE_PRODUCTION_STAGE_ROLE } from "../lib/preProductionStage";
 import { batchYieldPct, materialUsed, q3, sumMaterials, UTILIZATION_COLUMNS, yieldPct } from "../lib/utilization";
 import { ItemPicker } from "./ItemPicker";
+import { UtilizationFillForm } from "./UtilizationFillForm";
 import { useToast } from "./Toast";
 import { ApiError } from "../lib/api";
 import type { PreProductionStageId, ProductionBatch, UtilizationItem } from "../lib/types";
@@ -27,6 +28,7 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
   const run = row.run;
   const ready = runIsReady(row);
   const { data: batches } = useProductionBatches(ready ? run!.id : undefined);
+  const { hasRole } = useAuth();
 
   if (!run) {
     return (
@@ -45,7 +47,7 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
         <p>
           Batches open once Line Clearance is approved. The run is at <b>{PRE_PRODUCTION_STAGE_LABEL[stage] ?? stage}</b>
-          {owner ? <> (with {owner === "STORE" ? "the Day Store" : owner === "QA_QC" ? "QA" : "Production"})</> : null}.
+          {owner ? <> (with {owner === "STORE" ? "the Store" : owner === "QA_QC" ? "QA" : "Production"})</> : null}.
         </p>
         <Link to={`/pre-productions/${run.id}`} className="font-bold text-brand-700 hover:underline">
           Open the run →
@@ -71,11 +73,21 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
       </p>
       {shown.length === 0 && <p className="text-xs text-slate-400">{flow ? "No batch is cleared for production yet. A batch comes here once its indent, batch number, Dispensing and Line Clearance are done." : "No batches yet."}</p>}
       {shown.length > 0 && <ProductTotal row={row} columns={[...UTILIZATION_COLUMNS]} />}
-      <ProductionBatchesTable preProductionId={run.id} batches={shown} renderUtilization={(b) => <UtilizationSheet row={row} batch={b} category="RM" />} />
+      <ProductionBatchesTable
+        preProductionId={run.id}
+        batches={shown}
+        renderUtilization={(b) =>
+          flow ? (
+            b.utilization ? <UtilizationFillForm batch={b} category="RM" plantId={row.plant?.id} canEdit={hasRole("PRODUCTION") && b.status !== "COMPLETED"} /> : <p className="text-xs text-slate-400">Loading…</p>
+          ) : (
+            <UtilizationSheet row={row} batch={b} category="RM" />
+          )
+        }
+      />
       {flow && <PreparingBatches row={row} />}
       {!flow && row.unassigned.length > 0 && (
         <div className="overflow-hidden rounded-xl border border-dashed border-slate-300 bg-white">
-          <p className="border-b border-slate-100 bg-slate-50/80 px-3 py-2 text-xs font-bold text-slate-500">Given at Dispensing, not booked to a batch <span className="font-normal text-slate-400">(the material the Day Store gave this run as a whole)</span></p>
+          <p className="border-b border-slate-100 bg-slate-50/80 px-3 py-2 text-xs font-bold text-slate-500">Given at Dispensing, not booked to a batch <span className="font-normal text-slate-400">(the material the Store gave this run as a whole)</span></p>
           <UtilizationTable materials={row.unassigned} columns={[...UTILIZATION_COLUMNS]} />
         </div>
       )}
@@ -89,7 +101,7 @@ export function BatchPanel({ row, onStart, starting, only }: { row: PlanBoardRow
   );
 }
 
-const PREP_STAGE_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue (Production)", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing (Day Store)", RECEIVE: "Receive (Production)" };
+const PREP_STAGE_LABEL: Record<string, string> = { INDENT_ISSUE: "Indent Issue (Production)", BATCH_NO: "Batch No (R&D)", DISPENSING: "Dispensing (Store)", RECEIVE: "Receive (Production)" };
 
 // New Plan's Batches dropdown: the run is started, and Production divides the plan into batches here (just the quantity of each). Each batch
 // then goes through its own Indent Issue, Batch No, Dispensing and Line Clearance on those tiles.
@@ -287,7 +299,7 @@ function UsageForm({ row, batchId, onDone, initialItemId, planItems }: { row: Pl
     };
     try {
       await record.mutateAsync(body);
-      toast.success(n(qty.returnedQty) > 0 ? "Logged. The leftover stays in the Plant stock: send it back to the Day Store from Plant Stock." : "Logged.");
+      toast.success(n(qty.returnedQty) > 0 ? "Logged. The leftover stays in the Plant stock: send it back to the Store from Plant Stock." : "Logged.");
       setItemId("");
       setQty({ consumedQty: "", wastedQty: "", rejectedQty: "", sampleQty: "", returnedQty: "" });
       onDone();
@@ -483,7 +495,7 @@ export function UtilizationSheet({ row, batch, category }: { row: PlanBoardRow; 
             <th className="px-3 py-2 text-right">B · Waste</th>
             <th className="px-3 py-2 text-right">C · Reject</th>
             <th className="px-3 py-2 text-right">D · Sample</th>
-            <th className="px-3 py-2 text-right" title="Leftover: stays in the Plant stock until it is sent back to the Day Store">E · Leftover</th>
+            <th className="px-3 py-2 text-right" title="Leftover: stays in the Plant stock until it is sent back to the Store">E · Leftover</th>
             <th className="px-3 py-2 text-right">Difference</th>
           </tr>
         </thead>

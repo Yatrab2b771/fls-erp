@@ -183,7 +183,7 @@ reworksRouter.post("/:id/materials", requireRole("PRODUCTION"), validateBody(mat
     if (!item) throw new RouteError(400, "Unknown inventory item");
     const free = (await plantFreeQty(run.plantId, [item.id])).get(item.id) ?? 0;
     if (input.quantity > free + EPS) {
-      throw new RouteError(409, `Only ${round3(Math.max(0, free))} ${item.unit ?? ""} of ${item.name} is free at the Plant. Request extra material from the Day Store (it goes on to the Warehouse and PPIC only if they are short too).`);
+      throw new RouteError(409, `Only ${round3(Math.max(0, free))} ${item.unit ?? ""} of ${item.name} is free at the Plant. Request extra material from the Store (it goes on to the Warehouse and PPIC only if they are short too).`);
     }
     await prisma.batchMaterialConsumption.create({ data: { preProductionId: run.id, itemId: item.id, quantity: input.quantity, unit: item.unit ?? "Kg", purpose: "PRODUCTION", createdById: req.user!.id, reworkId: row.id } });
     if (row.status === "PLANNED" && row.shift && row.manpowerCount && row.startAt) await prisma.rework.update({ where: { id: row.id }, data: { status: "IN_PROGRESS" } });

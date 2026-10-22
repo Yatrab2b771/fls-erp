@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vitest";
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { authHeader, createUser } from "./helpers";
+import { authHeader, createUser, receiveAcceptedStock } from "./helpers";
+import { prisma } from "../../src/common/lib/prisma";
 
 const app = createApp();
 
 /** Gives an item real, accepted stock via the Opening Stock path — the simplest way to get live stock-on-hand without going through QC. */
 async function giveStock(storeToken: string, itemId: string, quantity: number) {
-  await request(app)
-    .post("/api/inventory/transactions")
-    .set(authHeader(storeToken))
-    .send({ itemId, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity, isOpeningStock: true });
+  await receiveAcceptedStock(storeToken, { itemId, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity, isOpeningStock: true });
 }
 
 describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manual availability step)", () => {
@@ -125,10 +123,18 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     const afterSend = await request(app).get("/api/notifications").set(authHeader(purchaseToken));
     expect(afterSend.body.notifications.some((n: { title: string }) => n.title.includes("Notify-Purchase Protein"))).toBe(true);
 
-    // A second send still works (no state change to block a repeat) —
-    // but once fully covered, it's refused.
+    // Purchase is told once: a second send for the same shortfall is refused (409)...
+    const again = await request(app).post(`/api/inventory/requirements/${created.body.id}/notify-purchase`).set(authHeader(ppicToken));
+    expect(again.status).toBe(409);
+    expect(again.body.error).toMatch(/already been notified/);
+
+    // ...and a requirement that live stock fully covers has nothing to send (400).
+    const covered = await request(app)
+      .post("/api/inventory/requirements")
+      .set(authHeader(ppicToken))
+      .send({ date: "2026-08-21", category: "RM", itemId: item.body.id, unit: "Kg", requiredQty: 20 });
     await giveStock(storeToken, item.body.id, 100);
-    const nothingToSend = await request(app).post(`/api/inventory/requirements/${created.body.id}/notify-purchase`).set(authHeader(ppicToken));
+    const nothingToSend = await request(app).post(`/api/inventory/requirements/${covered.body.id}/notify-purchase`).set(authHeader(ppicToken));
     expect(nothingToSend.status).toBe(400);
   });
 
@@ -272,10 +278,7 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
     // A fully-covered requirement — the import should treat it like the
     // single-item route does (409 there) and just skip it as unmatched.
     const jar = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "PM", name: "Jar 1Kg" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: jar.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Count", quantity: 500, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: jar.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Count", quantity: 500, isOpeningStock: true });
     await request(app).post("/api/inventory/requirements").set(authHeader(ppicToken)).send({ date: "2026-08-21", category: "PM", itemId: jar.body.id, unit: "Count", requiredQty: 200 });
 
     const imported = await request(app)
@@ -339,17 +342,17 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
 
     // Opening Stock on an item nobody asked for — crosses 0 -> positive, but no requirement exists, so silence.
     const otherItem = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Creatine" });
-    await request(app)
-      .post("/api/inventory/transactions")
-      .set(authHeader(storeToken))
-      .send({ itemId: otherItem.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 100, isOpeningStock: true });
+    await receiveAcceptedStock(storeToken, { itemId: otherItem.body.id, type: "RECEIVED", date: "2026-08-21", unit: "Kg", quantity: 100, isOpeningStock: true });
     const productionInboxAfter = await request(app).get("/api/notifications").set(authHeader(productionToken));
     expect(productionInboxAfter.body.notifications.some((n: { title: string }) => n.title === "Creatine now available")).toBe(false);
   });
 
-  it('"Stock Now Available" also fires from a bulk Opening Stock import, summed per item across rows', async () => {
+  // A bulk import's Received rows go through inward QC like any other (there is no Opening Stock shortcut): nothing is stock, so nothing is
+  // "now available", until R&D approves them.
+  it('a bulk import of receipts raises "Stock Now Available" only once R&D approves them', async () => {
     const { token: ppicToken } = await createUser(["PPIC"]);
     const { token: storeToken } = await createUser(["STORE"]);
+    const { token: rndToken } = await createUser(["RND"]);
     const item = await request(app).post("/api/inventory/items").set(authHeader(storeToken)).send({ category: "RM", name: "Whey Protein" });
 
     await request(app)
@@ -369,10 +372,15 @@ describe("Pre-Inventory — S1-S4 requirement planning loop (live stock, no manu
         ],
       });
 
+    const before = await request(app).get("/api/notifications").set(authHeader(ppicToken));
+    expect(before.body.notifications.some((n: { title: string }) => n.title === "Whey Protein now available")).toBe(false);
+
+    const rows = await prisma.inventoryTransaction.findMany({ where: { itemId: item.body.id, type: "RECEIVED", receiptStatus: "PENDING_QC" } });
+    expect(rows).toHaveLength(2);
+    for (const row of rows) await request(app).patch(`/api/inventory/transactions/${row.id}/qc`).set(authHeader(rndToken)).send({ samplingDate: "2026-10-07", action: "APPROVE" });
+
     const ppicInbox = await request(app).get("/api/notifications").set(authHeader(ppicToken));
-    const notif = ppicInbox.body.notifications.find((n: { title: string }) => n.title === "Whey Protein now available");
-    expect(notif).toBeTruthy();
-    expect(notif.body).toContain("100"); // both rows' quantities summed before the crossing check
+    expect(ppicInbox.body.notifications.filter((n: { title: string }) => n.title === "Whey Protein now available")).toHaveLength(1); // once, when stock first crossed 0
   });
 
   it("GET /vendors is open to STORE and PURCHASE, and lists vendor names from both Material Received and logged POs", async () => {

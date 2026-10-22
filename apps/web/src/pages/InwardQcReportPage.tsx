@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { Link } from "react-router-dom";
 import { ArrowLeft, ClipboardCheck, Download, Lock } from "lucide-react";
 import { useAuth } from "../lib/auth";
@@ -48,7 +49,7 @@ export function InwardQcReportPage() {
     .filter((t) => {
       if (picked("po").length && !picked("po").includes(poOf(t) ?? "")) return false;
       if (picked("item").length && !picked("item").includes(t.item.name)) return false;
-      if (picked("type").length && !picked("type").includes(t.item.category === "RM" ? "Raw Material" : "Packaging Material")) return false;
+      if (picked("type").length && !picked("type").includes(materialKindName(t.item.category))) return false;
       if (picked("vendor").length && !picked("vendor").includes(t.vendorName ?? "")) return false;
       if (statusPicks.length && !statusPicks.includes(t.receiptStatus as InventoryReceiptStatus)) return false;
       if (!inAgingBuckets(agingDays(t.date), picked("aging"))) return false;

@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { AlarmClock, ArrowLeft, Download, PackageOpen, Truck } from "lucide-react";
@@ -89,7 +90,7 @@ export function IncomingMaterialPage() {
         <EmptyState
           icon={PackageOpen}
           title={isFiltered ? "No matches" : "Nothing incoming"}
-          hint={isFiltered ? "Nothing matches these filters." : "Material shows here once Purchase logs a PI against a shortfall, until Store receives it."}
+          hint={isFiltered ? "Nothing matches these filters." : "Material shows here once Purchase logs a PI against a shortfall, until Warehouse receives it."}
           accent="brand"
         />
       ) : (
@@ -111,7 +112,7 @@ export function IncomingMaterialPage() {
               {paged.rows.map((r) => (
                 <tr key={r.lineId} className="transition hover:bg-slate-50">
                   <td className="px-4 py-3 font-bold text-slate-700">{r.itemName}</td>
-                  <td className="px-4 py-3 text-slate-500">{r.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                  <td className="px-4 py-3 text-slate-500">{materialKindName(r.category)}</td>
                   <td className="px-4 py-3 font-mono text-slate-700">
                     {r.quantity} {r.unit}
                     {r.quantity < r.orderedQty && <span className="ml-1.5 font-sans text-micro text-slate-400">of {r.orderedQty}</span>}

@@ -2433,7 +2433,11 @@ export interface HandoverRow {
   dispatchedQty: number;
   completedAt: string | null;
   fgStoreAt: string | null;
-  handedOverAt: string | null;
+  /** At QA's packaging gate, waiting for QA's approval (Production's Packaging save sent it there). */
+  waitingForQa: boolean;
+  /** Approved by QA; waiting for Production to hand it over to the Day Store. */
+  awaitingStoreHandover: boolean;
+  sentForQaAt: string | null;
 }
 
 export function useHandoverBoard(options?: { enabled?: boolean }) {
@@ -2445,13 +2449,15 @@ export function useHandoverBoard(options?: { enabled?: boolean }) {
   });
 }
 
-export function useHandOverBatch() {
+/** Production hands QA-approved packed goods over to the Day Store (they are then its finished goods). */
+export function useHandOverToStore() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (batchId: string) => api(`/api/production-batches/${batchId}/handover`, { method: "POST" }),
+    mutationFn: (batchId: string) => api(`/api/production-batches/${batchId}/handover-to-store`, { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["production-batches"] });
       qc.invalidateQueries({ queryKey: ["pre-productions"] });
+      qc.invalidateQueries({ queryKey: ["fg"] });
     },
   });
 }
@@ -3240,7 +3246,7 @@ export interface BatchPrepRow {
   dispensedAt: string | null;
   grnNo: string | null;
   /** Dispensing only: this batch's materials and whether the Plant and its Day Store hold them. */
-  requirements?: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean; dispensed: boolean; refusedNote: string | null }[];
+  requirements?: { itemId: string; itemName: string; category: string; unit: string; requiredQty: number; givenQty: number; remainingQty: number; dayStoreQty: number; plantFreeQty: number; enough: boolean; dispensed: boolean; refusedNote: string | null }[];
   /** Receive only: what the Day Store sent to the Plant for this batch and Production has not confirmed yet, material by material. */
   receiveLines?: { lineId: string; itemId: string; itemName: string; category: string; unit: string; plannedQty: number | null; givenQty: number; sentQty: number }[];
 }
@@ -3373,11 +3379,11 @@ export function useReturnFromPlant() {
 // ---------------------------------------------------------------------------
 
 export interface BatchReportMaterial extends BoardMaterial {
-  category: "RM" | "PM";
+  category: "RM" | "PM" | "OTHER";
   inPlan: boolean;
   requiredQty: number;
   givenQty: number;
-  /** Extra material asked from the Day Store for this product (not per batch), and how much of it was issued. */
+  /** Extra material asked from the Store for this batch (older requests: for its product), and how much of it was issued. */
   extraRequestedQty: number;
   extraIssuedQty: number;
 }
@@ -3429,6 +3435,8 @@ export interface BatchReportDetail {
   packWastageQty: number | null;
   fgStoreReceivedDate: string | null;
   fgQaStatus: string | null;
+  /** When Production handed the QA-approved packed goods over to the Day Store (null until then). */
+  handedToStoreAt: string | null;
   handedOverToDispatchAt: string | null;
   invoiceDate: string | null;
   dispatchDate: string | null;

@@ -1,3 +1,4 @@
+import { materialKindName } from "./materialKind";
 import * as XLSX from "xlsx";
 import { api } from "./api";
 import type { AddOnPlanDetail } from "./types";
@@ -114,7 +115,7 @@ export async function exportPlansBoard(rows: PlanBoardRow[], filterText = "None 
     ...head(r),
     "Batch No": b,
     Material: m.itemName,
-    Category: m.category === "RM" ? "Raw Material" : "Packaging Material",
+    Category: materialKindName(m.category),
     Unit: m.unit,
     "A - Production": q3(m.consumedQty),
     "B - Wastage": q3(m.wastedQty),

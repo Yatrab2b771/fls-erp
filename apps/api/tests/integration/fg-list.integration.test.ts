@@ -29,7 +29,7 @@ describe("Finished Goods list - batches at or past the FG Store with stock left"
     const { token, user } = await createUser(["STORE"]);
     await fgBatch(bd, user.id, { po: "FGL-PO-1", product: "FGL Cocoa Powder", customer: "FGL Customer A", plant: "FGL Plant 1", stage: "DISPATCH_PLAN", produced: 1000, dispatched: 300, fgDate: daysAgo(3), batchNo: "FGL-B1" });
     await fgBatch(bd, user.id, { po: "FGL-PO-2", product: "FGL Whey", customer: "FGL Customer B", stage: "DISPATCH_PLAN", produced: 500, fgDate: daysAgo(20), batchNo: "FGL-B2" });
-    await fgBatch(bd, user.id, { po: "FGL-PO-3", product: "FGL Still Packing", customer: "FGL Customer C", stage: "FG_STORE", produced: 400, batchNo: "FGL-B3" }); // finished goods still at the Day Store: not Warehouse stock
+    await fgBatch(bd, user.id, { po: "FGL-PO-3", product: "FGL Still Packing", customer: "FGL Customer C", stage: "FG_STORE", produced: 400, batchNo: "FGL-B3" }); // finished goods still at the Store: not Warehouse stock
     await fgBatch(bd, user.id, { po: "FGL-PO-4", product: "FGL All Gone", customer: "FGL Customer D", stage: "DISPATCH_PLAN", produced: 200, dispatched: 200, fgDate: daysAgo(5), batchNo: "FGL-B4" }); // nothing left
 
     const res = await request(app).get("/api/inventory/fg-list?customer=FGL%20Customer%20A&customer=FGL%20Customer%20B&customer=FGL%20Customer%20C&customer=FGL%20Customer%20D").set(authHeader(token));

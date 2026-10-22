@@ -177,7 +177,7 @@ export function MaterialRequestsPage({ plan = false }: { plan?: boolean }) {
             <p className="text-sm text-slate-500">
               {paged.total.toLocaleString()} request{paged.total === 1 ? "" : "s"}
               {isFiltered ? " match" : ""}{" "}
-              {plan ? "— urgent: Day Stores asking for material a production plan needs. Late ones come first." : "from Day Stores and the R&D Store."}
+              {plan ? "— urgent: Stores asking for material a production plan needs. Late ones come first." : "from Stores and the R&D Store."}
             </p>
           </div>
         </div>
@@ -191,7 +191,7 @@ export function MaterialRequestsPage({ plan = false }: { plan?: boolean }) {
       {paged.isLoading ? (
         <div className="skeleton h-64 w-full" />
       ) : paged.total === 0 ? (
-        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "No requests yet"} hint={isFiltered ? "Nothing matches these filters." : "Requests show here once a Day Store or the R&D Store asks the Warehouse for material."} accent="brand" />
+        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "No requests yet"} hint={isFiltered ? "Nothing matches these filters." : "Requests show here once a Store or the R&D Store asks the Warehouse for material."} accent="brand" />
       ) : (
         <div className="card overflow-x-auto">
           <table className="w-full whitespace-nowrap text-xs">
@@ -320,11 +320,17 @@ export function MaterialRequestsPage({ plan = false }: { plan?: boolean }) {
                             <label className="label">Date</label>
                             <input className="field" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} />
                           </div>
-                          <label className="flex cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600" title="Won't count at the store until it confirms the delivery">
-                            <input type="checkbox" className="h-3.5 w-3.5" checked={transit} onChange={(e) => setTransit(e.target.checked)} />
-                            Track as in-transit
-                          </label>
-                          <span className="pb-2 text-tiny text-slate-500">Goes straight into {r.requesterName}.</span>
+                          {r.source === "store" ? (
+                            <span className="pb-2 text-tiny font-bold text-amber-700">Goes to {r.requesterName} as In Transit: it counts in their stock once they receive it.</span>
+                          ) : (
+                            <>
+                              <label className="flex cursor-pointer items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600" title="Won't count at the store until it confirms the delivery">
+                                <input type="checkbox" className="h-3.5 w-3.5" checked={transit} onChange={(e) => setTransit(e.target.checked)} />
+                                Track as in-transit
+                              </label>
+                              <span className="pb-2 text-tiny text-slate-500">Goes straight into {r.requesterName}.</span>
+                            </>
+                          )}
                           <button type="button" className="btn-ghost btn-sm" onClick={closePanel}>
                             Cancel
                           </button>

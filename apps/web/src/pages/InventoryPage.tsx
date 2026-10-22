@@ -1,3 +1,4 @@
+import { materialKindName } from "../lib/materialKind";
 import { useMemo, useRef, useState, type ChangeEvent } from "react";
 import { ReceiveDialog, type ReceiveResult } from "../components/ReceiveDialog";
 import { Link } from "react-router-dom";
@@ -602,7 +603,6 @@ export function InventoryPage() {
   const [importDayStoreId, setImportDayStoreId] = useState("");
   // Same toggle as LogEntryForm's own, applied to the whole sheet —
   // Issued to Store only.
-  const [importTransitTracked, setImportTransitTracked] = useState(false);
   const { data: dayStores } = useDayStores();
   const { data: plants } = usePlants();
   const { data: warehouses } = useWarehouses();
@@ -634,7 +634,7 @@ export function InventoryPage() {
   const isTransitTab = tab === "transit";
   const isReconciliationTab = tab === "reconciliation";
   const materialTab = !dispatchTab && !isRequestsTab && !isTransitTab && !isReconciliationTab && tab !== "stock";
-  const canLogDirectly = materialTab && tab !== "RECEIVED"; // Issued to Day Store only — Received now goes through the QC/accept flow too, but Store still logs the initial entry via this same form
+  const canLogDirectly = materialTab && tab !== "RECEIVED"; // Issued to Store only — Received now goes through the QC/accept flow too, but Store still logs the initial entry via this same form
 
   const { data: transit, isLoading: transitLoading } = useTransit({ enabled: isTransitTab });
   const confirmDelivery = useConfirmDelivery();
@@ -860,7 +860,7 @@ export function InventoryPage() {
       }
 
       const dayStoreId = tab === "ISSUED_DAY_STORE" && importDayStoreId ? importDayStoreId : undefined;
-      const transitTracked = tab === "ISSUED_DAY_STORE" && importTransitTracked;
+      const transitTracked = tab === "ISSUED_DAY_STORE"; // what the Warehouse issues to a Store is always in transit
       const result = await importTxns.mutateAsync({ type: tab as InventoryTxnType, rows, dayStoreId, isTransitTracked: transitTracked || undefined });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
       const hasPerRowStores = tab === "ISSUED_DAY_STORE" && rows.some((r) => r.dayStoreName);
@@ -897,7 +897,7 @@ export function InventoryPage() {
 
       const result = await importRequests.mutateAsync({ rows });
       const skippedNote = skipped ? ` (${skipped} row${skipped === 1 ? "" : "s"} skipped — missing a required field)` : "";
-      toast.success(`Sent ${result.requestsCreated} request${result.requestsCreated === 1 ? "" : "s"} to Store for approval${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
+      toast.success(`Sent ${result.requestsCreated} request${result.requestsCreated === 1 ? "" : "s"} to Warehouse for approval${result.itemsCreated ? `, ${result.itemsCreated} new item(s)` : ""}${skippedNote}.`);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not import spreadsheet");
     }
@@ -1006,10 +1006,9 @@ export function InventoryPage() {
               )}
               {tab === "ISSUED_DAY_STORE" && <QuickAddDayStore onCreated={setImportDayStoreId} />}
               {tab === "ISSUED_DAY_STORE" && (
-                <label className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-tiny font-bold text-slate-600" title="Won't count at the Store until confirmed arrived — see the Transit tab.">
-                  <input type="checkbox" className="h-3 w-3" checked={importTransitTracked} onChange={(e) => setImportTransitTracked(e.target.checked)} />
-                  Track as In-Transit
-                </label>
+                <span className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-tiny font-bold text-amber-700" title="Counts at the Store only once the Store has received it (Stock Received)">
+                  In Transit until the Store receives it
+                </span>
               )}
             </>
           )}
@@ -1185,7 +1184,7 @@ export function InventoryPage() {
           <div className="w-56">
             <ItemPicker items={(stock ?? []).map((s) => ({ id: s.item.id, name: s.item.name, code: s.item.code }))} value={locationReportItemId} onChange={setLocationReportItemId} placeholder="— Pick an RM/PM item —" />
           </div>
-          <button className="btn-ghost" disabled={locationReportLoading} onClick={handleExportItemLocation} title="Download this item's stock split across Warehouse, every Day Store, and every Plant">
+          <button className="btn-ghost" disabled={locationReportLoading} onClick={handleExportItemLocation} title="Download this item's stock split across Warehouse, every Store, and every Plant">
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> {locationReportLoading ? "Loading…" : "By Location"}
           </button>
         </div>
@@ -1547,7 +1546,7 @@ function TransactionTable({
       <EmptyState
         icon={ArrowUpFromLine}
         title={`No ${TXN_TYPE_LABEL[type].toLowerCase()} entries yet`}
-        hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."}
+        hint={canWrite ? "Log one above to get started." : "Ask Warehouse to log the first entry."}
         accent="brand"
       />
     );
@@ -1639,7 +1638,7 @@ function DispatchTable({
       <EmptyState
         icon={FileText}
         title={`No ${DISPATCH_TYPE_LABEL[type].toLowerCase()} entries yet`}
-        hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."}
+        hint={canWrite ? "Log one above to get started." : "Ask Warehouse to log the first entry."}
         accent="brand"
       />
     );
@@ -1939,7 +1938,7 @@ function ExpiredQuarantineTable({ rows, canQc }: { rows: QuarantineRow[]; canQc:
                 <td className="px-4 py-3">
                   <span className="pill border-rose-200 bg-rose-50 text-rose-700">Lab Test</span>
                 </td>
-                <td className="px-4 py-3 text-slate-500">{txn.item.category === "RM" ? "Raw Material" : "Packaging Material"}</td>
+                <td className="px-4 py-3 text-slate-500">{materialKindName(txn.item.category)}</td>
                 <td className="px-4 py-3 text-right font-mono text-slate-700">
                   {txn.quantity} {txn.unit}
                 </td>
@@ -1988,7 +1987,7 @@ function ReceivedList({
   if (loading) return <SkeletonRows rows={4} cols={1} />;
   if (empty)
     return (
-      <EmptyState icon={ArrowDownToLine} title="No material received entries yet" hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."} accent="brand" />
+      <EmptyState icon={ArrowDownToLine} title="No material received entries yet" hint={canWrite ? "Log one above to get started." : "Ask Warehouse to log the first entry."} accent="brand" />
     );
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
@@ -2071,7 +2070,7 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
     if (!samplingDate) return toast.error("Enter the sampling date first.");
     try {
       await qcReview.mutateAsync({ id: txn.id, action: "APPROVE", samplingDate });
-      toast.success("QC approved — ready for Store to accept.");
+      toast.success("QC approved — ready for Warehouse to accept.");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not approve QC");
     }
@@ -2094,7 +2093,7 @@ export function ReceivedCard({ txn, canQc, canWrite, canDebitNote = false }: { t
     if (!samplingDate) return setError("Enter the sampling date first.");
     try {
       await qcReview.mutateAsync({ id: txn.id, action: "HOLD", samplingDate, note: note.trim() });
-      toast.success("Parked on hold — Store's been notified.");
+      toast.success("Parked on hold — Warehouse's been notified.");
       setShowNoteForm(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not hold QC");
@@ -2445,7 +2444,7 @@ function FgTransferList({
   canInvoice: boolean;
 }) {
   if (loading) return <SkeletonRows rows={4} cols={1} />;
-  if (empty) return <EmptyState icon={Truck} title="No FG transfer entries yet" hint={canWrite ? "Log one above to get started." : "Ask Store to log the first entry."} accent="brand" />;
+  if (empty) return <EmptyState icon={Truck} title="No FG transfer entries yet" hint={canWrite ? "Log one above to get started." : "Ask Warehouse to log the first entry."} accent="brand" />;
   if (!rows?.length) return <EmptyState icon={Warehouse} title="No matching entries" hint="Try a different search." accent="slate" />;
 
   return (
@@ -2523,7 +2522,7 @@ export function FgTransferCard({
     if (!note.trim()) return setError("A note is required when holding QC.");
     try {
       await qcReview.mutateAsync({ id: transfer.id, action: "HOLD", note: note.trim() });
-      toast.success("Parked on hold — Store's been notified.");
+      toast.success("Parked on hold — Warehouse's been notified.");
       setShowNoteForm(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not hold QC");
@@ -2758,7 +2757,7 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
         note: note.trim() || undefined,
         plantId: purpose === "ISSUED_PRODUCTION" && plantId ? plantId : undefined,
       });
-      toast.success("Request sent to Store for approval.");
+      toast.success("Request sent to Warehouse for approval.");
       onDone();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not submit request");
@@ -2771,7 +2770,7 @@ function NewInventoryRequestForm({ onDone }: { onDone: () => void }) {
     <div className="card animate-slide-up space-y-5 p-5 sm:p-6">
       <div>
         <h3 className="text-sm font-bold text-slate-800">Raise a Material Request</h3>
-        <p className="mt-0.5 text-xs text-slate-500">Store reviews this before it becomes an issue — nothing leaves the shelf until it's approved.</p>
+        <p className="mt-0.5 text-xs text-slate-500">Warehouse reviews this before it becomes an issue — nothing leaves the shelf until it's approved.</p>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -2970,7 +2969,7 @@ function MaterialReconciliationPanel({ loading, rows, empty }: { loading: boolea
   return (
     <div className="card overflow-hidden">
       <p className="border-b border-slate-100 bg-slate-50/60 px-4 py-2.5 text-xs text-slate-500">
-        Variance = (Received + R&amp;D bought + Corrections) − Accounted For. Material that came back from R&amp;D or a Day Store is not counted as received again; material still on its way, expired in Quarantine, or lost in transit is shown in its own column. It should be 0.
+        Variance = (Received + R&amp;D bought + Corrections) − Accounted For. Material that came back from R&amp;D or a Store is not counted as received again; material still on its way, expired in Quarantine, or lost in transit is shown in its own column. It should be 0.
       </p>
       <div className="overflow-x-auto">
         <table className="table-modern w-full">
@@ -3049,7 +3048,7 @@ function MaterialRequestsPanel({
       <EmptyState
         icon={ClipboardList}
         title="No material requests yet"
-        hint={canReview ? "PPIC raises a request before stock can be issued to Production." : "Raise one above to request stock from Store."}
+        hint={canReview ? "PPIC raises a request before stock can be issued to Production." : "Raise one above to request stock from Warehouse."}
         accent="brand"
       />
     );
@@ -3296,7 +3295,7 @@ function RequestCard({ request, canReview, isOwner }: { request: InventoryReques
                     issueSource === s ? "bg-white text-slate-900 shadow-soft" : "text-slate-500 hover:text-slate-800"
                   }`}
                 >
-                  {s === "CENTRAL" ? "Central / Warehouse Stock" : forProduction ? "A Day Store (to its own Plant)" : "A Store"}
+                  {s === "CENTRAL" ? "Central / Warehouse Stock" : forProduction ? "A Store (to its own Plant)" : "A Store"}
                 </button>
               ))}
             </div>

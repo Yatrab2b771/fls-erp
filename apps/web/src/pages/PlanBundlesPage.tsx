@@ -201,7 +201,7 @@ export function PlanBundlesPage() {
                 <th className="px-4 py-2.5">Material</th>
                 <th className="px-4 py-2.5">Category</th>
                 <th className="px-4 py-2.5 text-right">Plans</th>
-                <th className="px-4 py-2.5 text-right">Day Stores</th>
+                <th className="px-4 py-2.5 text-right">Stores</th>
                 <th className="px-4 py-2.5 text-right">Owed (all plans)</th>
                 <th className="px-4 py-2.5 text-right">Warehouse Stock</th>
                 <th className="px-4 py-2.5 text-right">Action</th>
@@ -486,7 +486,7 @@ export function PlanBundlesPage() {
       ) : view === "material" && groups.length > 0 ? (
         renderMaterials()
       ) : bundles.length === 0 ? (
-        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "No plan requests"} hint={isFiltered ? "Nothing matches these filters." : "Requests show here when a Day Store asks the Warehouse for material a production plan needs."} accent="brand" />
+        <EmptyState icon={PackageOpen} title={isFiltered ? "No matches" : "No plan requests"} hint={isFiltered ? "Nothing matches these filters." : "Requests show here when a Store asks the Warehouse for material a production plan needs."} accent="brand" />
       ) : (
         <div className="space-y-4">
           {pg.rows.map(renderBundle)}

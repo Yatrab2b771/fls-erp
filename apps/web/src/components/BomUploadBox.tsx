@@ -160,7 +160,7 @@ export function BomUploadBox({ mode, onSaved }: { mode: Mode; onSaved?: () => vo
         }
         saved += 1;
       }
-      toast.success(`${saved} BOM(s) saved as a new version.${unlinked ? ` ${unlinked} row(s) are not in the Store list yet - link them on the page.` : ""}`);
+      toast.success(`${saved} BOM(s) saved as a new version.${unlinked ? ` ${unlinked} row(s) are not in the Warehouse list yet - link them on the page.` : ""}`);
       reset();
       onSaved?.();
     } catch (err) {
@@ -257,7 +257,7 @@ export function BomUploadBox({ mode, onSaved }: { mode: Mode; onSaved?: () => vo
                   </div>
                   <p className="mt-1 text-tiny text-slate-500">
                     {p.rows.length} rows
-                    {unlinked > 0 ? `, ${unlinked} not in the Store list` : ", all linked to Store items"}
+                    {unlinked > 0 ? `, ${unlinked} not in the Warehouse list` : ", all linked to Warehouse items"}
                     {"packSize" in p && p.packSize ? ` - pack ${p.packSize}` : ""}
                     {"packingConfig" in p && p.packingConfig ? ` (${p.packingConfig})` : ""}
                     {"batchSize" in p && p.batchSize ? ` - batch ${p.batchSize} ${p.kind === "RM_UNIT" ? "gummies" : "Kg"}` : ""}

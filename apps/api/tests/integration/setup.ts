@@ -22,10 +22,33 @@ type PrismaClientModule = typeof import("@prisma/client");
 let prisma: PrismaModule["prisma"];
 let RoleName: PrismaClientModule["RoleName"];
 
+// What the Warehouse issues to a Store is in transit until the Store receives it. Most tests are about something else (dispensing, plans, stock ...) and
+// start from "the Store has it", as they always did: they would each have to confirm the arrival first. So, unless a test says otherwise, those issues arrive
+// the moment they are created. A test of the receiving step itself (or of transit) switches this off for itself:
+//   (globalThis as { __flsStoreReceivesAtOnce?: boolean }).__flsStoreReceivesAtOnce = false;
+// It is back on at the start of every test.
+type StoreReceivesFlag = { __flsStoreReceivesAtOnce?: boolean };
+let hooked = false;
+
 async function init() {
   if (prisma) return;
   ({ prisma } = await import("../../src/common/lib/prisma"));
   ({ RoleName } = await import("@prisma/client"));
+  if (!hooked) {
+    hooked = true;
+    prisma.$use(async (params, next) => {
+      if (params.model === "InventoryTransaction" && (params.action === "create" || params.action === "createMany") && (globalThis as StoreReceivesFlag).__flsStoreReceivesAtOnce !== false) {
+        const data = params.args.data as Record<string, unknown> | Record<string, unknown>[];
+        for (const row of Array.isArray(data) ? data : [data]) {
+          if (row.type === "ISSUED_DAY_STORE" && row.isTransitTracked === true && !row.deliveredAt) {
+            row.deliveredAt = new Date();
+            row.deliveredById = row.createdById ?? null;
+          }
+        }
+      }
+      return next(params);
+    });
+  }
 }
 
 async function assertConnectedToTestDatabase() {
@@ -44,6 +67,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  (globalThis as StoreReceivesFlag).__flsStoreReceivesAtOnce = true;
   await init();
   await assertConnectedToTestDatabase();
   await prisma.$transaction([
