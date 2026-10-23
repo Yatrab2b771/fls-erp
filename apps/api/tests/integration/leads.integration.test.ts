@@ -268,4 +268,36 @@ describe("Leads handed to any department", () => {
     expect((await call(bd, "patch", `/api/leads/${id}`, { pocId: productionUser.id })).status).toBe(400); // a switched-off user cannot follow it up
     void bdUser;
   });
+
+  it("BD can delete a lead that has gone nowhere, never one with a meeting or a conversion; a department that was handed it cannot", async () => {
+    const { token: bd } = await createUser(["BD"]);
+    const { token: other, user: otherUser } = await createUser(["PRODUCTION"]);
+    const call = (token: string, method: "get" | "post" | "patch" | "delete", path: string, body?: object) => {
+      const r = request(app)[method](path).set(authHeader(token));
+      return body ? r.send(body) : r;
+    };
+    const add = async () => (await call(bd, "post", "/api/leads", lead())).body.id as string;
+
+    // Handed to a department: that person works the lead but cannot delete it; BD can
+    const first = await add();
+    expect((await call(bd, "patch", `/api/leads/${first}`, { pocId: otherUser.id })).status).toBe(200);
+    expect((await call(other, "delete", `/api/leads/${first}`)).status).toBe(403);
+    expect((await call(bd, "delete", `/api/leads/${first}`)).status).toBe(204);
+    expect((await call(bd, "get", `/api/leads/${first}`)).status).toBe(404);
+    expect((await call(bd, "delete", `/api/leads/${first}`)).status).toBe(404);
+    expect((await prisma.auditLog.findMany({ where: { action: "lead.deleted", entityId: first } })).length).toBe(1);
+
+    // A meeting is a history: the lead stays
+    const talked = await add();
+    expect((await call(bd, "post", `/api/leads/${talked}/meetings`, { meetingDate: new Date().toISOString(), notes: "Talked", statusAfter: "WARM", nextFollowUpAt: inDays(3) })).status).toBe(201);
+    const refused = await call(bd, "delete", `/api/leads/${talked}`);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/Dropped instead/);
+    expect((await call(bd, "get", `/api/leads/${talked}`)).status).toBe(200);
+
+    // A converted lead stays too
+    const converted = await add();
+    await prisma.lead.update({ where: { id: converted }, data: { status: "CONVERTED" } });
+    expect((await call(bd, "delete", `/api/leads/${converted}`)).status).toBe(409);
+  });
 });

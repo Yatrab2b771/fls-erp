@@ -18,6 +18,7 @@ import { CARD_CATEGORY_TO_FORMAT, CLOSED_STATUSES, CUSTOMER_TYPES, LEAD_SOURCES,
  *   POST  /                 add a lead (by hand, or from a visiting card: businessCardId)
  *   GET   /:id              one lead with all its meetings (newest first) and its moved follow-up dates
  *   PATCH /:id              change the lead's details or its status
+ *   DELETE /:id             delete a lead that has gone nowhere (BD / Admin): no meeting, no sample, not converted; anything with a history is marked Dropped instead
  *   POST  /:id/meetings     log a meeting: notes, status afterwards, next follow-up (not for Dropped), closure month
  *   POST  /:id/reschedule   move the next follow-up date, with the reason
  *   POST  /:id/convert      Converted: only after a sample of the lead was approved, with the estimated order size. The lead then waits for its PO.
@@ -477,6 +478,24 @@ leadsRouter.patch("/:id", validateBody(updateSchema), async (req: AuthedRequest<
     await recordAudit({ actorId: req.user!.id, action: "lead.updated", entityType: "Lead", entityId: lead.id, metadata: status !== lead.status || newOwner ? { ...(status !== lead.status ? { status } : {}), ...(newOwner ? { assignedTo: newOwner.id } : {}) } : undefined });
     if (newOwner) await notifyUser(newOwner.id, { title: `Lead for you: ${updated.brandName}`, body: `${await nameOf(req.user!.id)} gave you this lead to follow up.`, link: `/leads/${lead.id}` }).catch((err) => req.log?.error({ err }, "notify failed: lead.assigned"));
     res.json(await withExtra(updated));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Delete a lead that has gone nowhere (a test card, a wrong scan): BD (or Admin), and only while it has no meeting, no sample and was never converted.
+// A lead with a history is kept (mark it Dropped). The visiting card it came from stays and can be made a lead again.
+leadsRouter.delete("/:id", bdOnly, async (req: AuthedRequest<{ id: string }>, res, next) => {
+  try {
+    const lead = await prisma.lead.findFirst({ where: { id: req.params.id, ...visible(req) }, select: { id: true, brandName: true, status: true, customerId: true, _count: { select: { meetings: true } } } });
+    if (!lead) return res.status(404).json({ error: "Lead not found" });
+    const samples = await prisma.sampleRequest.count({ where: { leadId: lead.id } });
+    if (lead._count.meetings > 0 || samples > 0 || lead.status === "CONVERTED" || lead.customerId) {
+      return res.status(409).json({ error: "This lead has a history (a meeting, a sample or a conversion), so it cannot be deleted. Mark it Dropped instead." });
+    }
+    await prisma.lead.delete({ where: { id: lead.id } });
+    await recordAudit({ actorId: req.user!.id, action: "lead.deleted", entityType: "Lead", entityId: lead.id, metadata: { brandName: lead.brandName, status: lead.status } });
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

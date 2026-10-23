@@ -207,6 +207,12 @@ export function useUpdateLead() {
   return useMutation({ mutationFn: ({ id, ...body }: { id: string } & LeadInput) => api<Lead>(`/api/leads/${id}`, { method: "PATCH", body }), onSuccess: done });
 }
 
+/** Delete a lead that has gone nowhere (no meeting, no sample, not converted). */
+export function useDeleteLead() {
+  const done = useInvalidate();
+  return useMutation({ mutationFn: (id: string) => api<void>(`/api/leads/${id}`, { method: "DELETE" }), onSuccess: done });
+}
+
 export function useAddMeeting() {
   const done = useInvalidate();
   return useMutation({ mutationFn: ({ id, ...body }: { id: string } & MeetingInput) => api<LeadMeeting>(`/api/leads/${id}/meetings`, { method: "POST", body }), onSuccess: done });

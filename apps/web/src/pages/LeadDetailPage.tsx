@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, CalendarClock, Lock, Pencil, Plus } from "lucide-react";
 import { ApiError } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -19,6 +19,7 @@ import {
   toLocalInput,
   useAddMeeting,
   useConvertLead,
+  useDeleteLead,
   useLead,
   useLeadAssignees,
   useRescheduleLead,
@@ -30,6 +31,7 @@ import {
 import { LeadKindFields, LeadSourceSelect } from "../components/LeadPickers";
 import { useCardPhoto } from "../lib/businessCardHooks";
 import { SAMPLE_STATUS_LABEL, SAMPLE_STATUS_PILL, TEMPLATE_LABEL, sampleNo, useSampleRequests } from "../lib/sampleRequestHooks";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { useToast } from "../components/Toast";
 
@@ -38,10 +40,23 @@ import { useToast } from "../components/Toast";
 const MODES: LeadMeetingMode[] = ["CALL", "VIDEO", "IN_PERSON"];
 const errorText = (err: unknown) => (err instanceof ApiError ? err.message : "Could not save");
 
-/** BD / Admin: hand the lead to whoever should follow it up (any department). */
-function HandOver({ lead }: { lead: LeadDetail }) {
+/** BD / Admin: hand the lead to whoever should follow it up (any department), or delete one that has gone nowhere (no meeting, not converted). */
+function HandOver({ lead, onDeleted }: { lead: LeadDetail; onDeleted: () => void }) {
   const toast = useToast();
   const update = useUpdateLead();
+  const remove = useDeleteLead();
+  const [deleting, setDeleting] = useState(false);
+  const canDelete = lead.meetings.length === 0 && lead.status !== "CONVERTED";
+  async function del() {
+    try {
+      await remove.mutateAsync(lead.id);
+      toast.success("Lead deleted.");
+      onDeleted();
+    } catch (err) {
+      setDeleting(false);
+      toast.error(errorText(err));
+    }
+  }
   const { data: people } = useLeadAssignees();
   const [pick, setPick] = useState("");
   async function hand() {
@@ -68,6 +83,24 @@ function HandOver({ lead }: { lead: LeadDetail }) {
       <button type="button" className="btn-ghost btn-sm" disabled={!pick || update.isPending} onClick={hand}>
         Hand over
       </button>
+      {canDelete && (
+        <>
+          <button type="button" className="btn-ghost btn-sm text-rose-600" disabled={remove.isPending} onClick={() => setDeleting(true)} title="Delete this lead: only while it has no meeting, no sample and is not converted">
+            Delete lead
+          </button>
+          <ConfirmDialog
+            open={deleting}
+            title="Delete this lead?"
+            message={`${lead.brandName} is removed for good. Its visiting card stays in Visiting Cards. A lead with meetings cannot be deleted: mark it Dropped instead.`}
+            confirmLabel="Delete lead"
+            cancelLabel="Keep it"
+            tone="danger"
+            busy={remove.isPending}
+            onConfirm={del}
+            onCancel={() => setDeleting(false)}
+          />
+        </>
+      )}
     </div>
   );
 }
@@ -77,6 +110,7 @@ export function LeadDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [params, setParams] = useSearchParams();
   const back = useBackTo({ from: "/leads", label: "Leads" }); // where this lead was opened from
+  const navigate = useNavigate();
   const { data: lead, isLoading, error, refetch, isFetching } = useLead(id);
   const [showMeeting, setShowMeeting] = useState(false);
   const [moving, setMoving] = useState(false);
@@ -127,7 +161,7 @@ export function LeadDetailPage() {
           <p className="text-micro font-black uppercase tracking-wider text-slate-400">Lead · added {fmtDay(lead.createdAt)}{lead.businessCardId ? " from a visiting card" : ""} · POC {lead.pocName}</p>
           <h1 className="text-2xl font-black tracking-tight text-slate-900">{lead.brandName}</h1>
           <p className="text-sm text-slate-600">{[lead.contactPerson, lead.designation, lead.phones.join(", "), lead.email].filter(Boolean).join(" · ") || "No contact details yet"}</p>
-          {hasRole("BD") && <HandOver lead={lead} />}
+          {hasRole("BD") && <HandOver lead={lead} onDeleted={() => navigate(back.from)} />}
           </div>
         </div>
         <StatusBox lead={lead} />
